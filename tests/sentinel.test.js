@@ -97,3 +97,31 @@ test('нормалізація текстів працює для дат і guid
   const normalized = normalizeForFingerprint('2026-08-06T15:01:03.122475Z guid 0c1d2e3f-1111-2222-3333-444455556666 num 123456')
   assert.doesNotMatch(normalized, /2026|0c1d2e3f|123456/)
 })
+
+test('відкладений відбиток не довбить desk повторно у вікні backoff', async () => {
+  const { LogSentinel } = await import('../server/log-sentinel.js')
+  const sentinel = new LogSentinel({
+    containers: [],
+    dataDirectory: '/tmp',
+    maxTasksPerHour: 0,
+    suppressBackoffMs: 60_000,
+  })
+  sentinel.state = { fingerprints: {}, created: [] }
+  sentinel.saveState = async () => {}
+
+  let deskLookups = 0
+  sentinel.findTaskByMarker = async () => { deskLookups += 1; return null }
+  sentinel.createDeskTask = async () => { throw new Error('не має створюватись') }
+
+  const container = { name: 'api-1', project: 'console', label: 'API' }
+  const lines = ['12:00:00.000 ERROR щось зламалось']
+
+  await sentinel.handleGroup(container, lines)
+  await sentinel.handleGroup(container, lines)
+  await sentinel.handleGroup(container, lines)
+
+  const [entry] = Object.values(sentinel.state.fingerprints)
+  assert.equal(deskLookups, 1)
+  assert.equal(entry.suppressed, true)
+  assert.equal(entry.count >= 2, true)
+})

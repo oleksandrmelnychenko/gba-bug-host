@@ -166,6 +166,7 @@ export class LogSentinel {
     matcher = new RegExp(process.env.SENTINEL_MATCH ?? '\\bERROR\\b|\\bFATAL\\b|Unhandled|Unobserved|Exception|Traceback|⨯'),
     maxTasksPerHour = Number.parseInt(process.env.SENTINEL_MAX_PER_HOUR ?? '4', 10),
     recurCooldownMs = Number.parseInt(process.env.SENTINEL_RECUR_COOLDOWN_MS ?? String(6 * 60 * 60 * 1000), 10),
+    suppressBackoffMs = Number.parseInt(process.env.SENTINEL_SUPPRESS_BACKOFF_MS ?? String(15 * 60 * 1000), 10),
     buildTag = process.env.APP_BUILD_NUMBER ?? 'local',
   } = {}) {
     this.dockerSocket = dockerSocket
@@ -176,6 +177,7 @@ export class LogSentinel {
     this.matcher = matcher
     this.maxTasksPerHour = maxTasksPerHour
     this.recurCooldownMs = recurCooldownMs
+    this.suppressBackoffMs = suppressBackoffMs
     this.buildTag = buildTag
     this.state = { fingerprints: {}, created: [] }
     this.queue = Promise.resolve()
@@ -270,9 +272,18 @@ export class LogSentinel {
     if (known) {
       known.lastSeen = now
       known.count = (known.count ?? 0) + 1
+
+      // Той самий відбиток, уже відкладений через ліміт або кулдаун: мовчки
+      // рахуємо повтори, поки не мине backoff — інакше повторюваний потік
+      // помилок довбить desk-API та засмічує лог кожні кілька секунд.
+      if (known.suppressed && now - (known.suppressedAt ?? 0) < this.suppressBackoffMs) {
+        await this.saveState()
+        return
+      }
     }
 
     const activeTask = await this.findTaskByMarker(fingerprint)
+      ?? (known?.taskId ? await this.findTaskById(known.taskId) : null)
     if (activeTask && activeTask.status !== 'done') {
       await this.saveState()
       return
@@ -285,7 +296,13 @@ export class LogSentinel {
     this.state.created = (this.state.created ?? []).filter((timestamp) => now - timestamp < 60 * 60 * 1000)
     if (this.state.created.length >= this.maxTasksPerHour) {
       console.log(`[sentinel] ${container.name}: ліміт ${this.maxTasksPerHour}/год вичерпано, помилку ${fingerprint} відкладено`)
-      this.state.fingerprints[fingerprint] = { ...(known ?? {}), lastSeen: now, suppressed: true }
+      this.state.fingerprints[fingerprint] = {
+        ...(known ?? {}),
+        lastSeen: now,
+        suppressed: true,
+        suppressedAt: now,
+        suppressedCount: ((known?.suppressedCount ?? 0) + 1),
+      }
       await this.saveState()
       return
     }
@@ -293,7 +310,13 @@ export class LogSentinel {
     const lastCreatedForContainer = (this.state.lastCreatedByContainer ?? {})[container.name] ?? 0
     if (now - lastCreatedForContainer < 3 * 60 * 1000) {
       console.log(`[sentinel] ${container.name}: кулдаун після попередньої задачі, помилку ${fingerprint} відкладено`)
-      this.state.fingerprints[fingerprint] = { ...(known ?? {}), lastSeen: now, suppressed: true }
+      this.state.fingerprints[fingerprint] = {
+        ...(known ?? {}),
+        lastSeen: now,
+        suppressed: true,
+        suppressedAt: now,
+        suppressedCount: ((known?.suppressedCount ?? 0) + 1),
+      }
       await this.saveState()
       return
     }
@@ -310,6 +333,13 @@ export class LogSentinel {
     }
     await this.saveState()
     console.log(`[sentinel] ${container.name}: створено ${task.id} (${fingerprint}) — ${draft.title}`)
+  }
+
+  async findTaskById(taskId) {
+    const response = await fetch(`${this.deskBaseUrl}/api/tasks`)
+    if (!response.ok) return null
+    const tasks = await response.json()
+    return tasks.find((task) => task.id === taskId) ?? null
   }
 
   async findTaskByMarker(fingerprint) {
