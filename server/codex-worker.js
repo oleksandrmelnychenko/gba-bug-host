@@ -204,8 +204,10 @@ export class CodexWorker {
   }
 
   start() {
-    const staleBefore = new Date(Date.now() - this.timeoutMs - 60_000).toISOString()
-    this.store.recoverInterruptedAgentRuns(staleBefore)
+    const requeued = this.store.requeueOrphanedRuns()
+    if (requeued.length > 0) {
+      console.log(`[Codex worker] повернуто в чергу після рестарту: ${requeued.join(', ')}`)
+    }
     this.timer = setInterval(() => void this.tick(), this.pollIntervalMs)
     void this.tick()
   }

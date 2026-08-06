@@ -1366,6 +1366,80 @@ function AgentConclusion({
   )
 }
 
+function AgentConclusionListDialog({
+  open,
+  tasks,
+  onClose,
+  onOpenConclusion,
+}: {
+  open: boolean
+  tasks: Task[]
+  onClose: () => void
+  onOpenConclusion: (task: Task) => void
+}) {
+  useEffect(() => {
+    if (!open) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [open, onClose])
+
+  if (!open) return null
+
+  const finished = tasks
+    .filter((task) => task.agentRun && ['completed', 'needs_review', 'blocked', 'failed'].includes(task.agentRun.status))
+    .sort((a, b) => Date.parse(b.agentRun!.finishedAt ?? b.agentRun!.updatedAt) - Date.parse(a.agentRun!.finishedAt ?? a.agentRun!.updatedAt))
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <section
+        className="task-dialog conclusion-list-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="conclusion-list-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="dialog-header">
+          <div>
+            <span className="eyebrow">Конвеєр</span>
+            <h2 id="conclusion-list-title">Висновки агента ({finished.length})</h2>
+          </div>
+          <button className="icon-button" onClick={onClose} aria-label="Закрити"><X size={19} /></button>
+        </div>
+
+        <div className="conclusion-list-body">
+          {finished.length ? finished.map((task) => (
+            <button
+              type="button"
+              className={`conclusion-list-row conclusion-list-row-${task.agentRun!.status}`}
+              key={`list-${task.id}`}
+              onClick={() => onOpenConclusion(task)}
+            >
+              <span className="conclusion-list-head">
+                <span className="task-id">{task.id}</span>
+                <span className={`agent-table-state agent-run-${task.agentRun!.status}`}>
+                  <Bot size={11} /> {agentRunMeta[task.agentRun!.status].shortLabel}
+                </span>
+                <span className="conclusion-list-project">{projectMeta[task.project ?? 'console'].label}</span>
+              </span>
+              <strong>{task.title}</strong>
+              <span className="conclusion-list-summary">
+                {(task.agentRun!.summary || task.agentRun!.error || '—').slice(0, 180)}
+              </span>
+            </button>
+          )) : <p className="pipeline-empty">Ще немає завершених прогонів.</p>}
+        </div>
+
+        <div className="dialog-actions">
+          <button className="button button-secondary" onClick={onClose}>Закрити</button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
 function AgentConclusionDialog({
   task,
   onClose,
@@ -1545,6 +1619,7 @@ function PipelineView({
   onReorder,
   onStop,
   onResume,
+  onOpenConclusionList,
 }: {
   tasks: Task[]
   reorderingId: string | null
@@ -1553,6 +1628,7 @@ function PipelineView({
   onReorder: (taskId: string, direction: 'up' | 'down' | 'top') => void
   onStop: (taskId: string, revert: boolean) => void
   onResume: (taskId: string) => void
+  onOpenConclusionList: () => void
 }) {
   const running = tasks
     .filter((task) => task.agentRun?.status === 'running')
@@ -1703,12 +1779,15 @@ function PipelineView({
       )}
 
       <section className="pipeline-section">
-        <h3><Bot size={16} /> Висновки агента ({finished.length})</h3>
-        {finished.length ? (
-          <div className="pipeline-cards pipeline-scroll">
-            {finished.map((task) => <PipelineRunCard key={`done-${task.id}`} task={task} onOpenTask={onOpenTask} onOpenConclusion={onOpenConclusion} />)}
-          </div>
-        ) : <p className="pipeline-empty">Ще немає завершених прогонів.</p>}
+        <button
+          type="button"
+          className="button pipeline-conclusions-button"
+          disabled={finished.length === 0}
+          onClick={() => onOpenConclusionList()}
+        >
+          <Bot size={16} /> Висновки агента
+          <span className="pipeline-conclusions-count">{finished.length}</span>
+        </button>
       </section>
 
       {releasedToday.length > 0 && (
@@ -1749,6 +1828,8 @@ function App() {
   const [conclusionTask, setConclusionTask] = useState<Task | null>(null)
   const [reorderingId, setReorderingId] = useState<string | null>(null)
   const [, setControllingId] = useState<string | null>(null)
+  const [connectionLost, setConnectionLost] = useState(false)
+  const [conclusionListOpen, setConclusionListOpen] = useState(false)
   const [notificationsReady, setNotificationsReady] = useState(
     () => 'Notification' in window && Notification.permission === 'granted',
   )
@@ -1805,10 +1886,31 @@ function App() {
       void getTasks().then((nextTasks) => {
         announceRemoteChanges(nextTasks)
         setTasks(nextTasks)
-      }).catch(() => undefined)
+        setConnectionLost(false)
+      }).catch(() => setConnectionLost(true))
     }, hasActiveAgentRuns ? 2500 : 10000)
     return () => window.clearInterval(interval)
   }, [hasActiveAgentRuns])
+
+  useEffect(() => {
+    // Повернення вкладки або мережі — не чекаємо наступного тіку опитування.
+    const refresh = () => {
+      if (document.hidden) return
+      void getTasks().then((nextTasks) => {
+        announceRemoteChanges(nextTasks)
+        setTasks(nextTasks)
+        setConnectionLost(false)
+      }).catch(() => setConnectionLost(true))
+    }
+    window.addEventListener('online', refresh)
+    window.addEventListener('focus', refresh)
+    document.addEventListener('visibilitychange', refresh)
+    return () => {
+      window.removeEventListener('online', refresh)
+      window.removeEventListener('focus', refresh)
+      document.removeEventListener('visibilitychange', refresh)
+    }
+  }, [])
 
   useEffect(() => {
     if (!toast) return
@@ -1955,7 +2057,9 @@ function App() {
               {notificationsReady ? <Bell size={15} /> : <BellOff size={15} />}
             </button>
           )}
-          <span className="live-indicator"><i /> Система онлайн</span>
+          <span className={`live-indicator${connectionLost ? ' live-indicator-offline' : ''}`}>
+            <i /> {connectionLost ? 'Немає зв’язку — перепідключення…' : 'Система онлайн'}
+          </span>
           <span className="topbar-date"><CalendarDays size={15} /> {formatDate(new Date().toISOString())}</span>
           <BuildTicker
             refreshKey={tasks.map((task) => `${task.id}:${task.status}:${task.updatedAt}`).join('|')}
@@ -1998,6 +2102,7 @@ function App() {
                 onReorder={(taskId, direction) => void reorderQueue(taskId, direction)}
                 onStop={(taskId, revert) => void controlRun(taskId, revert ? 'stop-revert' : 'stop')}
                 onResume={(taskId) => void controlRun(taskId, 'resume')}
+                onOpenConclusionList={() => setConclusionListOpen(true)}
               />
             )
           ) : (
@@ -2086,6 +2191,15 @@ function App() {
         request={reviewAgainRequest}
         onClose={() => setReviewAgainRequest(null)}
         onSubmit={submitReviewAgain}
+      />
+      <AgentConclusionListDialog
+        open={conclusionListOpen}
+        tasks={tasks}
+        onClose={() => setConclusionListOpen(false)}
+        onOpenConclusion={(task) => {
+          setConclusionListOpen(false)
+          setConclusionTask(task)
+        }}
       />
       <AgentConclusionDialog
         task={conclusionTask ? (tasks.find((item) => item.id === conclusionTask.id) ?? conclusionTask) : null}

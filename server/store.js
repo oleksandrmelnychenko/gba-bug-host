@@ -646,6 +646,37 @@ export class TaskStore {
     `).run(now, now, olderThan)
   }
 
+  requeueOrphanedRuns() {
+    // Воркер — єдиний власник черги, тож на його старті будь-який 'running'
+    // залишився від убитого процесу: повертаємо в чергу, а не лишаємо
+    // висіти зі спінером до таймауту.
+    const now = new Date().toISOString()
+    const orphaned = this.database
+      .prepare("SELECT id, task_id FROM agent_runs WHERE status = 'running'")
+      .all()
+    if (orphaned.length === 0) return []
+
+    this.database.prepare(`
+      UPDATE agent_runs
+      SET status = 'queued', control = '', started_at = NULL, error = 'Перервано рестартом воркера, повернуто в чергу.', updated_at = ?
+      WHERE status = 'running'
+    `).run(now)
+    return orphaned.map((row) => row.task_id)
+  }
+
+  releaseRunningRun(taskId) {
+    const now = new Date().toISOString()
+    const row = this.database
+      .prepare("SELECT id FROM agent_runs WHERE task_id = ? AND status = 'running' ORDER BY created_at DESC LIMIT 1")
+      .get(taskId)
+    if (!row) return null
+
+    this.database
+      .prepare("UPDATE agent_runs SET status = 'failed', control = '', error = 'Знято оператором як зависле виконання.', finished_at = ?, updated_at = ? WHERE id = ?")
+      .run(now, now, row.id)
+    return this.findAgentRun(row.id)
+  }
+
   ensureBuild(buildNumber) {
     const number = String(buildNumber).trim()
     if (!number) throw new Error('Номер build не може бути порожнім.')

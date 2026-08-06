@@ -387,3 +387,31 @@ test('стоп із відкатом позначає керуючу коман�
     assert.match(finished.error, /відкочено/)
   })
 })
+
+test('осиротілі running-рани повертаються в чергу на старті воркера', async () => {
+  await withTestApp(async ({ app, store }) => {
+    const created = await request(app).post('/api/tasks').field('title', 'Осиротілий ран').expect(201)
+    const claimed = store.claimNextAgentRun()
+    assert.equal(claimed.status, 'running')
+
+    const requeued = store.requeueOrphanedRuns()
+    assert.deepEqual(requeued, [created.body.id])
+    assert.equal(store.findAgentRun(claimed.id).status, 'queued')
+    assert.equal(store.claimNextAgentRun()?.taskId, created.body.id)
+  })
+})
+
+test('резум знімає зависле running і ставить новий запуск', async () => {
+  await withTestApp(async ({ app, store }) => {
+    const created = await request(app).post('/api/tasks').field('title', 'Зависле виконання').expect(201)
+    const claimed = store.claimNextAgentRun()
+    assert.equal(claimed.status, 'running')
+
+    const resumed = await request(app)
+      .post(`/api/tasks/${created.body.id}/agent-runs/resume`)
+      .expect(202)
+
+    assert.equal(resumed.body.agentRun.status, 'queued')
+    assert.equal(store.findAgentRun(claimed.id).status, 'failed')
+  })
+})

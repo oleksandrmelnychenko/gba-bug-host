@@ -310,6 +310,12 @@ export async function createApp(options = {}) {
         return
       }
 
+      // Зависле 'running' (процес помер, статус лишився) блокує нову постановку —
+      // знімаємо його, інакше «Резум» мовчки нічого не робить.
+      if (task.agentRun?.status === 'running' && request.body?.force !== false) {
+        store.releaseRunningRun(request.params.id)
+      }
+
       const result = await store.enqueueAgentRun(randomUUID(), request.params.id, 'manual')
       if (result.status === 'task_not_found') {
         response.status(404).json({ message: 'Задачу не знайдено.' })
