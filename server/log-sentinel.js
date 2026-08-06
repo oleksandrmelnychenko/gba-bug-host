@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import http from 'node:http'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 const MARKER_PATTERN = /\[sentinel:([0-9a-f]{12})\]/
 
@@ -331,4 +332,15 @@ export class LogSentinel {
   async saveState() {
     await writeFile(this.statePath, JSON.stringify(this.state, null, 2), 'utf8')
   }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const sentinel = new LogSentinel()
+  if (sentinel.containers.length === 0) {
+    console.error('[sentinel] SENTINEL_CONTAINERS порожній — нема за чим стежити.')
+    process.exit(1)
+  }
+  await sentinel.start()
+  console.log(`[sentinel] запущено, контейнерів: ${sentinel.containers.length}, ліміт ${sentinel.maxTasksPerHour}/год`)
+  setInterval(() => {}, 60_000)
 }
