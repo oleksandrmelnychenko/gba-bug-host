@@ -33,6 +33,13 @@ export function isContinuationLine(line) {
   return /^(at |Caused by|--->?|System\.|Microsoft\.|GBA\.|Global\.|Akka\.|Npgsql\.|Elastic|[})\]]|\.{3}|Error:|TypeError|ReferenceError|Object |innerException)/i.test(line)
 }
 
+const NON_ERROR_LEVEL_PATTERN = /(?:^|[|\]\s])(?:WARN|WARNING|INFO|DEBUG|TRACE|VERBOSE)(?:\b|\s)/
+
+export function isBelowErrorLevel(line) {
+  if (/\b(?:ERROR|FATAL|CRITICAL)\b/.test(line)) return false
+  return NON_ERROR_LEVEL_PATTERN.test(line)
+}
+
 export class ErrorGroupCollector {
   constructor({ matcher, ignore = [], maxLines = 40, quietMs = 1200, onGroup }) {
     this.matcher = matcher
@@ -55,6 +62,7 @@ export class ErrorGroupCollector {
     }
 
     if (!this.matcher.test(line)) return
+    if (isBelowErrorLevel(line)) return
     if (isContinuationLine(line)) return
     if (this.ignore.some((pattern) => pattern.test(line))) return
     this.pending = [line]

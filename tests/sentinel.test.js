@@ -4,6 +4,7 @@ import {
   ErrorGroupCollector,
   buildTaskDraft,
   fingerprintGroup,
+  isBelowErrorLevel,
   isContinuationLine,
   normalizeForFingerprint,
   parseContainerSpec,
@@ -124,4 +125,28 @@ test('відкладений відбиток не довбить desk повт�
   assert.equal(deskLookups, 1)
   assert.equal(entry.suppressed, true)
   assert.equal(entry.count >= 2, true)
+})
+
+test('WARN-рядок від GlobalExceptionHandler не заводить задачу', () => {
+  const groups = []
+  const collector = new ErrorGroupCollector({
+    matcher: /\bERROR\b|\bFATAL\b|Unhandled|Unobserved|Exception|Traceback|⨯/,
+    quietMs: 5,
+    onGroup: (group) => groups.push(group),
+  })
+
+  collector.feed('21:06:06.416 WARN  [e258645030c3] GlobalExceptionHandler | Order must contain between 1 and 100 items.')
+  collector.flush()
+  assert.deepEqual(groups, [])
+
+  collector.feed('15:24:49.118 ERROR [b759da1ed142] GlobalExceptionHandler | Index was out of range.')
+  collector.flush()
+  assert.equal(groups.length, 1)
+})
+
+test('рівень нижче ERROR розпізнається лише коли він справді рівень', () => {
+  assert.equal(isBelowErrorLevel('20:00:33 WARN  [abc] Handler | щось'), true)
+  assert.equal(isBelowErrorLevel('20:00:33 ERROR [abc] Handler | щось'), false)
+  assert.equal(isBelowErrorLevel('System.ArgumentOutOfRangeException: Index was out of range'), false)
+  assert.equal(isBelowErrorLevel('[ERROR][06.08.2026 15:50:18][Thread 0214] akka://MainSystem'), false)
 })
