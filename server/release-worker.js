@@ -1,0 +1,247 @@
+import { spawn } from 'node:child_process'
+import { access } from 'node:fs/promises'
+import path from 'node:path'
+import { pathToFileURL } from 'node:url'
+
+const RELEASE_MARKER = /\[released:([^\]\s]+)/
+
+export const defaultRepoPlan = {
+  gba_console: {
+    branch: 'main',
+    root: '/root/projects/gba_console',
+    services: ['gba-console'],
+    checks: [
+      ['npx', 'tsc', '--noEmit'],
+      ['npx', 'vitest', 'run', '--silent'],
+    ],
+  },
+  'gba-server': {
+    branch: 'development',
+    root: '/root/projects/gba-server',
+    services: ['data-concord'],
+    checks: [
+      ['dotnet', 'build', 'src/Global.Business.Assistant.Api/Global.Business.Assistant.Api.csproj', '-v', 'q', '--nologo'],
+      ['dotnet', 'test', 'tests/Global.Business.Assistant.Platform.Actors.Tests/Global.Business.Assistant.Platform.Actors.Tests.csproj', '-v', 'q', '--nologo'],
+      ['dotnet', 'test', 'tests/Global.Business.Assistant.Domain.Tests/Global.Business.Assistant.Domain.Tests.csproj', '-v', 'q', '--nologo'],
+    ],
+  },
+  gba_ecommerce: {
+    branch: 'development',
+    root: '/root/projects/gba_ecommerce',
+    services: ['gba-ecommerce'],
+    checks: [
+      ['npx', 'vitest', 'run', '--silent'],
+      ['npx', 'next', 'build'],
+    ],
+  },
+  'gba-ecommerce-api': {
+    branch: 'development',
+    root: '/root/projects/gba-ecommerce-api',
+    services: ['gba-ecommerce-api'],
+    checks: [
+      ['dotnet', 'build', 'src/GBA.Ecommerce/GBA.Ecommerce.csproj', '-v', 'q', '--nologo'],
+      ['dotnet', 'test', 'tests/GBA.Ecommerce.Api.Tests/GBA.Ecommerce.Api.Tests.csproj', '-v', 'q', '--nologo'],
+    ],
+  },
+}
+
+export function taskSlug(taskId) {
+  return taskId.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-|-$/g, '')
+}
+
+export function branchName(taskId) {
+  return `codex/qa-${taskSlug(taskId)}`
+}
+
+export function isReleased(task) {
+  return RELEASE_MARKER.test(task.notes ?? '')
+}
+
+export function selectReleasableTasks(tasks) {
+  return tasks.filter((task) =>
+    (task.agentRun?.status === 'completed') &&
+    !isReleased(task) &&
+    task.status !== 'done')
+}
+
+function runProcess(command, args, { cwd } = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] })
+    let output = ''
+    child.stdout.on('data', (chunk) => { output = (output + chunk.toString()).slice(-20000) })
+    child.stderr.on('data', (chunk) => { output = (output + chunk.toString()).slice(-20000) })
+    child.on('error', (error) => resolve({ code: 1, output: String(error) }))
+    child.on('close', (code) => resolve({ code: code ?? 1, output }))
+  })
+}
+
+async function pathExists(target) {
+  try {
+    await access(target)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export class ReleaseWorker {
+  constructor({
+    deskBaseUrl = process.env.RELEASE_DESK_URL ?? 'http://127.0.0.1:4000',
+    worktreesDirectory = process.env.CODEX_WORKTREES_DIR ?? '/root/projects/gba-bug-worktrees',
+    infraDirectory = process.env.RELEASE_INFRA_DIR ?? '/root/projects/gba-infra',
+    repoPlan = defaultRepoPlan,
+    pollIntervalMs = Number.parseInt(process.env.RELEASE_POLL_INTERVAL_MS ?? '30000', 10),
+    settleMs = Number.parseInt(process.env.RELEASE_SETTLE_MS ?? '180000', 10),
+  } = {}) {
+    this.deskBaseUrl = deskBaseUrl.replace(/\/$/, '')
+    this.worktreesDirectory = worktreesDirectory
+    this.infraDirectory = infraDirectory
+    this.repoPlan = repoPlan
+    this.pollIntervalMs = pollIntervalMs
+    this.settleMs = settleMs
+    this.busy = false
+    this.firstSeenAt = new Map()
+  }
+
+  start() {
+    setInterval(() => void this.tick(), this.pollIntervalMs)
+    void this.tick()
+    console.log('[release] воркер запущено: completed → merge → тести → push → deploy')
+  }
+
+  async tick() {
+    if (this.busy) return
+    this.busy = true
+    try {
+      const response = await fetch(`${this.deskBaseUrl}/api/tasks`)
+      if (!response.ok) throw new Error(`desk → ${response.status}`)
+      const candidates = selectReleasableTasks(await response.json())
+      if (candidates.length === 0) {
+        this.firstSeenAt.clear()
+        return
+      }
+
+      const now = Date.now()
+      for (const task of candidates) {
+        if (!this.firstSeenAt.has(task.id)) this.firstSeenAt.set(task.id, now)
+      }
+      const ready = candidates.filter((task) => now - this.firstSeenAt.get(task.id) >= this.settleMs)
+      if (ready.length === 0) return
+      if (ready.length < candidates.length) return
+
+      await this.releaseBatch(ready)
+      for (const task of ready) this.firstSeenAt.delete(task.id)
+    } catch (error) {
+      console.error(`[release] tick: ${error.message}`)
+    } finally {
+      this.busy = false
+    }
+  }
+
+  async releaseBatch(tasks) {
+    const touchedRepos = new Set()
+    const released = []
+
+    for (const task of tasks) {
+      const outcome = await this.releaseTask(task)
+      if (outcome.ok) {
+        released.push({ task, alreadyMerged: Boolean(outcome.alreadyMerged) })
+        for (const repo of outcome.repos) touchedRepos.add(repo)
+      } else {
+        await this.annotate(task, `[release-fail] ${outcome.reason}`.slice(0, 500))
+        console.error(`[release] ${task.id}: ${outcome.reason.slice(0, 200)}`)
+      }
+    }
+
+    if (touchedRepos.size > 0) {
+      const services = [...touchedRepos].flatMap((repo) => this.repoPlan[repo].services)
+      const deploy = await runProcess(
+        'docker',
+        ['compose', '-p', 'gba-dev', '-f', 'docker-compose.yml', '-f', 'docker-compose.dev.yml', '--env-file', '.env.dev', 'up', '-d', '--build', ...services],
+        { cwd: this.infraDirectory },
+      )
+      if (deploy.code !== 0) {
+        console.error(`[release] deploy failed: ${deploy.output.slice(-300)}`)
+        for (const { task } of released) await this.annotate(task, '[release-fail] деплой не пройшов, код у логах release-воркера')
+        return
+      }
+      console.log(`[release] задеплоєно: ${services.join(', ')}`)
+    }
+
+    const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ')
+    for (const { task, alreadyMerged } of released) {
+      await this.annotate(task, alreadyMerged
+        ? `[released:${stamp}] гілки вже були влиті вручну`
+        : `[released:${stamp}] змерджено і задеплоєно на dev`)
+      console.log(`[release] ${task.id}: випущено${alreadyMerged ? ' (вже було влито)' : ''}`)
+    }
+  }
+
+  async releaseTask(task) {
+    const slug = taskSlug(task.id)
+    const branch = branchName(task.id)
+    const jobDirectory = path.join(this.worktreesDirectory, slug)
+    const repos = []
+
+    for (const [repo, plan] of Object.entries(this.repoPlan)) {
+      const worktree = path.join(jobDirectory, repo)
+      if (!(await pathExists(path.join(worktree, '.git')))) continue
+
+      const status = await runProcess('git', ['-C', worktree, 'status', '--porcelain'], {})
+      if (status.output.split('\n').some((line) => line && !line.startsWith('??'))) {
+        const commit = await runProcess('git', ['-C', worktree, 'commit', '-am', `fix: ${task.title.slice(0, 90)} (${task.id})\n\nCo-Authored-By: Codex via GBA QA Desk`], {})
+        if (commit.code !== 0) return { ok: false, reason: `commit у ${repo}: ${commit.output.slice(-200)}` }
+      }
+
+      const diff = await runProcess('git', ['-C', plan.root, 'rev-list', '--count', `${plan.branch}..${branch}`], {})
+      if (diff.code !== 0 || diff.output.trim() === '0') continue
+      repos.push(repo)
+    }
+
+    if (repos.length === 0) return { ok: true, repos: [], alreadyMerged: true }
+
+    for (const repo of repos) {
+      const plan = this.repoPlan[repo]
+
+      const dirty = await runProcess('git', ['-C', plan.root, 'status', '--porcelain'], {})
+      if (dirty.output.split('\n').some((line) => line && !line.startsWith('??'))) {
+        return { ok: false, reason: `${repo}: у робочому дереві є незакомічені зміни — відкладено` }
+      }
+
+      const merge = await runProcess('git', ['-C', plan.root, 'merge', '--no-edit', branch], {})
+      if (merge.code !== 0) {
+        await runProcess('git', ['-C', plan.root, 'merge', '--abort'], {})
+        return { ok: false, reason: `${repo}: конфлікт мерджу з ${branch}` }
+      }
+
+      for (const check of plan.checks) {
+        const result = await runProcess(check[0], check.slice(1), { cwd: plan.root })
+        if (result.code !== 0) {
+          await runProcess('git', ['-C', plan.root, 'reset', '--hard', `origin/${plan.branch}`], {})
+          return { ok: false, reason: `${repo}: перевірка «${check.join(' ')}» впала; мердж відкочено` }
+        }
+      }
+
+      const push = await runProcess('git', ['-C', plan.root, 'push', 'origin', plan.branch], {})
+      if (push.code !== 0) return { ok: false, reason: `${repo}: push не пройшов: ${push.output.slice(-200)}` }
+    }
+
+    return { ok: true, repos }
+  }
+
+  async annotate(task, line) {
+    const fresh = await fetch(`${this.deskBaseUrl}/api/tasks`).then((r) => r.json()).catch(() => null)
+    const current = fresh?.find((item) => item.id === task.id)
+    const notes = `${(current ?? task).notes ?? ''}\n${line}`.slice(0, 9900)
+    await fetch(`${this.deskBaseUrl}/api/tasks/${task.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ notes }),
+    }).catch(() => undefined)
+  }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  new ReleaseWorker().start()
+  setInterval(() => {}, 60_000)
+}
