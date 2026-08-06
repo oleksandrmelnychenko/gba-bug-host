@@ -1703,6 +1703,15 @@ function PipelineView({
           <span>Release-воркер</span>
           <strong>{releasedToday.length} випущено сьогодні</strong>
         </div>
+        <button
+          type="button"
+          className="pipeline-stat pipeline-stat-action"
+          disabled={finished.length === 0}
+          onClick={onOpenConclusionList}
+        >
+          <span>Висновки агента</span>
+          <strong>{finished.length}</strong>
+        </button>
       </div>
 
       <section className="pipeline-section">
@@ -1805,18 +1814,6 @@ function PipelineView({
           </div>
         </section>
       )}
-
-      <section className="pipeline-section">
-        <button
-          type="button"
-          className="button pipeline-conclusions-button"
-          disabled={finished.length === 0}
-          onClick={() => onOpenConclusionList()}
-        >
-          <Bot size={16} /> Висновки агента
-          <span className="pipeline-conclusions-count">{finished.length}</span>
-        </button>
-      </section>
 
       {releasedToday.length > 0 && (
         <section className="pipeline-section">
