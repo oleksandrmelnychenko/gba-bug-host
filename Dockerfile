@@ -29,6 +29,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
     && bash /tmp/dotnet-install.sh --channel "${DOTNET_CHANNEL}" --install-dir "${DOTNET_ROOT}" \
+    && ln -sf "${DOTNET_ROOT}/dotnet" /usr/local/bin/dotnet \
     && rm /tmp/dotnet-install.sh \
     && npm install --global "@openai/codex@${CODEX_VERSION}"
 USER node

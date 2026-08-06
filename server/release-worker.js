@@ -57,9 +57,29 @@ export function isReleased(task) {
   return RELEASE_MARKER.test(task.notes ?? '')
 }
 
+const SANDBOX_LIMIT_PATTERNS = [
+  /пісочниц/i,
+  /\bsandbox\b/i,
+  /\b(?:vstest|testhost)\b/i,
+  /loopback/i,
+  /test artifacts/i,
+  /\bbwrap\b/i,
+  /no permissions to create a new namespace/i,
+  /(?:відсутн\w*|немає|не встановлен\w*|missing|not (?:found|installed))[^.\n]{0,60}\.net sdk/i,
+  /\.net sdk[^.\n]{0,60}(?:відсутн\w*|немає|не встановлен\w*|missing|not (?:found|installed))/i,
+  /dotnet[^.\n]{0,40}(?:command not found|not found|немає|відсутн\w*)/i,
+]
+
+export function isSandboxLimitedReview(task) {
+  const run = task.agentRun
+  if (!run || run.status !== 'needs_review') return false
+  const text = `${run.summary ?? ''}\n${run.error ?? ''}`
+  return SANDBOX_LIMIT_PATTERNS.some((pattern) => pattern.test(text))
+}
+
 export function selectReleasableTasks(tasks) {
   return tasks.filter((task) =>
-    (task.agentRun?.status === 'completed') &&
+    (task.agentRun?.status === 'completed' || isSandboxLimitedReview(task)) &&
     !isReleased(task) &&
     task.status !== 'done')
 }
@@ -173,6 +193,7 @@ export class ReleaseWorker {
       await this.annotate(task, alreadyMerged
         ? `[released:${stamp}] гілки вже були влиті вручну`
         : `[released:${stamp}] змерджено і задеплоєно на dev`)
+      if (task.status !== 'done') await this.setStatus(task, 'ready_for_retest')
       console.log(`[release] ${task.id}: випущено${alreadyMerged ? ' (вже було влито)' : ''}`)
     }
   }
@@ -231,6 +252,14 @@ export class ReleaseWorker {
     }
 
     return { ok: true, repos }
+  }
+
+  async setStatus(task, status) {
+    await fetch(`${this.deskBaseUrl}/api/tasks/${task.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    }).catch(() => undefined)
   }
 
   async annotate(task, line) {

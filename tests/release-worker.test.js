@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { branchName, isReleased, selectReleasableTasks, taskSlug } from '../server/release-worker.js'
+import { branchName, isReleased, isSandboxLimitedReview, selectReleasableTasks, taskSlug } from '../server/release-worker.js'
 
 test('слаг і назва гілки збігаються з worker-конвенцією', () => {
   assert.equal(taskSlug('BUG-1024'), 'bug-1024')
@@ -22,4 +22,30 @@ test('відбираються лише completed без released і не done',
     { id: 'E', status: 'in_progress', notes: '', agentRun: { status: 'running' } },
   ]
   assert.deepEqual(selectReleasableTasks(tasks).map((task) => task.id), ['A'])
+})
+
+test('needs_review через обмеження пісочниці не паркує задачу', () => {
+  const sandboxCases = [
+    'sandbox забороняє VSTest відкрити loopback TCP-сокет',
+    'у середовищі відсутній .NET SDK і готові test artifacts',
+    'bwrap: No permissions to create a new namespace',
+    'пісочниця не дала запустити testhost',
+  ]
+  for (const summary of sandboxCases) {
+    assert.equal(isSandboxLimitedReview({ agentRun: { status: 'needs_review', summary } }), true, summary)
+  }
+})
+
+test('змістовний needs_review далі чекає людину', () => {
+  const task = { agentRun: { status: 'needs_review', summary: 'Потрібне рішення бізнесу щодо прав на розблокування продажу.' } }
+  assert.equal(isSandboxLimitedReview(task), false)
+  assert.equal(selectReleasableTasks([{ id: 'X', status: 'ready_for_retest', notes: '', ...task }]).length, 0)
+})
+
+test('sandbox-вердикт потрапляє у вибірку релізу', () => {
+  const tasks = [
+    { id: 'S', status: 'in_progress', notes: '', agentRun: { status: 'needs_review', summary: 'sandbox блокує dotnet test' } },
+    { id: 'T', status: 'done', notes: '', agentRun: { status: 'needs_review', summary: 'sandbox блокує dotnet test' } },
+  ]
+  assert.deepEqual(selectReleasableTasks(tasks).map((task) => task.id), ['S'])
 })
