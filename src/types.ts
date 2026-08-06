@@ -1,5 +1,6 @@
 export type TaskStatus = 'new' | 'in_progress' | 'ready_for_retest' | 'review_again' | 'done' | 'blocked'
 export type TaskPriority = 'low' | 'medium' | 'high' | 'critical'
+export type TaskProject = 'console' | 'ecommerce'
 export type AgentRunStatus = 'queued' | 'running' | 'completed' | 'needs_review' | 'blocked' | 'failed'
 
 export interface AgentRun {
@@ -52,6 +53,7 @@ export interface Task {
   siteUrl: string
   notes: string
   area: string
+  project: TaskProject
   status: TaskStatus
   priority: TaskPriority
   createdAt: string
@@ -66,9 +68,17 @@ export interface TaskDraft {
   siteUrl: string
   notes: string
   area: string
+  project: TaskProject
   status: TaskStatus
   priority: TaskPriority
 }
+
+export const projectMeta: Record<TaskProject, { label: string }> = {
+  console: { label: 'GBA Console' },
+  ecommerce: { label: 'Ecommerce' },
+}
+
+export const projectOrder: TaskProject[] = ['console', 'ecommerce']
 
 export const statusMeta: Record<TaskStatus, { label: string; shortLabel: string }> = {
   new: { label: 'Новий', shortLabel: 'Новий' },

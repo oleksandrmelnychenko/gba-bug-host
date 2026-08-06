@@ -7,6 +7,7 @@ import { TaskStore } from './store.js'
 
 const allowedStatuses = new Set(['new', 'in_progress', 'ready_for_retest', 'review_again', 'done', 'blocked'])
 const allowedPriorities = new Set(['low', 'medium', 'high', 'critical'])
+const allowedProjects = new Set(['console', 'ecommerce'])
 const allowedMediaTypes = new Map([
   ['image/jpeg', { extension: '.jpg', kind: 'image', maxSize: 10 * 1024 * 1024 }],
   ['image/png', { extension: '.png', kind: 'image', maxSize: 10 * 1024 * 1024 }],
@@ -93,6 +94,7 @@ function validateTaskInput(body, { partial = false } = {}) {
   const siteUrl = normalizeSiteUrl(body.siteUrl, errors)
   const notes = cleanText(body.notes)
   const area = cleanText(body.area)
+  const project = cleanText(body.project)
   const status = cleanText(body.status)
   const priority = cleanText(body.priority)
   const assignee = cleanText(body.assignee)
@@ -107,10 +109,11 @@ function validateTaskInput(body, { partial = false } = {}) {
   if (assignee.length > 80) errors.push('Ім’я виконавця має бути коротшим за 80 символів.')
   if (status && !allowedStatuses.has(status)) errors.push('Невідомий статус задачі.')
   if (priority && !allowedPriorities.has(priority)) errors.push('Невідомий пріоритет задачі.')
+  if (project && !allowedProjects.has(project)) errors.push('Невідомий проєкт задачі.')
 
   return {
     errors,
-    values: { title, description, siteUrl, notes, area, status, priority, assignee },
+    values: { title, description, siteUrl, notes, area, project, status, priority, assignee },
   }
 }
 
@@ -190,6 +193,7 @@ export async function createApp(options = {}) {
         siteUrl: values.siteUrl,
         notes: values.notes,
         area: values.area || 'Загальне',
+        project: values.project || 'console',
         status: values.status || 'new',
         priority: values.priority || 'medium',
         assignee: values.assignee || 'Не призначено',
@@ -223,9 +227,10 @@ export async function createApp(options = {}) {
         && !authorizeCodexTrigger(request, response)) return
 
       const patch = {}
-      for (const key of ['title', 'description', 'siteUrl', 'notes', 'area', 'status', 'priority', 'assignee']) {
+      for (const key of ['title', 'description', 'siteUrl', 'notes', 'area', 'project', 'status', 'priority', 'assignee']) {
         if (Object.hasOwn(request.body, key)) patch[key] = values[key]
       }
+      if (Object.hasOwn(patch, 'project') && !patch.project) delete patch.project
       await store.patch(request.params.id, patch)
 
       if (['ready_for_retest', 'done'].includes(values.status) && existingTask.status !== values.status) {

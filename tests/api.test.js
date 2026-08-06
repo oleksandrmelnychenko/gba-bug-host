@@ -7,7 +7,7 @@ import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 import request from 'supertest'
 import { createApp } from '../server/app.js'
-import { TaskStore } from '../server/store.js'
+import { TaskStore, getSeedTasks } from '../server/store.js'
 
 async function withTestApp(run) {
   const root = await mkdtemp(path.join(tmpdir(), 'gba-bug-host-'))
@@ -17,6 +17,9 @@ async function withTestApp(run) {
 
   try {
     const app = await createApp({ rootDirectory: root, dataDirectory, uploadsDirectory, store })
+    store.transaction(() => {
+      for (const task of getSeedTasks()) store.insertTask(task)
+    })
     await run({ app, dataDirectory, uploadsDirectory, store })
   } finally {
     store.close()

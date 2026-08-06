@@ -39,6 +39,8 @@ import {
 } from './api'
 import {
   priorityMeta,
+  projectMeta,
+  projectOrder,
   statusMeta,
   type AgentRunStatus,
   type BuildInfo,
@@ -46,6 +48,7 @@ import {
   type TaskAttachment,
   type TaskDraft,
   type TaskPriority,
+  type TaskProject,
   type TaskStatus,
 } from './types'
 import gbaLogo from './assets/brand/gba-logo.svg'
@@ -56,6 +59,7 @@ const emptyDraft: TaskDraft = {
   siteUrl: '',
   notes: '',
   area: '',
+  project: 'console',
   status: 'new',
   priority: 'medium',
 }
@@ -100,6 +104,7 @@ function taskToDraft(task: Task): TaskDraft {
     siteUrl: task.siteUrl,
     notes: task.notes,
     area: task.area,
+    project: task.project ?? 'console',
     status: task.status,
     priority: task.priority,
   }
@@ -609,10 +614,12 @@ function UploadZone({
 
 function CreateTaskDialog({
   open,
+  project,
   onClose,
   onCreated,
 }: {
   open: boolean
+  project: TaskProject
   onClose: () => void
   onCreated: (task: Task) => void
 }) {
@@ -641,7 +648,7 @@ function CreateTaskDialog({
     setSaving(true)
     setError('')
     try {
-      const task = await createTask(draft, files)
+      const task = await createTask({ ...draft, project }, files)
       onCreated(task)
       setDraft(emptyDraft)
       setFiles([])
@@ -658,7 +665,7 @@ function CreateTaskDialog({
       <section className="create-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="create-title">
         <div className="dialog-header">
           <div>
-            <span className="eyebrow">Нова задача</span>
+            <span className="eyebrow">Нова задача · {projectMeta[project].label}</span>
             <h2 id="create-title">Зафіксувати баг</h2>
           </div>
           <button className="icon-button" onClick={onClose} aria-label="Закрити"><X size={19} /></button>
@@ -891,6 +898,15 @@ function TaskDetailDrawer({
               <label htmlFor="detail-area">Розділ</label>
               <input id="detail-area" maxLength={80} value={draft.area} onChange={(event) => setDraft({ ...draft, area: event.target.value })} />
             </div>
+            <div className="form-field">
+              <label htmlFor="detail-project">Проєкт</label>
+              <div className="native-select">
+                <select id="detail-project" value={draft.project} onChange={(event) => setDraft({ ...draft, project: event.target.value as TaskProject })}>
+                  {projectOrder.map((item) => <option value={item} key={item}>{projectMeta[item].label}</option>)}
+                </select>
+                <ChevronDown size={15} />
+              </div>
+            </div>
           </div>
 
           <div className="evidence-section">
@@ -988,6 +1004,7 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [query, setQuery] = useState('')
+  const [project, setProject] = useState<TaskProject>('console')
   const [statusFilter, setStatusFilter] = useState<TaskStatus | 'all'>('all')
   const [priorityFilter, setPriorityFilter] = useState<TaskPriority | 'all'>('all')
   const [createOpen, setCreateOpen] = useState(false)
@@ -1030,16 +1047,21 @@ function App() {
 
   const selectedTask = tasks.find((task) => task.id === selectedId) ?? null
 
+  const projectTasks = useMemo(
+    () => tasks.filter((task) => (task.project ?? 'console') === project),
+    [project, tasks],
+  )
+
   const filteredTasks = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase('uk-UA')
-    return tasks.filter((task) => {
+    return projectTasks.filter((task) => {
       const matchesQuery = !normalizedQuery || [task.id, task.title, task.description, task.siteUrl, task.notes, task.area]
         .some((value) => value.toLocaleLowerCase('uk-UA').includes(normalizedQuery))
       const matchesStatus = statusFilter === 'all' || task.status === statusFilter
       const matchesPriority = priorityFilter === 'all' || task.priority === priorityFilter
       return matchesQuery && matchesStatus && matchesPriority
     })
-  }, [priorityFilter, query, statusFilter, tasks])
+  }, [priorityFilter, projectTasks, query, statusFilter])
 
   const replaceTask = (nextTask: Task) => {
     setTasks((current) => current.map((task) => task.id === nextTask.id ? nextTask : task))
@@ -1094,6 +1116,22 @@ function App() {
 
       <main id="top">
         <section className="workspace">
+          <nav className="project-tabs" aria-label="Проєкти">
+            {projectOrder.map((item) => {
+              const count = tasks.filter((task) => (task.project ?? 'console') === item).length
+              return (
+                <button
+                  key={item}
+                  type="button"
+                  className={`project-tab${project === item ? ' project-tab-active' : ''}`}
+                  onClick={() => setProject(item)}
+                >
+                  {projectMeta[item].label}
+                  <span className="project-tab-count">{count}</span>
+                </button>
+              )
+            })}
+          </nav>
           <div className="filters">
             <button className="button button-primary toolbar-create" onClick={() => setCreateOpen(true)}><Plus size={17} /> Нова задача</button>
             <label className="search-field">
@@ -1134,7 +1172,7 @@ function App() {
 
           {!loading && !loadError && filteredTasks.length > 0 && (
             <div className="table-footer">
-              <span>Показано {filteredTasks.length} із {tasks.length}</span>
+              <span>Показано {filteredTasks.length} із {projectTasks.length} · {projectMeta[project].label}</span>
               <span><i /> Зміни зберігаються автоматично</span>
             </div>
           )}
@@ -1149,7 +1187,7 @@ function App() {
         />
       </footer>
 
-      <CreateTaskDialog open={createOpen} onClose={() => setCreateOpen(false)} onCreated={handleCreated} />
+      <CreateTaskDialog open={createOpen} project={project} onClose={() => setCreateOpen(false)} onCreated={handleCreated} />
       <TaskDetailDrawer
         task={selectedTask}
         onClose={() => setSelectedId(null)}

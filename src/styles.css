@@ -236,6 +236,56 @@ main {
   box-shadow: var(--shadow-xs);
 }
 
+.project-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 14px 24px 0;
+  border-bottom: 1px solid var(--gray-200);
+}
+
+.project-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px 12px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--gray-500);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.project-tab:hover {
+  color: var(--gray-700);
+}
+
+.project-tab-active {
+  color: var(--brand-700);
+  border-bottom-color: var(--brand-600);
+}
+
+.project-tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--gray-100);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--gray-600);
+}
+
+.project-tab-active .project-tab-count {
+  background: var(--brand-100);
+  color: var(--brand-700);
+}
+
 .filters {
   padding: 16px 24px;
   display: grid;

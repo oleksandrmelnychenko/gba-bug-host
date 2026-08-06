@@ -103,6 +103,7 @@ function taskFromRow(row, attachments = [], agentRun = null) {
     siteUrl: row.site_url ?? '',
     notes: row.notes ?? '',
     area: row.area,
+    project: row.project ?? 'console',
     status: row.status,
     priority: row.priority,
     assignee: row.assignee,
@@ -208,6 +209,9 @@ export class TaskStore {
     if (!taskColumns.has('notes')) {
       this.database.exec("ALTER TABLE tasks ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
     }
+    if (!taskColumns.has('project')) {
+      this.database.exec("ALTER TABLE tasks ADD COLUMN project TEXT NOT NULL DEFAULT 'console'")
+    }
 
     const { total } = this.database.prepare('SELECT COUNT(*) AS total FROM tasks').get()
     if (total === 0) {
@@ -235,7 +239,7 @@ export class TaskStore {
     } catch (error) {
       if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error
     }
-    return seedTasks
+    return []
   }
 
   transaction(callback) {
@@ -252,8 +256,8 @@ export class TaskStore {
 
   insertTask(task) {
     this.database.prepare(`
-      INSERT INTO tasks (id, title, description, site_url, notes, area, status, priority, assignee, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO tasks (id, title, description, site_url, notes, area, project, status, priority, assignee, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       task.id,
       task.title,
@@ -261,6 +265,7 @@ export class TaskStore {
       task.siteUrl ?? '',
       task.notes ?? '',
       task.area,
+      task.project ?? 'console',
       task.status,
       task.priority,
       task.assignee,
@@ -347,7 +352,7 @@ export class TaskStore {
     const existingTask = this.find(id)
     if (!existingTask) return null
 
-    const allowedFields = ['title', 'description', 'siteUrl', 'notes', 'area', 'status', 'priority', 'assignee']
+    const allowedFields = ['title', 'description', 'siteUrl', 'notes', 'area', 'project', 'status', 'priority', 'assignee']
     const fields = allowedFields.filter((field) => Object.hasOwn(values, field))
     const updatedAt = new Date().toISOString()
 
@@ -358,6 +363,7 @@ export class TaskStore {
         siteUrl: 'site_url',
         notes: 'notes',
         area: 'area',
+        project: 'project',
         status: 'status',
         priority: 'priority',
         assignee: 'assignee',
