@@ -209,8 +209,10 @@ export class ReleaseWorker {
       if (!(await pathExists(path.join(worktree, '.git')))) continue
 
       const status = await runProcess('git', ['-C', worktree, 'status', '--porcelain'], {})
-      if (status.output.split('\n').some((line) => line && !line.startsWith('??'))) {
-        const commit = await runProcess('git', ['-C', worktree, 'commit', '-am', `fix: ${task.title.slice(0, 90)} (${task.id})\n\nCo-Authored-By: Codex via GBA QA Desk`], {})
+      if (status.output.split('\n').some((line) => line.trim())) {
+        const stage = await runProcess('git', ['-C', worktree, 'add', '-A'], {})
+        if (stage.code !== 0) return { ok: false, reason: `stage у ${repo}: ${stage.output.slice(-200)}` }
+        const commit = await runProcess('git', ['-C', worktree, 'commit', '-m', `fix: ${task.title.slice(0, 90)} (${task.id})\n\nCo-Authored-By: Codex via GBA QA Desk`], {})
         if (commit.code !== 0) return { ok: false, reason: `commit у ${repo}: ${commit.output.slice(-200)}` }
       }
 
