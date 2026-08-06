@@ -77,13 +77,16 @@ const pageSizeOptions = [10, 25, 50]
 
 type DateSortDirection = 'desc' | 'asc'
 
-type WorkspaceTab = TaskProject | 'auto'
+type WorkspaceTab = TaskProject | 'auto' | 'pipeline'
 
 const workspaceTabs: Array<{ key: WorkspaceTab; label: string }> = [
   { key: 'console', label: projectMeta.console.label },
   { key: 'ecommerce', label: projectMeta.ecommerce.label },
   { key: 'auto', label: 'Логи (авто)' },
+  { key: 'pipeline', label: 'Конвеєр' },
 ]
+
+const RELEASED_MARKER = /\[released:([^\]]+)\]/
 
 function isSentinelTask(task: Task) {
   return (task.notes ?? '').includes('[sentinel:')
@@ -1289,6 +1292,150 @@ function Lightbox({ attachment, onClose }: { attachment: TaskAttachment | null; 
   )
 }
 
+function isSameDay(value: string) {
+  const date = new Date(value)
+  const now = new Date()
+  return date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth() && date.getDate() === now.getDate()
+}
+
+function PipelineRunCard({
+  task,
+  onOpenTask,
+}: {
+  task: Task
+  onOpenTask: (taskId: string) => void
+}) {
+  const run = task.agentRun
+  if (!run) return null
+  const isRerun = run.trigger === 'review_again' || run.attempt > 1
+  const prompt = (task.reviewComment ?? '').trim()
+
+  return (
+    <button type="button" className="pipeline-card" onClick={() => onOpenTask(task.id)}>
+      <div className="pipeline-card-head">
+        <span className="task-id">{task.id}</span>
+        <span className={`agent-table-state agent-run-${run.status}`}>
+          {run.status === 'running' ? <LoaderCircle className="spin" size={12} /> : <Bot size={12} />}
+          {agentRunMeta[run.status].label}
+        </span>
+        {isRerun && <span className="pipeline-attempt">спроба {run.attempt}</span>}
+      </div>
+      <strong>{task.title}</strong>
+      <div className="pipeline-card-meta">
+        <span>{projectMeta[task.project ?? 'console'].label}</span>
+        <span>{task.area}</span>
+        {run.startedAt && <span>старт {formatDateTime(run.startedAt)}</span>}
+        {run.branch && <span className="pipeline-branch">{run.branch}</span>}
+      </div>
+      {isRerun && (
+        <div className="pipeline-prompt">
+          <span>Промпт для повторного циклу</span>
+          <p>{prompt || 'Без коментаря — Codex отримає лише статус «Передивись ще раз».'}</p>
+        </div>
+      )}
+    </button>
+  )
+}
+
+function PipelineView({
+  tasks,
+  onOpenTask,
+}: {
+  tasks: Task[]
+  onOpenTask: (taskId: string) => void
+}) {
+  const running = tasks
+    .filter((task) => task.agentRun?.status === 'running')
+    .sort((a, b) => Date.parse(a.agentRun!.createdAt) - Date.parse(b.agentRun!.createdAt))
+  const queued = tasks
+    .filter((task) => task.agentRun?.status === 'queued')
+    .sort((a, b) => Date.parse(a.agentRun!.createdAt) - Date.parse(b.agentRun!.createdAt))
+  const reruns = tasks.filter((task) => {
+    const run = task.agentRun
+    return run && (run.trigger === 'review_again' || run.attempt > 1) && (run.status === 'queued' || run.status === 'running')
+  })
+  const releasedToday = tasks.filter((task) => {
+    const match = RELEASED_MARKER.exec(task.notes ?? '')
+    return match && isSameDay(match[1].trim().replace(' ', 'T'))
+  })
+  const autoToday = tasks.filter((task) => isSentinelTask(task) && isSameDay(task.createdAt))
+
+  return (
+    <div className="pipeline-view">
+      <div className="pipeline-stats">
+        <div className="pipeline-stat">
+          <span>Codex-воркер</span>
+          <strong>{running.length ? `працює: ${running.map((task) => task.id).join(', ')}` : 'очікує задач'}</strong>
+        </div>
+        <div className="pipeline-stat">
+          <span>Черга</span>
+          <strong>{queued.length}</strong>
+        </div>
+        <div className="pipeline-stat">
+          <span>Вартовий логів</span>
+          <strong>{autoToday.length} авто-задач сьогодні</strong>
+        </div>
+        <div className="pipeline-stat">
+          <span>Release-воркер</span>
+          <strong>{releasedToday.length} випущено сьогодні</strong>
+        </div>
+      </div>
+
+      <section className="pipeline-section">
+        <h3><LoaderCircle className={running.length ? 'spin' : ''} size={16} /> Зараз у роботі</h3>
+        {running.length ? (
+          <div className="pipeline-cards">
+            {running.map((task) => <PipelineRunCard key={task.id} task={task} onOpenTask={onOpenTask} />)}
+          </div>
+        ) : <p className="pipeline-empty">Воркер вільний — черга порожня або обробка завершена.</p>}
+      </section>
+
+      <section className="pipeline-section">
+        <h3><Layers3 size={16} /> Черга ({queued.length})</h3>
+        {queued.length ? (
+          <div className="pipeline-queue">
+            {queued.map((task, index) => (
+              <button type="button" className="pipeline-queue-row" key={task.id} onClick={() => onOpenTask(task.id)}>
+                <span className="pipeline-queue-position">{index + 1}</span>
+                <span className="task-id">{task.id}</span>
+                <span className="pipeline-queue-title">{task.title}</span>
+                <span className="pipeline-queue-project">{projectMeta[task.project ?? 'console'].label}</span>
+                {(task.agentRun!.trigger === 'review_again' || task.agentRun!.attempt > 1) && (
+                  <span className="pipeline-attempt">спроба {task.agentRun!.attempt}</span>
+                )}
+              </button>
+            ))}
+          </div>
+        ) : <p className="pipeline-empty">Черга порожня.</p>}
+      </section>
+
+      {reruns.length > 0 && (
+        <section className="pipeline-section">
+          <h3><RefreshCw size={16} /> Повторні цикли з промптами</h3>
+          <div className="pipeline-cards">
+            {reruns.map((task) => <PipelineRunCard key={`rerun-${task.id}`} task={task} onOpenTask={onOpenTask} />)}
+          </div>
+        </section>
+      )}
+
+      {releasedToday.length > 0 && (
+        <section className="pipeline-section">
+          <h3><Check size={16} /> Випущено на dev сьогодні</h3>
+          <div className="pipeline-queue">
+            {releasedToday.map((task) => (
+              <button type="button" className="pipeline-queue-row" key={`released-${task.id}`} onClick={() => onOpenTask(task.id)}>
+                <span className="task-id">{task.id}</span>
+                <span className="pipeline-queue-title">{task.title}</span>
+                <span className="pipeline-queue-project">{RELEASED_MARKER.exec(task.notes ?? '')?.[1]}</span>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+    </div>
+  )
+}
+
 function App() {
   const [tasks, setTasks] = useState<Task[]>([])
   const [loading, setLoading] = useState(true)
@@ -1376,6 +1523,7 @@ function App() {
   const selectedTask = tasks.find((task) => task.id === selectedId) ?? null
 
   const tabTasks = useMemo(() => {
+    if (activeTab === 'pipeline') return tasks
     if (activeTab === 'auto') return tasks.filter(isSentinelTask)
     return tasks.filter((task) => (task.project ?? 'console') === activeTab && !isSentinelTask(task))
   }, [activeTab, tasks])
@@ -1492,9 +1640,11 @@ function App() {
         <section className="workspace">
           <nav className="project-tabs" aria-label="Проєкти">
             {workspaceTabs.map((tab) => {
-              const count = tab.key === 'auto'
-                ? tasks.filter(isSentinelTask).length
-                : tasks.filter((task) => (task.project ?? 'console') === tab.key && !isSentinelTask(task)).length
+              const count = tab.key === 'pipeline'
+                ? tasks.filter((task) => task.agentRun?.status === 'queued' || task.agentRun?.status === 'running').length
+                : tab.key === 'auto'
+                  ? tasks.filter(isSentinelTask).length
+                  : tasks.filter((task) => (task.project ?? 'console') === tab.key && !isSentinelTask(task)).length
               return (
                 <button
                   key={tab.key}
@@ -1508,6 +1658,14 @@ function App() {
               )
             })}
           </nav>
+          {activeTab === 'pipeline' ? (
+            loading ? (
+              <div className="loading-state"><LoaderCircle className="spin" /><span>Завантажую конвеєр…</span></div>
+            ) : (
+              <PipelineView tasks={tasks} onOpenTask={setSelectedId} />
+            )
+          ) : (
+          <>
           <div className="filters">
             <button className="button button-primary toolbar-create" onClick={() => setCreateOpen(true)}><Plus size={17} /> Нова задача</button>
             <label className="search-field">
@@ -1565,12 +1723,14 @@ function App() {
               onPageSizeChange={setPageSize}
             />
           )}
+          </>
+          )}
         </section>
       </main>
 
       <CreateTaskDialog
         open={createOpen}
-        project={activeTab === 'auto' ? 'console' : activeTab}
+        project={activeTab === 'auto' || activeTab === 'pipeline' ? 'console' : activeTab}
         onClose={() => setCreateOpen(false)}
         onCreated={handleCreated}
       />
