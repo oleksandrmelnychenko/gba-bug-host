@@ -9,11 +9,15 @@ services:
       APP_BUILD_NUMBER: "${APP_BUILD_NUMBER:?Set APP_BUILD_NUMBER in the server environment}"
       DATA_DIR: /app/data
       UPLOAD_DIR: /app/public/uploads
+      BUILD_SOURCE_URL: "${BUILD_SOURCE_URL:-http://host.docker.internal:8083}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:${QA_DESK_PORT:-4000}:4000"
     networks:
       - default
       - caddy
+      - devstack
     volumes:
       - qa-data:/app/data
       - qa-uploads:/app/public/uploads
@@ -71,4 +75,7 @@ volumes:
 networks:
   caddy:
     name: gba-prod_default
+    external: true
+  devstack:
+    name: gba-dev_default
     external: true
