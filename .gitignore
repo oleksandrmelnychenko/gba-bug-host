@@ -13,5 +13,6 @@ data/agent-worktrees/
 public/uploads/*
 !public/uploads/.gitkeep
 npm-debug.log*
+dev.*.log
 .playwright-cli/
 output/
