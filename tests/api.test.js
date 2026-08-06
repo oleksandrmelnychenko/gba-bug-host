@@ -1,0 +1,272 @@
+import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import test from 'node:test'
+import request from 'supertest'
+import { createApp } from '../server/app.js'
+import { TaskStore } from '../server/store.js'
+
+async function withTestApp(run) {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-bug-host-'))
+  const dataDirectory = path.join(root, 'data')
+  const uploadsDirectory = path.join(root, 'uploads')
+  const store = new TaskStore(dataDirectory)
+
+  try {
+    const app = await createApp({ rootDirectory: root, dataDirectory, uploadsDirectory, store })
+    await run({ app, dataDirectory, uploadsDirectory, store })
+  } finally {
+    store.close()
+    await rm(root, { recursive: true, force: true })
+  }
+}
+
+test('API повертає стартові задачі та health status', async () => {
+  await withTestApp(async ({ app }) => {
+    const health = await request(app).get('/api/health').expect(200)
+    assert.deepEqual(health.body, { ok: true })
+
+    const response = await request(app).get('/api/tasks').expect(200)
+    assert.equal(response.body.length, 5)
+    assert.equal(response.body[0].id, 'BUG-1051')
+  })
+})
+
+test('API створює задачу зі скріншотом і оновлює її статус', async () => {
+  await withTestApp(async ({ app, uploadsDirectory }) => {
+    const tinyPng = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z4GAAAAAASUVORK5CYII=',
+      'base64',
+    )
+
+    const created = await request(app)
+      .post('/api/tasks')
+      .field('title', 'Нова тестова помилка')
+      .field('description', 'Сценарій для API тесту')
+      .field('siteUrl', 'qa.example.com/orders/42')
+      .field('notes', 'POST /api/orders\nResponse: 500')
+      .field('area', 'Тестування')
+      .field('priority', 'high')
+      .field('status', 'new')
+      .field('assignee', 'QA')
+      .attach('attachments', tinyPng, { filename: 'proof.png', contentType: 'image/png' })
+      .expect(201)
+
+    assert.equal(created.body.id, 'BUG-1052')
+    assert.equal(created.body.attachments.length, 1)
+    assert.equal(created.body.attachments[0].kind, 'image')
+    assert.equal(created.body.siteUrl, 'https://qa.example.com/orders/42')
+    assert.equal(created.body.notes, 'POST /api/orders\nResponse: 500')
+    assert.equal(created.body.agentRun.status, 'queued')
+    assert.equal(created.body.agentRun.attempt, 1)
+    assert.equal(
+      existsSync(path.join(uploadsDirectory, path.basename(created.body.attachments[0].url))),
+      true,
+    )
+
+    const updated = await request(app)
+      .patch(`/api/tasks/${created.body.id}`)
+      .send({ status: 'ready_for_retest' })
+      .expect(200)
+
+    assert.equal(updated.body.status, 'ready_for_retest')
+  })
+})
+
+test('SQLite автоматично додає URL і нотатки до існуючої схеми', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-bug-host-migration-'))
+  const dataDirectory = path.join(root, 'data')
+  const databasePath = path.join(dataDirectory, 'gba-qa.sqlite')
+  await mkdir(dataDirectory, { recursive: true })
+
+  const legacyDatabase = new DatabaseSync(databasePath)
+  legacyDatabase.exec(`
+    CREATE TABLE tasks (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      area TEXT NOT NULL,
+      status TEXT NOT NULL,
+      priority TEXT NOT NULL,
+      assignee TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE attachments (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      url TEXT NOT NULL,
+      type TEXT NOT NULL,
+      size INTEGER NOT NULL,
+      kind TEXT NOT NULL
+    );
+    INSERT INTO tasks VALUES (
+      'BUG-1001', 'Стара задача', '', 'Продаж', 'new', 'medium',
+      'Не призначено', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+    );
+  `)
+  legacyDatabase.close()
+
+  const store = new TaskStore(dataDirectory)
+  try {
+    await store.ensureReady()
+    const task = store.find('BUG-1001')
+    assert.equal(task.siteUrl, '')
+    assert.equal(task.notes, '')
+
+    const updated = store.patch('BUG-1001', {
+      siteUrl: 'https://example.com/problem',
+      notes: 'GET /api/products → 500',
+    })
+    assert.equal(updated.siteUrl, 'https://example.com/problem')
+    assert.equal(updated.notes, 'GET /api/products → 500')
+  } finally {
+    store.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('SQLite зберігає задачу та відео після повторного відкриття бази', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-bug-host-persistence-'))
+  const dataDirectory = path.join(root, 'data')
+  const uploadsDirectory = path.join(root, 'uploads')
+  const firstStore = new TaskStore(dataDirectory)
+
+  try {
+    const firstApp = await createApp({ rootDirectory: root, dataDirectory, uploadsDirectory, store: firstStore })
+    const created = await request(firstApp)
+      .post('/api/tasks')
+      .field('title', 'Відео помилки зберігається')
+      .field('area', 'Відеотест')
+      .attach('attachments', Buffer.from('fake-mp4-content'), {
+        filename: 'bug.mp4',
+        contentType: 'video/mp4',
+      })
+      .expect(201)
+
+    assert.equal(created.body.attachments[0].kind, 'video')
+    firstStore.close()
+
+    const secondStore = new TaskStore(dataDirectory)
+    try {
+      const secondApp = await createApp({ rootDirectory: root, dataDirectory, uploadsDirectory, store: secondStore })
+      const tasks = await request(secondApp).get('/api/tasks').expect(200)
+      const restoredTask = tasks.body.find((task) => task.id === created.body.id)
+
+      assert.equal(restoredTask.title, 'Відео помилки зберігається')
+      assert.equal(restoredTask.attachments[0].kind, 'video')
+      assert.equal(existsSync(path.join(dataDirectory, 'gba-qa.sqlite')), true)
+    } finally {
+      secondStore.close()
+    }
+  } finally {
+    firstStore.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('API ставить Codex job у чергу та повторно реагує на спеціальний статус', async () => {
+  await withTestApp(async ({ app, store }) => {
+    const firstRun = await request(app)
+      .post('/api/tasks/BUG-1051/agent-runs')
+      .expect(202)
+
+    assert.equal(firstRun.body.agentRun.status, 'queued')
+    assert.equal(firstRun.body.agentRun.trigger, 'manual')
+    assert.equal(firstRun.body.agentRun.attempt, 1)
+
+    const duplicate = await request(app)
+      .post('/api/tasks/BUG-1051/agent-runs')
+      .expect(200)
+    assert.equal(duplicate.body.agentRun.id, firstRun.body.agentRun.id)
+
+    store.updateAgentRun(firstRun.body.agentRun.id, {
+      status: 'completed',
+      summary: 'Перша спроба завершена.',
+      finishedAt: new Date().toISOString(),
+    })
+
+    const reviewAgain = await request(app)
+      .patch('/api/tasks/BUG-1051')
+      .send({ status: 'review_again' })
+      .expect(200)
+
+    assert.equal(reviewAgain.body.status, 'review_again')
+    assert.equal(reviewAgain.body.agentRun.status, 'queued')
+    assert.equal(reviewAgain.body.agentRun.trigger, 'review_again')
+    assert.equal(reviewAgain.body.agentRun.attempt, 2)
+
+    const history = await request(app)
+      .get('/api/tasks/BUG-1051/agent-runs')
+      .expect(200)
+    assert.equal(history.body.length, 2)
+  })
+})
+
+test('API захищає Codex trigger окремим серверним токеном', async () => {
+  const previousToken = process.env.CODEX_TRIGGER_TOKEN
+  process.env.CODEX_TRIGGER_TOKEN = 'test-trigger-secret'
+  try {
+    await withTestApp(async ({ app }) => {
+      await request(app)
+        .post('/api/tasks')
+        .field('title', 'Автоматичний захищений запуск')
+        .expect(401)
+
+      const automaticallyQueued = await request(app)
+        .post('/api/tasks')
+        .set('X-Codex-Trigger-Token', 'test-trigger-secret')
+        .field('title', 'Автоматичний захищений запуск')
+        .expect(201)
+      assert.equal(automaticallyQueued.body.agentRun.status, 'queued')
+
+      await request(app)
+        .post('/api/tasks/BUG-1051/agent-runs')
+        .expect(401)
+
+      const authorized = await request(app)
+        .post('/api/tasks/BUG-1051/agent-runs')
+        .set('X-Codex-Trigger-Token', 'test-trigger-secret')
+        .expect(202)
+      assert.equal(authorized.body.agentRun.status, 'queued')
+    })
+  } finally {
+    if (previousToken === undefined) delete process.env.CODEX_TRIGGER_TOKEN
+    else process.env.CODEX_TRIGGER_TOKEN = previousToken
+  }
+})
+
+test('API показує баги, опрацьовані в поточному build', async () => {
+  await withTestApp(async ({ app }) => {
+    const emptyBuild = await request(app).get('/api/builds/current').expect(200)
+    assert.equal(emptyBuild.body.number, '0.1.0-local')
+    assert.equal(emptyBuild.body.bugs.length, 0)
+
+    await request(app)
+      .patch('/api/tasks/BUG-1051')
+      .send({ status: 'ready_for_retest' })
+      .expect(200)
+
+    const currentBuild = await request(app).get('/api/builds/current').expect(200)
+    assert.equal(currentBuild.body.bugs.length, 1)
+    assert.equal(currentBuild.body.bugs[0].id, 'BUG-1051')
+    assert.equal(currentBuild.body.bugs[0].statusAtProcessing, 'ready_for_retest')
+    assert.equal(currentBuild.body.bugs[0].source, 'manual')
+  })
+})
+
+test('API відхиляє невалідну задачу', async () => {
+  await withTestApp(async ({ app }) => {
+    const response = await request(app)
+      .post('/api/tasks')
+      .field('title', 'x')
+      .field('priority', 'unknown')
+      .expect(400)
+
+    assert.match(response.body.message, /щонайменше 3 символи/)
+  })
+})

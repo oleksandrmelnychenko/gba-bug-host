@@ -1,0 +1,40 @@
+{
+  "name": "gba-bug-host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n API,WEB,CODEX -c green,cyan,magenta \"node server/index.js\" \"vite\" \"node server/worker.js\"",
+    "dev:server": "node server/index.js",
+    "dev:web": "vite",
+    "worker": "node server/worker.js",
+    "build": "tsc -b && vite build",
+    "start": "NODE_ENV=production node server/index.js",
+    "test": "node --test tests/*.test.js",
+    "check": "npm run test && npm run build"
+  },
+  "dependencies": {
+    "@fontsource/jetbrains-mono": "^5.3.0",
+    "@fontsource/onest": "^5.3.0",
+    "express": "^5.1.0",
+    "lucide-react": "^0.468.0",
+    "multer": "^2.0.2",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/multer": "^2.0.0",
+    "@types/node": "^24.2.0",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react": "^4.7.0",
+    "concurrently": "^9.2.0",
+    "supertest": "^7.1.4",
+    "typescript": "~5.9.2",
+    "vite": "^7.1.2"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

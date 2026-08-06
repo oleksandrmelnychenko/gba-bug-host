@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.DS_Store
+.env
+.env.*
+!.env.example
+data/tasks.json
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal
+data/agent-runs/
+data/agent-worktrees/
+public/uploads/*
+!public/uploads/.gitkeep
+npm-debug.log*
+.playwright-cli/
+output/

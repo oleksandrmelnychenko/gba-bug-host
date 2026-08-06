@@ -1,0 +1,48 @@
+services:
+  web:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    environment:
+      PORT: 4000
+      APP_BUILD_NUMBER: "${APP_BUILD_NUMBER:?Set APP_BUILD_NUMBER in the server environment}"
+      DATA_DIR: /app/data
+      UPLOAD_DIR: /app/public/uploads
+      CODEX_TRIGGER_TOKEN: "${CODEX_TRIGGER_TOKEN:?Set CODEX_TRIGGER_TOKEN in the server environment}"
+    ports:
+      - "${QA_DESK_PORT:-4000}:4000"
+    volumes:
+      - qa-data:/app/data
+      - qa-uploads:/app/public/uploads
+
+  worker:
+    build:
+      context: .
+      target: worker
+    restart: unless-stopped
+    depends_on:
+      - web
+    environment:
+      APP_BUILD_NUMBER: "${APP_BUILD_NUMBER:?Set APP_BUILD_NUMBER in the server environment}"
+      DATA_DIR: /app/data
+      UPLOAD_DIR: /app/public/uploads
+      CODEX_TARGET_REPO: "${CODEX_TARGET_REPO_HOST_PATH:?Set CODEX_TARGET_REPO_HOST_PATH}"
+      CODEX_WORKTREES_DIR: "${CODEX_WORKTREES_HOST_PATH:?Set CODEX_WORKTREES_HOST_PATH}"
+      CODEX_HOME: /app/codex-home
+      CODEX_NETWORK_ACCESS: "${CODEX_NETWORK_ACCESS:-false}"
+      CODEX_JOB_TIMEOUT_MS: "${CODEX_JOB_TIMEOUT_MS:-2700000}"
+      CODEX_TRIGGER_TOKEN: "${CODEX_TRIGGER_TOKEN:?Set CODEX_TRIGGER_TOKEN in the server environment}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:?Set OPENAI_API_KEY in the server environment}"
+    command: ["sh", "-lc", "printf '%s' \"$$OPENAI_API_KEY\" | codex login --with-api-key && npm run worker"]
+    volumes:
+      - qa-data:/app/data
+      - qa-uploads:/app/public/uploads
+      - codex-home:/app/codex-home
+      - "${CODEX_TARGET_REPO_HOST_PATH:?Set CODEX_TARGET_REPO_HOST_PATH}:${CODEX_TARGET_REPO_HOST_PATH:?Set CODEX_TARGET_REPO_HOST_PATH}"
+      - "${CODEX_WORKTREES_HOST_PATH:?Set CODEX_WORKTREES_HOST_PATH}:${CODEX_WORKTREES_HOST_PATH:?Set CODEX_WORKTREES_HOST_PATH}"
+
+volumes:
+  qa-data:
+  qa-uploads:
+  codex-home:
