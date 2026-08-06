@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import { mkdir, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import express from 'express'
@@ -25,23 +25,6 @@ function createFileName(file) {
 
 function cleanText(value, fallback = '') {
   return typeof value === 'string' ? value.trim() : fallback
-}
-
-function authorizeCodexTrigger(request, response) {
-  const expected = process.env.CODEX_TRIGGER_TOKEN
-  if (!expected) return true
-  const received = request.get('x-codex-trigger-token') ?? ''
-  const expectedBuffer = Buffer.from(expected)
-  const receivedBuffer = Buffer.from(received)
-  const authorized = expectedBuffer.length === receivedBuffer.length
-    && timingSafeEqual(expectedBuffer, receivedBuffer)
-  if (authorized) return true
-
-  response.status(401).json({
-    code: 'CODEX_TOKEN_REQUIRED',
-    message: 'Потрібен токен для запуску Codex worker.',
-  })
-  return false
 }
 
 function normalizeSiteUrl(value, errors) {
@@ -176,9 +159,7 @@ export async function createApp(options = {}) {
     }
   })
 
-  app.post('/api/tasks', (request, response, next) => {
-    if (authorizeCodexTrigger(request, response)) next()
-  }, upload.array('attachments', 6), async (request, response, next) => {
+  app.post('/api/tasks', upload.array('attachments', 6), async (request, response, next) => {
     try {
       const { errors, values } = validateTaskInput(request.body)
       const mediaError = getMediaValidationError(request.files)
@@ -231,8 +212,6 @@ export async function createApp(options = {}) {
         response.status(400).json({ message: 'Опишіть для AI, що саме залишилося невиправленим.' })
         return
       }
-      if (startsReviewRun
-        && !authorizeCodexTrigger(request, response)) return
 
       const patch = {}
       for (const key of ['title', 'description', 'siteUrl', 'notes', 'reviewComment', 'area', 'project', 'status', 'priority', 'assignee']) {
@@ -268,7 +247,6 @@ export async function createApp(options = {}) {
 
   app.post('/api/tasks/:id/agent-runs', async (request, response, next) => {
     try {
-      if (!authorizeCodexTrigger(request, response)) return
       const result = await store.enqueueAgentRun(randomUUID(), request.params.id, 'manual')
       if (result.status === 'task_not_found') {
         response.status(404).json({ message: 'Задачу не знайдено.' })

@@ -56,14 +56,11 @@ sudo chown -R 1000:1000 /srv/gba-worktrees /srv/gba-console
 QA_DESK_PORT=4000
 APP_BUILD_NUMBER=2026.08.06.1
 OPENAI_API_KEY=your_api_key
-CODEX_TRIGGER_TOKEN=replace_with_a_long_random_secret
 CODEX_TARGET_REPO_HOST_PATH=/srv/gba-console
 CODEX_WORKTREES_HOST_PATH=/srv/gba-worktrees
 CODEX_NETWORK_ACCESS=false
 CODEX_JOB_TIMEOUT_MS=2700000
 ```
-
-Згенерувати trigger-token можна командою `openssl rand -hex 32`. При першому запуску Codex із браузера QA Desk попросить цей токен і збереже його лише в `sessionStorage` поточної вкладки.
 
 Потім запустіть:
 

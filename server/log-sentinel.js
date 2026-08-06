@@ -160,7 +160,6 @@ export class LogSentinel {
   constructor({
     dockerSocket = process.env.DOCKER_SOCKET ?? '/var/run/docker.sock',
     deskBaseUrl = process.env.SENTINEL_DESK_URL ?? 'http://127.0.0.1:4000',
-    triggerToken = process.env.CODEX_TRIGGER_TOKEN ?? '',
     dataDirectory = process.env.DATA_DIR ?? path.join(process.cwd(), 'data'),
     containers = parseContainerSpec(process.env.SENTINEL_CONTAINERS),
     ignore = parseIgnorePatterns(process.env.SENTINEL_IGNORE),
@@ -171,7 +170,6 @@ export class LogSentinel {
   } = {}) {
     this.dockerSocket = dockerSocket
     this.deskBaseUrl = deskBaseUrl.replace(/\/$/, '')
-    this.triggerToken = triggerToken
     this.statePath = path.join(dataDirectory, 'log-sentinel-state.json')
     this.containers = containers
     this.ignore = ignore
@@ -327,11 +325,7 @@ export class LogSentinel {
   async createDeskTask(draft) {
     const body = new FormData()
     for (const [key, value] of Object.entries(draft)) body.set(key, value)
-    const response = await fetch(`${this.deskBaseUrl}/api/tasks`, {
-      method: 'POST',
-      headers: this.triggerToken ? { 'X-Codex-Trigger-Token': this.triggerToken } : {},
-      body,
-    })
+    const response = await fetch(`${this.deskBaseUrl}/api/tasks`, { method: 'POST', body })
     if (!response.ok) {
       const payload = await response.text()
       throw new Error(`desk create → ${response.status}: ${payload.slice(0, 200)}`)

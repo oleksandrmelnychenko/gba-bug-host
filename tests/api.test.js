@@ -224,37 +224,19 @@ test('API ставить Codex job у чергу та повторно реаг�
   })
 })
 
-test('API захищає Codex trigger окремим серверним токеном', async () => {
-  const previousToken = process.env.CODEX_TRIGGER_TOKEN
-  process.env.CODEX_TRIGGER_TOKEN = 'test-trigger-secret'
-  try {
-    await withTestApp(async ({ app }) => {
-      await request(app)
-        .post('/api/tasks')
-        .field('title', 'Автоматичний захищений запуск')
-        .expect(401)
+test('API запускає Codex без окремого токена', async () => {
+  await withTestApp(async ({ app }) => {
+    const created = await request(app)
+      .post('/api/tasks')
+      .field('title', 'Запуск без токена')
+      .expect(201)
+    assert.equal(created.body.agentRun.status, 'queued')
 
-      const automaticallyQueued = await request(app)
-        .post('/api/tasks')
-        .set('X-Codex-Trigger-Token', 'test-trigger-secret')
-        .field('title', 'Автоматичний захищений запуск')
-        .expect(201)
-      assert.equal(automaticallyQueued.body.agentRun.status, 'queued')
-
-      await request(app)
-        .post('/api/tasks/BUG-1051/agent-runs')
-        .expect(401)
-
-      const authorized = await request(app)
-        .post('/api/tasks/BUG-1051/agent-runs')
-        .set('X-Codex-Trigger-Token', 'test-trigger-secret')
-        .expect(202)
-      assert.equal(authorized.body.agentRun.status, 'queued')
-    })
-  } finally {
-    if (previousToken === undefined) delete process.env.CODEX_TRIGGER_TOKEN
-    else process.env.CODEX_TRIGGER_TOKEN = previousToken
-  }
+    const rerun = await request(app)
+      .post('/api/tasks/BUG-1051/agent-runs')
+      .expect(202)
+    assert.equal(rerun.body.agentRun.status, 'queued')
+  })
 })
 
 test('API показує баги, опрацьовані в поточному build', async () => {

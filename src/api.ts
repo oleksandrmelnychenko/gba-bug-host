@@ -22,22 +22,6 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
-function codexToken() {
-  return window.sessionStorage.getItem('gba-codex-trigger-token') ?? ''
-}
-
-async function withCodexToken<T>(perform: (token: string) => Promise<T>) {
-  try {
-    return await perform(codexToken())
-  } catch (error) {
-    if (!(error instanceof ApiError) || error.status !== 401) throw error
-    const token = window.prompt('Введіть токен запуску Codex')?.trim()
-    if (!token) throw error
-    window.sessionStorage.setItem('gba-codex-trigger-token', token)
-    return perform(token)
-  }
-}
-
 export function getTasks() {
   return request<Task[]>('/api/tasks')
 }
@@ -47,28 +31,18 @@ export function getCurrentBuild() {
 }
 
 export function createTask(draft: TaskDraft, attachments: File[]) {
-  return withCodexToken((token) => {
-    const body = new FormData()
-    for (const [key, value] of Object.entries(draft)) body.append(key, value)
-    for (const attachment of attachments) body.append('attachments', attachment)
-    return request<Task>('/api/tasks', {
-      method: 'POST',
-      headers: token ? { 'X-Codex-Trigger-Token': token } : {},
-      body,
-    })
-  })
+  const body = new FormData()
+  for (const [key, value] of Object.entries(draft)) body.append(key, value)
+  for (const attachment of attachments) body.append('attachments', attachment)
+  return request<Task>('/api/tasks', { method: 'POST', body })
 }
 
 export function updateTask(id: string, patch: Partial<TaskDraft>) {
-  const perform = (token = '') => request<Task>(`/api/tasks/${id}`, {
-      method: 'PATCH',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { 'X-Codex-Trigger-Token': token } : {}),
-      },
-      body: JSON.stringify(patch),
-    })
-  return patch.status === 'review_again' ? withCodexToken(perform) : perform()
+  return request<Task>(`/api/tasks/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
 }
 
 export function addTaskAttachments(id: string, attachments: File[]) {
