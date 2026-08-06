@@ -55,6 +55,7 @@ export class ErrorGroupCollector {
     }
 
     if (!this.matcher.test(line)) return
+    if (isContinuationLine(line)) return
     if (this.ignore.some((pattern) => pattern.test(line))) return
     this.pending = [line]
     this.armTimer()
@@ -291,9 +292,18 @@ export class LogSentinel {
       return
     }
 
+    const lastCreatedForContainer = (this.state.lastCreatedByContainer ?? {})[container.name] ?? 0
+    if (now - lastCreatedForContainer < 3 * 60 * 1000) {
+      console.log(`[sentinel] ${container.name}: кулдаун після попередньої задачі, помилку ${fingerprint} відкладено`)
+      this.state.fingerprints[fingerprint] = { ...(known ?? {}), lastSeen: now, suppressed: true }
+      await this.saveState()
+      return
+    }
+
     const draft = buildTaskDraft(container, lines, fingerprint, this.buildTag)
     const task = await this.createDeskTask(draft)
     this.state.created.push(now)
+    this.state.lastCreatedByContainer = { ...(this.state.lastCreatedByContainer ?? {}), [container.name]: now }
     this.state.fingerprints[fingerprint] = {
       taskId: task.id,
       lastSeen: now,
