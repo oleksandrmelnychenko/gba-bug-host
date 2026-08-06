@@ -1298,26 +1298,50 @@ function isSameDay(value: string) {
   return date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth() && date.getDate() === now.getDate()
 }
 
-function AgentConclusion({ run }: { run: AgentRun }) {
+function parseRunDetails(run: AgentRun) {
+  try {
+    const parsed = JSON.parse(run.details || '{}') as { tests?: string[]; changedFiles?: string[] }
+    return {
+      tests: Array.isArray(parsed.tests) ? parsed.tests : [],
+      changedFiles: Array.isArray(parsed.changedFiles) ? parsed.changedFiles : [],
+    }
+  } catch {
+    return { tests: [], changedFiles: [] }
+  }
+}
+
+function AgentConclusion({
+  run,
+  onOpenConclusion,
+}: {
+  run: AgentRun
+  onOpenConclusion?: () => void
+}) {
   const summary = (run.summary ?? '').trim()
   const error = (run.error ?? '').trim()
   if (!summary && !error) return null
 
-  let tests: string[] = []
-  let changedFiles: string[] = []
-  try {
-    const parsed = JSON.parse(run.details || '{}') as { tests?: string[]; changedFiles?: string[] }
-    tests = Array.isArray(parsed.tests) ? parsed.tests : []
-    changedFiles = Array.isArray(parsed.changedFiles) ? parsed.changedFiles : []
-  } catch {
-    tests = []
-    changedFiles = []
-  }
+  const { tests, changedFiles } = parseRunDetails(run)
 
   return (
-    <div className={`pipeline-conclusion pipeline-conclusion-${run.status}`}>
+    <div
+      className={`pipeline-conclusion pipeline-conclusion-${run.status}${onOpenConclusion ? ' is-clickable' : ''}`}
+      role={onOpenConclusion ? 'button' : undefined}
+      tabIndex={onOpenConclusion ? 0 : undefined}
+      onClick={onOpenConclusion ? (event) => {
+        event.stopPropagation()
+        onOpenConclusion()
+      } : undefined}
+      onKeyDown={onOpenConclusion ? (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          event.stopPropagation()
+          onOpenConclusion()
+        }
+      } : undefined}
+    >
       <span><Bot size={12} /> Висновок агента · {agentRunMeta[run.status].label}</span>
-      <p>{summary || error}</p>
+      <p className="pipeline-conclusion-text">{summary || error}</p>
       {changedFiles.length > 0 && (
         <div className="pipeline-conclusion-files">
           {changedFiles.slice(0, 6).map((file) => <code key={file}>{file.split('/').slice(-2).join('/')}</code>)}
@@ -1329,6 +1353,115 @@ function AgentConclusion({ run }: { run: AgentRun }) {
           {tests.slice(0, 3).map((test) => <span key={test}>{test}</span>)}
         </div>
       )}
+      {onOpenConclusion && <span className="pipeline-conclusion-more">Показати повністю →</span>}
+    </div>
+  )
+}
+
+function AgentConclusionDialog({
+  task,
+  onClose,
+  onOpenTask,
+}: {
+  task: Task | null
+  onClose: () => void
+  onOpenTask: (taskId: string) => void
+}) {
+  useEffect(() => {
+    if (!task) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [task, onClose])
+
+  const run = task?.agentRun
+  if (!task || !run) return null
+
+  const { tests, changedFiles } = parseRunDetails(run)
+  const summary = (run.summary ?? '').trim()
+  const error = (run.error ?? '').trim()
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <section
+        className="task-dialog conclusion-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="conclusion-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="dialog-header">
+          <div>
+            <span className="eyebrow">{task.id} · спроба {run.attempt} · {agentRunMeta[run.status].label}</span>
+            <h2 id="conclusion-title">{task.title}</h2>
+          </div>
+          <button className="icon-button" onClick={onClose} aria-label="Закрити"><X size={19} /></button>
+        </div>
+
+        <div className="conclusion-body">
+          {(task.reviewComment ?? '').trim() && (
+            <section>
+              <h4>Промпт повторного циклу</h4>
+              <p className="conclusion-pre">{task.reviewComment}</p>
+            </section>
+          )}
+
+          <section>
+            <h4>Висновок агента</h4>
+            <p className="conclusion-pre">{summary || '—'}</p>
+          </section>
+
+          {error && (
+            <section>
+              <h4>Помилка запуску</h4>
+              <p className="conclusion-pre conclusion-error">{error}</p>
+            </section>
+          )}
+
+          {changedFiles.length > 0 && (
+            <section>
+              <h4>Змінені файли ({changedFiles.length})</h4>
+              <ul className="conclusion-list">
+                {changedFiles.map((file) => <li key={file}><code>{file}</code></li>)}
+              </ul>
+            </section>
+          )}
+
+          {tests.length > 0 && (
+            <section>
+              <h4>Перевірки ({tests.length})</h4>
+              <ul className="conclusion-list">
+                {tests.map((test) => <li key={test}>{test}</li>)}
+              </ul>
+            </section>
+          )}
+
+          <section>
+            <h4>Виконання</h4>
+            <dl className="conclusion-meta">
+              <div><dt>Гілка</dt><dd><code>{run.branch || '—'}</code></dd></div>
+              <div><dt>Старт</dt><dd>{run.startedAt ? formatDateTime(run.startedAt) : '—'}</dd></div>
+              <div><dt>Фініш</dt><dd>{run.finishedAt ? formatDateTime(run.finishedAt) : '—'}</dd></div>
+              <div><dt>Тригер</dt><dd>{run.trigger === 'review_again' ? 'Передивись ще раз' : 'Створення задачі'}</dd></div>
+            </dl>
+          </section>
+        </div>
+
+        <div className="dialog-actions">
+          <button className="button button-secondary" onClick={onClose}>Закрити</button>
+          <button
+            className="button button-primary"
+            onClick={() => {
+              onClose()
+              onOpenTask(task.id)
+            }}
+          >
+            Відкрити задачу
+          </button>
+        </div>
+      </section>
     </div>
   )
 }
@@ -1336,9 +1469,11 @@ function AgentConclusion({ run }: { run: AgentRun }) {
 function PipelineRunCard({
   task,
   onOpenTask,
+  onOpenConclusion,
 }: {
   task: Task
   onOpenTask: (taskId: string) => void
+  onOpenConclusion: (task: Task) => void
 }) {
   const run = task.agentRun
   if (!run) return null
@@ -1368,7 +1503,7 @@ function PipelineRunCard({
           <p>{prompt || 'Без коментаря — Codex отримає лише статус «Передивись ще раз».'}</p>
         </div>
       )}
-      <AgentConclusion run={run} />
+      <AgentConclusion run={run} onOpenConclusion={() => onOpenConclusion(task)} />
     </button>
   )
 }
@@ -1376,9 +1511,11 @@ function PipelineRunCard({
 function PipelineView({
   tasks,
   onOpenTask,
+  onOpenConclusion,
 }: {
   tasks: Task[]
   onOpenTask: (taskId: string) => void
+  onOpenConclusion: (task: Task) => void
 }) {
   const running = tasks
     .filter((task) => task.agentRun?.status === 'running')
@@ -1427,7 +1564,7 @@ function PipelineView({
         <h3><LoaderCircle className={running.length ? 'spin' : ''} size={16} /> Зараз у роботі</h3>
         {running.length ? (
           <div className="pipeline-cards">
-            {running.map((task) => <PipelineRunCard key={task.id} task={task} onOpenTask={onOpenTask} />)}
+            {running.map((task) => <PipelineRunCard key={task.id} task={task} onOpenTask={onOpenTask} onOpenConclusion={onOpenConclusion} />)}
           </div>
         ) : <p className="pipeline-empty">Воркер вільний — черга порожня або обробка завершена.</p>}
       </section>
@@ -1455,7 +1592,7 @@ function PipelineView({
         <section className="pipeline-section">
           <h3><RefreshCw size={16} /> Повторні цикли з промптами</h3>
           <div className="pipeline-cards pipeline-scroll">
-            {reruns.map((task) => <PipelineRunCard key={`rerun-${task.id}`} task={task} onOpenTask={onOpenTask} />)}
+            {reruns.map((task) => <PipelineRunCard key={`rerun-${task.id}`} task={task} onOpenTask={onOpenTask} onOpenConclusion={onOpenConclusion} />)}
           </div>
         </section>
       )}
@@ -1464,7 +1601,7 @@ function PipelineView({
         <h3><Bot size={16} /> Висновки агента ({finished.length})</h3>
         {finished.length ? (
           <div className="pipeline-cards pipeline-scroll">
-            {finished.map((task) => <PipelineRunCard key={`done-${task.id}`} task={task} onOpenTask={onOpenTask} />)}
+            {finished.map((task) => <PipelineRunCard key={`done-${task.id}`} task={task} onOpenTask={onOpenTask} onOpenConclusion={onOpenConclusion} />)}
           </div>
         ) : <p className="pipeline-empty">Ще немає завершених прогонів.</p>}
       </section>
@@ -1504,6 +1641,7 @@ function App() {
   const [reviewAgainRequest, setReviewAgainRequest] = useState<ReviewAgainRequest | null>(null)
   const [toast, setToast] = useState('')
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('console')
+  const [conclusionTask, setConclusionTask] = useState<Task | null>(null)
   const [notificationsReady, setNotificationsReady] = useState(
     () => 'Notification' in window && Notification.permission === 'granted',
   )
@@ -1713,7 +1851,7 @@ function App() {
             loading ? (
               <div className="loading-state"><LoaderCircle className="spin" /><span>Завантажую конвеєр…</span></div>
             ) : (
-              <PipelineView tasks={tasks} onOpenTask={setSelectedId} />
+              <PipelineView tasks={tasks} onOpenTask={setSelectedId} onOpenConclusion={setConclusionTask} />
             )
           ) : (
           <>
@@ -1800,6 +1938,11 @@ function App() {
         request={reviewAgainRequest}
         onClose={() => setReviewAgainRequest(null)}
         onSubmit={submitReviewAgain}
+      />
+      <AgentConclusionDialog
+        task={conclusionTask ? (tasks.find((item) => item.id === conclusionTask.id) ?? conclusionTask) : null}
+        onClose={() => setConclusionTask(null)}
+        onOpenTask={setSelectedId}
       />
       <Lightbox attachment={lightboxAttachment} onClose={() => setLightboxAttachment(null)} />
       {toast && <div className="toast"><Check size={15} /> {toast}</div>}

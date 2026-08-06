@@ -2552,3 +2552,110 @@ main {
   font-size: 11px;
   color: var(--gray-500);
 }
+
+.pipeline-conclusion.is-clickable {
+  cursor: pointer;
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.pipeline-conclusion.is-clickable:hover {
+  box-shadow: var(--shadow-sm);
+}
+
+.pipeline-conclusion-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.pipeline-conclusion-more {
+  display: block;
+  margin-top: 7px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--brand-700);
+}
+
+.conclusion-dialog {
+  width: min(760px, 100%);
+}
+
+.conclusion-body {
+  padding: 4px 24px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.conclusion-body h4 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--gray-500);
+}
+
+.conclusion-pre {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 9px;
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--gray-800);
+  white-space: pre-wrap;
+}
+
+.conclusion-error {
+  background: #fffbfa;
+  border-color: #fecdca;
+  color: #b42318;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 12px;
+}
+
+.conclusion-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--gray-700);
+}
+
+.conclusion-list code {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--gray-800);
+}
+
+.conclusion-meta {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+}
+
+.conclusion-meta div {
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: var(--gray-25);
+  border: 1px solid var(--gray-200);
+}
+
+.conclusion-meta dt {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--gray-500);
+}
+
+.conclusion-meta dd {
+  margin: 3px 0 0;
+  font-size: 13px;
+  color: var(--gray-800);
+  word-break: break-all;
+}
