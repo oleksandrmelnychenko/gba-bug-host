@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readlink, rm, symlink, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -158,6 +158,92 @@ writeFileSync(outputPath, JSON.stringify({
     assert.equal(await readFile(path.join(backendRepository, 'app.txt'), 'utf8'), 'before\n')
     assert.equal(git(frontendRepository, 'status', '--short'), '')
     assert.equal(git(backendRepository, 'status', '--short'), '')
+  } finally {
+    if (previousStack === undefined) delete process.env.CODEX_REPOS_CONSOLE
+    else process.env.CODEX_REPOS_CONSOLE = previousStack
+    store.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('Codex worker лінкує залежності у worktree і диктує перевірки репозиторію', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-codex-checks-'))
+  const repository = path.join(root, 'gba_console')
+  const dataDirectory = path.join(root, 'data')
+  const uploadsDirectory = path.join(root, 'uploads')
+  const worktreesDirectory = path.join(root, 'worktrees')
+  const fakeCodex = path.join(root, 'fake-codex.mjs')
+  await mkdir(repository, { recursive: true })
+  await mkdir(uploadsDirectory, { recursive: true })
+
+  git(repository, 'init')
+  git(repository, 'config', 'user.email', 'worker-test@example.com')
+  git(repository, 'config', 'user.name', 'Worker Test')
+  await writeFile(path.join(repository, 'app.txt'), 'before\n', 'utf8')
+  git(repository, 'add', 'app.txt')
+  git(repository, 'commit', '-m', 'Initial fixture')
+
+  await mkdir(path.join(repository, 'node_modules'), { recursive: true })
+  await writeFile(path.join(repository, 'node_modules', 'marker.txt'), 'dependency\n', 'utf8')
+
+  await writeFile(fakeCodex, `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs'
+const args = process.argv.slice(2)
+const outputPath = args[args.indexOf('--output-last-message') + 1]
+let prompt = ''
+for await (const chunk of process.stdin) prompt += chunk
+writeFileSync('prompt.txt', prompt, 'utf8')
+writeFileSync(outputPath, JSON.stringify({
+  outcome: 'fixed',
+  summary: 'Перевірки пройдені.',
+  tests: ['npx tsc --noEmit'],
+  changedFiles: []
+}), 'utf8')
+`, 'utf8')
+  await chmod(fakeCodex, 0o755)
+
+  const previousStack = process.env.CODEX_REPOS_CONSOLE
+  process.env.CODEX_REPOS_CONSOLE = repository
+  const store = new TaskStore(dataDirectory)
+  try {
+    await store.ensureReady()
+    store.transaction(() => {
+      for (const task of getSeedTasks()) store.insertTask(task)
+    })
+    store.enqueueAgentRun('RUN-CHECKS-1', 'BUG-1049', 'manual')
+    const run = store.claimNextAgentRun()
+
+    const worker = new CodexWorker({
+      store,
+      rootDirectory: root,
+      dataDirectory,
+      uploadsDirectory,
+      targetRepository: repository,
+      worktreesDirectory,
+      codexBinary: fakeCodex,
+      buildNumber: 'checks-test-build',
+      timeoutMs: 10_000,
+    })
+    await worker.processRun(run)
+
+    const jobDirectory = path.join(worktreesDirectory, 'bug-1049')
+    assert.equal(
+      await readFile(path.join(jobDirectory, 'gba_console', 'node_modules', 'marker.txt'), 'utf8'),
+      'dependency\n',
+    )
+
+    const prompt = await readFile(path.join(jobDirectory, 'prompt.txt'), 'utf8')
+    assert.match(prompt, /npx tsc --noEmit/)
+    assert.match(prompt, /npx vitest run --silent/)
+    assert.match(prompt, /мережі немає/)
+
+    const linkPath = path.join(jobDirectory, 'gba_console', 'node_modules')
+    const decoy = path.join(root, 'decoy-node-modules')
+    await mkdir(decoy, { recursive: true })
+    await unlink(linkPath)
+    await symlink(decoy, linkPath, 'dir')
+    await worker.ensureWorktrees('BUG-1049', worker.resolveProjectStack('console'))
+    assert.equal(await readlink(linkPath), path.join(repository, 'node_modules'))
   } finally {
     if (previousStack === undefined) delete process.env.CODEX_REPOS_CONSOLE
     else process.env.CODEX_REPOS_CONSOLE = previousStack

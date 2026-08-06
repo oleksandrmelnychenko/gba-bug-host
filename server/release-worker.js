@@ -208,6 +208,10 @@ export class ReleaseWorker {
         return { ok: false, reason: `${repo}: у робочому дереві є незакомічені зміни — відкладено` }
       }
 
+      const baseline = await runProcess('git', ['-C', plan.root, 'rev-parse', 'HEAD'], {})
+      const baselineCommit = /\b[0-9a-f]{40}\b/.exec(baseline.output)?.[0]
+      if (!baselineCommit) return { ok: false, reason: `${repo}: не вдалося зафіксувати HEAD перед мерджем` }
+
       const merge = await runProcess('git', ['-C', plan.root, 'merge', '--no-edit', branch], {})
       if (merge.code !== 0) {
         await runProcess('git', ['-C', plan.root, 'merge', '--abort'], {})
@@ -217,7 +221,7 @@ export class ReleaseWorker {
       for (const check of plan.checks) {
         const result = await runProcess(check[0], check.slice(1), { cwd: plan.root })
         if (result.code !== 0) {
-          await runProcess('git', ['-C', plan.root, 'reset', '--hard', `origin/${plan.branch}`], {})
+          await runProcess('git', ['-C', plan.root, 'reset', '--hard', baselineCommit], {})
           return { ok: false, reason: `${repo}: перевірка «${check.join(' ')}» впала; мердж відкочено` }
         }
       }
