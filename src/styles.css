@@ -240,6 +240,33 @@ main {
   position: relative;
 }
 
+.codex-progress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  padding: 3px 9px 3px 6px;
+  width: max-content;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #5925dc;
+  background: linear-gradient(110deg, #f4ebff 30%, #e9d7fe 45%, #f4ebff 60%);
+  background-size: 220% 100%;
+  animation: codex-progress-shimmer 1.8s linear infinite;
+}
+
+.codex-progress-queued {
+  color: #175cd3;
+  background: linear-gradient(110deg, #eff4ff 30%, #d1e0ff 45%, #eff4ff 60%);
+  background-size: 220% 100%;
+}
+
+@keyframes codex-progress-shimmer {
+  0% { background-position: 120% 0; }
+  100% { background-position: -100% 0; }
+}
+
 .column-resizer {
   position: absolute;
   top: 0;

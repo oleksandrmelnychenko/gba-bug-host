@@ -534,6 +534,12 @@ function TaskTable({
                     ) : <PriorityBadge priority={task.priority} />}
                   </td>
                   <td onClick={(event) => event.stopPropagation()}>
+                    {task.agentRun && (task.agentRun.status === 'queued' || task.agentRun.status === 'running') && (
+                      <span className={`codex-progress codex-progress-${task.agentRun.status}`}>
+                        <LoaderCircle className="spin" size={13} />
+                        {task.agentRun.status === 'running' ? 'Codex працює…' : 'У черзі Codex'}
+                      </span>
+                    )}
                     {isEditing ? (
                       <select className="table-edit-input table-edit-select" value={editDraft.status} onChange={(event) => setEditField('status', event.target.value as TaskStatus)} aria-label="Статус">
                         {statusOrder.map((status) => <option value={status} key={status}>{statusMeta[status].label}</option>)}
