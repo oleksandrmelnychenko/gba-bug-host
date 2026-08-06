@@ -42,6 +42,27 @@ services:
       - "${CODEX_TARGET_REPO_HOST_PATH:?Set CODEX_TARGET_REPO_HOST_PATH}:${CODEX_TARGET_REPO_HOST_PATH:?Set CODEX_TARGET_REPO_HOST_PATH}"
       - "${CODEX_WORKTREES_HOST_PATH:?Set CODEX_WORKTREES_HOST_PATH}:${CODEX_WORKTREES_HOST_PATH:?Set CODEX_WORKTREES_HOST_PATH}"
 
+  sentinel:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    depends_on:
+      - web
+    user: "0:0"
+    command: ["npm", "run", "sentinel"]
+    environment:
+      DATA_DIR: /app/data
+      SENTINEL_DESK_URL: http://web:4000
+      CODEX_TRIGGER_TOKEN: "${CODEX_TRIGGER_TOKEN:?Set CODEX_TRIGGER_TOKEN in the server environment}"
+      APP_BUILD_NUMBER: "${APP_BUILD_NUMBER:?Set APP_BUILD_NUMBER in the server environment}"
+      SENTINEL_CONTAINERS: "${SENTINEL_CONTAINERS:-}"
+      SENTINEL_IGNORE: "${SENTINEL_IGNORE:-}"
+      SENTINEL_MAX_PER_HOUR: "${SENTINEL_MAX_PER_HOUR:-4}"
+    volumes:
+      - qa-data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+
 volumes:
   qa-data:
   qa-uploads:
