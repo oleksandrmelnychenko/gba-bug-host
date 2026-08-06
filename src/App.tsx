@@ -221,9 +221,11 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
 function BuildTicker({
   refreshKey,
   onOpenTask,
+  onBuildChanged,
 }: {
   refreshKey: string
   onOpenTask: (taskId: string) => void
+  onBuildChanged: (buildNumber: string) => void
 }) {
   const [open, setOpen] = useState(false)
   const [build, setBuild] = useState<BuildInfo | null>(null)
@@ -231,11 +233,16 @@ function BuildTicker({
   const [error, setError] = useState('')
   const rootRef = useRef<HTMLDivElement>(null)
 
+  const knownNumberRef = useRef('')
+
   const loadBuild = async () => {
     setLoading(true)
     setError('')
     try {
-      setBuild(await getCurrentBuild())
+      const next = await getCurrentBuild()
+      setBuild(next)
+      if (knownNumberRef.current && knownNumberRef.current !== next.number) onBuildChanged(next.number)
+      knownNumberRef.current = next.number
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : 'Не вдалося завантажити build.')
     } finally {
@@ -246,6 +253,11 @@ function BuildTicker({
   useEffect(() => {
     void loadBuild()
   }, [refreshKey])
+
+  useEffect(() => {
+    const interval = window.setInterval(() => void loadBuild(), 60_000)
+    return () => window.clearInterval(interval)
+  }, [])
 
   useEffect(() => {
     if (!open) return
@@ -2122,6 +2134,12 @@ function App() {
           <BuildTicker
             refreshKey={tasks.map((task) => `${task.id}:${task.status}:${task.updatedAt}`).join('|')}
             onOpenTask={setSelectedId}
+            onBuildChanged={(buildNumber) => {
+              setToast(`Задеплоєно новий build ${buildNumber}`)
+              if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
+                new Notification('GBA QA Desk', { body: `Задеплоєно новий build ${buildNumber}` })
+              }
+            }}
           />
         </div>
       </header>
