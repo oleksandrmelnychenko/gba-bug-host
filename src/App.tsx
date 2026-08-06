@@ -358,6 +358,7 @@ function AttachmentStack({
 function TaskTable({
   tasks,
   updatingId,
+  scrollable = false,
   sortDirection,
   onOpenTask,
   onStatusChange,
@@ -366,6 +367,7 @@ function TaskTable({
 }: {
   tasks: Task[]
   updatingId: string | null
+  scrollable?: boolean
   sortDirection: DateSortDirection
   onOpenTask: (task: Task) => void
   onStatusChange: (task: Task, status: TaskStatus) => void
@@ -417,7 +419,7 @@ function TaskTable({
 
   return (
     <>
-      <div className="table-scroll">
+      <div className={`table-scroll${scrollable ? ' table-scroll-capped' : ''}`}>
         <table className="task-table" style={columnWidths ? { tableLayout: 'fixed' } : undefined}>
           {columnWidths && (
             <colgroup>
@@ -1893,6 +1895,7 @@ function App() {
             <TaskTable
               tasks={paginatedTasks}
               updatingId={updatingId}
+              scrollable={activeTab === 'auto'}
               sortDirection={sortDirection}
               onOpenTask={(task) => setSelectedId(task.id)}
               onStatusChange={(task, status) => void changeStatus(task, status)}

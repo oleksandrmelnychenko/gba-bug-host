@@ -2659,3 +2659,24 @@ main {
   color: var(--gray-800);
   word-break: break-all;
 }
+
+.table-scroll-capped {
+  max-height: min(62vh, 640px);
+  overflow-y: auto;
+}
+
+.table-scroll-capped thead th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--gray-50);
+}
+
+.conclusion-dialog .dialog-actions {
+  position: sticky;
+  bottom: 0;
+  margin-top: 4px;
+  padding: 14px 24px 18px;
+  background: #fff;
+  box-shadow: 0 -6px 14px -12px rgba(10, 13, 18, 0.5);
+}
