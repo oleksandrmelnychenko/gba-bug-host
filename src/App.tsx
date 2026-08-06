@@ -47,8 +47,8 @@ import {
   priorityMeta,
   projectMeta,
   statusMeta,
-  type AgentRunStatus,
   type AgentRun,
+  type AgentRunStatus,
   type BuildInfo,
   type Task,
   type TaskAttachment,
@@ -1298,6 +1298,41 @@ function isSameDay(value: string) {
   return date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth() && date.getDate() === now.getDate()
 }
 
+function AgentConclusion({ run }: { run: AgentRun }) {
+  const summary = (run.summary ?? '').trim()
+  const error = (run.error ?? '').trim()
+  if (!summary && !error) return null
+
+  let tests: string[] = []
+  let changedFiles: string[] = []
+  try {
+    const parsed = JSON.parse(run.details || '{}') as { tests?: string[]; changedFiles?: string[] }
+    tests = Array.isArray(parsed.tests) ? parsed.tests : []
+    changedFiles = Array.isArray(parsed.changedFiles) ? parsed.changedFiles : []
+  } catch {
+    tests = []
+    changedFiles = []
+  }
+
+  return (
+    <div className={`pipeline-conclusion pipeline-conclusion-${run.status}`}>
+      <span><Bot size={12} /> Висновок агента · {agentRunMeta[run.status].label}</span>
+      <p>{summary || error}</p>
+      {changedFiles.length > 0 && (
+        <div className="pipeline-conclusion-files">
+          {changedFiles.slice(0, 6).map((file) => <code key={file}>{file.split('/').slice(-2).join('/')}</code>)}
+          {changedFiles.length > 6 && <code>+{changedFiles.length - 6}</code>}
+        </div>
+      )}
+      {tests.length > 0 && (
+        <div className="pipeline-conclusion-tests">
+          {tests.slice(0, 3).map((test) => <span key={test}>{test}</span>)}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function PipelineRunCard({
   task,
   onOpenTask,
@@ -1333,6 +1368,7 @@ function PipelineRunCard({
           <p>{prompt || 'Без коментаря — Codex отримає лише статус «Передивись ще раз».'}</p>
         </div>
       )}
+      <AgentConclusion run={run} />
     </button>
   )
 }
@@ -1359,6 +1395,12 @@ function PipelineView({
     return match && isSameDay(match[1].trim().replace(' ', 'T'))
   })
   const autoToday = tasks.filter((task) => isSentinelTask(task) && isSameDay(task.createdAt))
+  const finished = tasks
+    .filter((task) => {
+      const run = task.agentRun
+      return run && ['completed', 'needs_review', 'blocked', 'failed'].includes(run.status)
+    })
+    .sort((a, b) => Date.parse(b.agentRun!.finishedAt ?? b.agentRun!.updatedAt) - Date.parse(a.agentRun!.finishedAt ?? a.agentRun!.updatedAt))
 
   return (
     <div className="pipeline-view">
@@ -1393,7 +1435,7 @@ function PipelineView({
       <section className="pipeline-section">
         <h3><Layers3 size={16} /> Черга ({queued.length})</h3>
         {queued.length ? (
-          <div className="pipeline-queue">
+          <div className="pipeline-queue pipeline-scroll">
             {queued.map((task, index) => (
               <button type="button" className="pipeline-queue-row" key={task.id} onClick={() => onOpenTask(task.id)}>
                 <span className="pipeline-queue-position">{index + 1}</span>
@@ -1412,16 +1454,25 @@ function PipelineView({
       {reruns.length > 0 && (
         <section className="pipeline-section">
           <h3><RefreshCw size={16} /> Повторні цикли з промптами</h3>
-          <div className="pipeline-cards">
+          <div className="pipeline-cards pipeline-scroll">
             {reruns.map((task) => <PipelineRunCard key={`rerun-${task.id}`} task={task} onOpenTask={onOpenTask} />)}
           </div>
         </section>
       )}
 
+      <section className="pipeline-section">
+        <h3><Bot size={16} /> Висновки агента ({finished.length})</h3>
+        {finished.length ? (
+          <div className="pipeline-cards pipeline-scroll">
+            {finished.map((task) => <PipelineRunCard key={`done-${task.id}`} task={task} onOpenTask={onOpenTask} />)}
+          </div>
+        ) : <p className="pipeline-empty">Ще немає завершених прогонів.</p>}
+      </section>
+
       {releasedToday.length > 0 && (
         <section className="pipeline-section">
           <h3><Check size={16} /> Випущено на dev сьогодні</h3>
-          <div className="pipeline-queue">
+          <div className="pipeline-queue pipeline-scroll">
             {releasedToday.map((task) => (
               <button type="button" className="pipeline-queue-row" key={`released-${task.id}`} onClick={() => onOpenTask(task.id)}>
                 <span className="task-id">{task.id}</span>
