@@ -61,6 +61,7 @@ export interface BuildInfo {
   number: string
   createdAt: string
   bugs: BuildBug[]
+  pending: BuildBug[]
 }
 
 export interface Task {

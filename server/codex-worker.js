@@ -404,7 +404,7 @@ export class CodexWorker {
 
     if (result.outcome === 'fixed') {
       this.store.patch(currentTask.id, { status: 'ready_for_retest' })
-      this.store.markTaskProcessed(this.buildNumber, currentTask.id, 'codex')
+      this.store.markTaskProcessed(currentTask.id, 'codex')
     }
     if (result.outcome === 'blocked') this.store.patch(currentTask.id, { status: 'blocked' })
   }

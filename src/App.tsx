@@ -55,6 +55,7 @@ import {
   statusMeta,
   type AgentRun,
   type AgentRunStatus,
+  type BuildBug,
   type BuildInfo,
   type Task,
   type TaskAttachment,
@@ -218,6 +219,35 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
   )
 }
 
+function BuildBugRow({
+  bug,
+  pending = false,
+  onOpen,
+}: {
+  bug: BuildBug
+  pending?: boolean
+  onOpen: () => void
+}) {
+  return (
+    <button type="button" className={`build-bug-row${pending ? ' is-pending' : ''}`} onClick={onOpen}>
+      <span className="build-bug-id">{bug.id}</span>
+      <span className="build-bug-copy">
+        <strong>{bug.title}</strong>
+        <small>
+          {bug.area}
+          <span
+            className={`build-status-chip status-${bug.status}`}
+            title={`У момент випуску: ${statusMeta[bug.statusAtProcessing].label}`}
+          >
+            {statusMeta[bug.status].shortLabel}
+          </span>
+        </small>
+      </span>
+      <span className={`build-source build-source-${bug.source}`}>{bug.source === 'codex' ? 'AI' : 'QA'}</span>
+    </button>
+  )
+}
+
 function BuildTicker({
   refreshKey,
   onOpenTask,
@@ -308,26 +338,35 @@ function BuildTicker({
             <div className="build-popover-state"><LoaderCircle className="spin" size={17} /> Завантажую…</div>
           ) : error ? (
             <button className="build-popover-state build-retry" onClick={() => void loadBuild()}>{error} Спробувати ще</button>
-          ) : build?.bugs.length ? (
+          ) : build?.bugs.length || build?.pending.length ? (
             <div className="build-bug-list">
               {build.bugs.map((bug) => (
-                <button
-                  type="button"
-                  className="build-bug-row"
+                <BuildBugRow
                   key={bug.id}
-                  onClick={() => {
+                  bug={bug}
+                  onOpen={() => {
                     onOpenTask(bug.id)
                     setOpen(false)
                   }}
-                >
-                  <span className="build-bug-id">{bug.id}</span>
-                  <span className="build-bug-copy">
-                    <strong>{bug.title}</strong>
-                    <small>{bug.area} · {statusMeta[bug.statusAtProcessing].label}</small>
-                  </span>
-                  <span className={`build-source build-source-${bug.source}`}>{bug.source === 'codex' ? 'AI' : 'QA'}</span>
-                </button>
+                />
               ))}
+
+              {build.pending.length > 0 && (
+                <>
+                  <div className="build-bug-divider">Чекають на наступний деплой · {build.pending.length}</div>
+                  {build.pending.map((bug) => (
+                    <BuildBugRow
+                      key={`pending-${bug.id}`}
+                      bug={bug}
+                      pending
+                      onOpen={() => {
+                        onOpenTask(bug.id)
+                        setOpen(false)
+                      }}
+                    />
+                  ))}
+                </>
+              )}
             </div>
           ) : (
             <div className="build-popover-empty">

@@ -286,11 +286,29 @@ test('API показує баги, опрацьовані в поточному 
       .send({ status: 'ready_for_retest' })
       .expect(200)
 
-    const currentBuild = await request(app).get('/api/builds/current').expect(200)
-    assert.equal(currentBuild.body.bugs.length, 1)
-    assert.equal(currentBuild.body.bugs[0].id, 'BUG-1051')
-    assert.equal(currentBuild.body.bugs[0].statusAtProcessing, 'ready_for_retest')
-    assert.equal(currentBuild.body.bugs[0].source, 'manual')
+    const waiting = await request(app).get('/api/builds/current').expect(200)
+    assert.equal(waiting.body.bugs.length, 0)
+    assert.equal(waiting.body.pending.length, 1)
+    assert.equal(waiting.body.pending[0].id, 'BUG-1051')
+    assert.equal(waiting.body.pending[0].statusAtProcessing, 'ready_for_retest')
+    assert.equal(waiting.body.pending[0].source, 'manual')
+  })
+})
+
+test('наступний build забирає собі виправлення, що чекали на деплой', async () => {
+  await withTestApp(async ({ app, store }) => {
+    await request(app)
+      .patch('/api/tasks/BUG-1051')
+      .send({ status: 'ready_for_retest' })
+      .expect(200)
+
+    const shipped = store.ensureBuild('2026.08.06.2100')
+    assert.equal(shipped.bugs.length, 1)
+    assert.equal(shipped.bugs[0].id, 'BUG-1051')
+    assert.equal(shipped.pending.length, 0)
+
+    const older = store.currentBuild('0.1.0-local')
+    assert.equal(older.bugs.length, 0)
   })
 })
 

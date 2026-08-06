@@ -76,7 +76,7 @@ writeFileSync(outputPath, JSON.stringify({
     assert.equal(result.status, 'completed')
     assert.equal(result.summary, 'Тестове виправлення готове.')
     assert.equal(store.find('BUG-1051').status, 'ready_for_retest')
-    assert.equal(store.currentBuild('worker-test-build').bugs[0].source, 'codex')
+    assert.equal(store.ensureBuild('worker-test-build').bugs[0].source, 'codex')
     assert.equal(await readFile(path.join(worktreesDirectory, 'bug-1051', 'target', 'app.txt'), 'utf8'), 'after\n')
     const prompt = await readFile(path.join(worktreesDirectory, 'bug-1051', 'prompt.txt'), 'utf8')
     assert.match(prompt, /Після першого виправлення пошук усе ще падає на порожньому рядку/)

@@ -187,7 +187,7 @@ export async function createApp(options = {}) {
       }, request.files.map(serializeAttachment))
 
       if (['ready_for_retest', 'done'].includes(task.status)) {
-        store.markTaskProcessed(await currentBuildNumber(), task.id, 'manual')
+        store.markTaskProcessed(task.id, 'manual')
       }
       store.enqueueAgentRun(randomUUID(), task.id, 'manual')
 
@@ -224,7 +224,7 @@ export async function createApp(options = {}) {
       await store.patch(request.params.id, patch)
 
       if (['ready_for_retest', 'done'].includes(values.status) && existingTask.status !== values.status) {
-        store.markTaskProcessed(await currentBuildNumber(), request.params.id, 'manual')
+        store.markTaskProcessed(request.params.id, 'manual')
       }
 
       if (startsReviewRun) {

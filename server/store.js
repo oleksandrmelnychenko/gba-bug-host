@@ -75,6 +75,21 @@ const seedTasks = [
   },
 ]
 
+const PENDING_BUILD = '__pending__'
+
+function mapBuildTask(row) {
+  return {
+    id: row.id,
+    title: row.title,
+    status: row.status,
+    statusAtProcessing: row.task_status,
+    priority: row.priority,
+    area: row.area,
+    processedAt: row.processed_at,
+    source: row.source,
+  }
+}
+
 function agentRunFromRow(row) {
   if (!row) return null
   let inputSnapshot = null
@@ -680,16 +695,22 @@ export class TaskStore {
   ensureBuild(buildNumber) {
     const number = String(buildNumber).trim()
     if (!number) throw new Error('Номер build не може бути порожнім.')
-    this.database
+    const inserted = this.database
       .prepare('INSERT OR IGNORE INTO builds (number, created_at) VALUES (?, ?)')
       .run(number, new Date().toISOString())
+
+    if (inserted.changes === 1 && number !== PENDING_BUILD) {
+      this.database
+        .prepare('UPDATE OR REPLACE build_tasks SET build_number = ? WHERE build_number = ?')
+        .run(number, PENDING_BUILD)
+    }
     return this.currentBuild(number)
   }
 
-  markTaskProcessed(buildNumber, taskId, source = 'manual') {
+  markTaskProcessed(taskId, source = 'manual') {
     const task = this.find(taskId)
     if (!task) return null
-    const number = String(buildNumber).trim()
+    const number = PENDING_BUILD
     this.database
       .prepare('INSERT OR IGNORE INTO builds (number, created_at) VALUES (?, ?)')
       .run(number, new Date().toISOString())
@@ -702,14 +723,11 @@ export class TaskStore {
         source = excluded.source,
         task_status = excluded.task_status
     `).run(number, taskId, now, source, task.status)
-    return this.currentBuild(number)
+    return null
   }
 
-  currentBuild(buildNumber) {
-    const number = String(buildNumber).trim()
-    const build = this.database.prepare('SELECT * FROM builds WHERE number = ?').get(number)
-    if (!build) return null
-    const bugs = this.database.prepare(`
+  buildTaskRows(buildNumber) {
+    return this.database.prepare(`
       SELECT
         tasks.id,
         tasks.title,
@@ -723,20 +741,18 @@ export class TaskStore {
       JOIN tasks ON tasks.id = build_tasks.task_id
       WHERE build_tasks.build_number = ?
       ORDER BY build_tasks.processed_at DESC
-    `).all(number)
+    `).all(buildNumber)
+  }
+
+  currentBuild(buildNumber) {
+    const number = String(buildNumber).trim()
+    const build = this.database.prepare('SELECT * FROM builds WHERE number = ?').get(number)
+    if (!build) return null
     return {
       number: build.number,
       createdAt: build.created_at,
-      bugs: bugs.map((bug) => ({
-        id: bug.id,
-        title: bug.title,
-        status: bug.status,
-        statusAtProcessing: bug.task_status,
-        priority: bug.priority,
-        area: bug.area,
-        processedAt: bug.processed_at,
-        source: bug.source,
-      })),
+      bugs: this.buildTaskRows(number).map(mapBuildTask),
+      pending: number === PENDING_BUILD ? [] : this.buildTaskRows(PENDING_BUILD).map(mapBuildTask),
     }
   }
 
