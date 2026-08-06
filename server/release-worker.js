@@ -11,8 +11,8 @@ export const defaultRepoPlan = {
     root: '/root/projects/gba_console',
     services: ['gba-console'],
     checks: [
-      ['npx', 'tsc', '--noEmit'],
       ['npx', 'vitest', 'run', '--silent'],
+      ['npm', 'run', 'build'],
     ],
   },
   'gba-server': {
