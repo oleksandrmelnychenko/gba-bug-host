@@ -3,6 +3,7 @@ import { mkdir, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import express from 'express'
 import multer from 'multer'
+import { BuildNumberSource } from './build-source.js'
 import { TaskStore } from './store.js'
 
 const allowedStatuses = new Set(['new', 'in_progress', 'ready_for_retest', 'review_again', 'done', 'blocked'])
@@ -113,11 +114,13 @@ export async function createApp(options = {}) {
   const dataDirectory = options.dataDirectory ?? process.env.DATA_DIR ?? path.join(rootDirectory, 'data')
   const uploadsDirectory = options.uploadsDirectory ?? process.env.UPLOAD_DIR ?? path.join(rootDirectory, 'public', 'uploads')
   const buildNumber = options.buildNumber ?? process.env.APP_BUILD_NUMBER ?? '0.1.0-local'
+  const buildSource = options.buildSource ?? new BuildNumberSource({ fallback: buildNumber })
+  const currentBuildNumber = () => buildSource.current()
   const store = options.store ?? new TaskStore(dataDirectory)
 
   await mkdir(uploadsDirectory, { recursive: true })
   await store.ensureReady()
-  store.ensureBuild(buildNumber)
+  store.ensureBuild(await currentBuildNumber())
 
   const upload = multer({
     storage: multer.diskStorage({
@@ -153,7 +156,7 @@ export async function createApp(options = {}) {
 
   app.get('/api/builds/current', async (_request, response, next) => {
     try {
-      response.json(await store.ensureBuild(buildNumber))
+      response.json(await store.ensureBuild(await currentBuildNumber()))
     } catch (error) {
       next(error)
     }
@@ -184,7 +187,7 @@ export async function createApp(options = {}) {
       }, request.files.map(serializeAttachment))
 
       if (['ready_for_retest', 'done'].includes(task.status)) {
-        store.markTaskProcessed(buildNumber, task.id, 'manual')
+        store.markTaskProcessed(await currentBuildNumber(), task.id, 'manual')
       }
       store.enqueueAgentRun(randomUUID(), task.id, 'manual')
 
@@ -221,7 +224,7 @@ export async function createApp(options = {}) {
       await store.patch(request.params.id, patch)
 
       if (['ready_for_retest', 'done'].includes(values.status) && existingTask.status !== values.status) {
-        store.markTaskProcessed(buildNumber, request.params.id, 'manual')
+        store.markTaskProcessed(await currentBuildNumber(), request.params.id, 'manual')
       }
 
       if (startsReviewRun) {

@@ -94,6 +94,10 @@ const workspaceTabs: Array<{ key: WorkspaceTab; label: string }> = [
 
 const RELEASED_MARKER = /\[released:([^\]]+)\]/
 
+function isTaskQueuedOrRunning(task: Task) {
+  return task.agentRun?.status === 'queued' || task.agentRun?.status === 'running'
+}
+
 function isSentinelTask(task: Task) {
   return (task.notes ?? '').includes('[sentinel:')
 }
@@ -364,21 +368,25 @@ function AttachmentStack({
 function TaskTable({
   tasks,
   updatingId,
+  queueingId,
   scrollable = false,
   sortDirection,
   onOpenTask,
   onStatusChange,
   onSortDirectionChange,
   onOpenAttachment,
+  onEnqueue,
 }: {
   tasks: Task[]
   updatingId: string | null
+  queueingId: string | null
   scrollable?: boolean
   sortDirection: DateSortDirection
   onOpenTask: (task: Task) => void
   onStatusChange: (task: Task, status: TaskStatus) => void
   onSortDirectionChange: (direction: DateSortDirection) => void
   onOpenAttachment: (attachment: TaskAttachment) => void
+  onEnqueue: (task: Task) => void
 }) {
   const headerRowRef = useRef<HTMLTableRowElement | null>(null)
   const [columnWidths, setColumnWidths] = useState<Record<string, number> | null>(() => {
@@ -520,7 +528,18 @@ function TaskTable({
                   </td>
                   <td><AttachmentStack task={task} onOpen={onOpenAttachment} /></td>
                   <td onClick={(event) => event.stopPropagation()}>
-                    <button className="row-arrow" onClick={() => onOpenTask(task)} aria-label={`Редагувати ${task.id}`} title="Редагувати"><Pencil size={15} /></button>
+                    <div className="row-actions">
+                      <button
+                        className="row-arrow row-arrow-queue"
+                        disabled={isTaskQueuedOrRunning(task) || queueingId === task.id}
+                        onClick={() => onEnqueue(task)}
+                        aria-label={`Додати ${task.id} в чергу Codex`}
+                        title={isTaskQueuedOrRunning(task) ? 'Уже в конвеєрі Codex' : 'Додати в чергу Codex'}
+                      >
+                        {queueingId === task.id ? <LoaderCircle className="spin" size={15} /> : <Play size={15} />}
+                      </button>
+                      <button className="row-arrow" onClick={() => onOpenTask(task)} aria-label={`Редагувати ${task.id}`} title="Редагувати"><Pencil size={15} /></button>
+                    </div>
                   </td>
                 </tr>
             ))}
@@ -552,6 +571,15 @@ function TaskTable({
             )}
             {task.notes && <pre className="task-card-notes">{task.notes}</pre>}
             <div className="task-card-footer" onClick={(event) => event.stopPropagation()}>
+              <button
+                className="row-arrow row-arrow-queue"
+                disabled={isTaskQueuedOrRunning(task) || queueingId === task.id}
+                onClick={() => onEnqueue(task)}
+                aria-label={`Додати ${task.id} в чергу Codex`}
+                title={isTaskQueuedOrRunning(task) ? 'Уже в конвеєрі Codex' : 'Додати в чергу Codex'}
+              >
+                {queueingId === task.id ? <LoaderCircle className="spin" size={15} /> : <Play size={15} />}
+              </button>
               <StatusSelect
                 value={task.status}
                 compact
@@ -1830,6 +1858,7 @@ function App() {
   const [, setControllingId] = useState<string | null>(null)
   const [connectionLost, setConnectionLost] = useState(false)
   const [conclusionListOpen, setConclusionListOpen] = useState(false)
+  const [queueingId, setQueueingId] = useState<string | null>(null)
   const [notificationsReady, setNotificationsReady] = useState(
     () => 'Notification' in window && Notification.permission === 'granted',
   )
@@ -1849,6 +1878,24 @@ function App() {
   useEffect(() => {
     void loadTasks()
   }, [])
+
+  const deepLinkAppliedRef = useRef(false)
+
+  useEffect(() => {
+    if (deepLinkAppliedRef.current || tasks.length === 0) return
+    const requested = new URLSearchParams(window.location.search).get('task')?.trim().toUpperCase()
+    deepLinkAppliedRef.current = true
+    if (!requested) return
+
+    const target = tasks.find((task) => task.id.toUpperCase() === requested)
+    if (!target) {
+      setToast(`Задачу ${requested} не знайдено.`)
+      return
+    }
+
+    setActiveTab(isSentinelTask(target) ? 'auto' : ((target.project ?? 'console') as WorkspaceTab))
+    setSelectedId(target.id)
+  }, [tasks])
 
   const hasActiveAgentRuns = tasks.some((task) => task.agentRun?.status === 'queued' || task.agentRun?.status === 'running')
 
@@ -1986,6 +2033,20 @@ function App() {
       setToast(error instanceof Error ? error.message : 'Не вдалося виконати дію')
     } finally {
       setControllingId(null)
+    }
+  }
+
+  const enqueueTaskRun = async (task: Task) => {
+    setQueueingId(task.id)
+    try {
+      const updated = await resumeAgentRun(task.id)
+      setTasks((current) => current.map((item) => item.id === updated.id ? updated : item))
+      void getTasks().then(setTasks).catch(() => undefined)
+      setToast(`${task.id}: додано в чергу Codex`)
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : 'Не вдалося поставити в чергу')
+    } finally {
+      setQueueingId(null)
     }
   }
 
@@ -2145,12 +2206,14 @@ function App() {
             <TaskTable
               tasks={paginatedTasks}
               updatingId={updatingId}
+              queueingId={queueingId}
               scrollable={activeTab === 'auto'}
               sortDirection={sortDirection}
               onOpenTask={(task) => setSelectedId(task.id)}
               onStatusChange={(task, status) => void changeStatus(task, status)}
               onSortDirectionChange={setSortDirection}
               onOpenAttachment={setLightboxAttachment}
+              onEnqueue={(task) => void enqueueTaskRun(task)}
             />
           ) : <EmptyState onCreate={() => setCreateOpen(true)} />}
 
