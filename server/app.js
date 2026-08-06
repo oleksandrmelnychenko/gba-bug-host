@@ -258,6 +258,26 @@ export async function createApp(options = {}) {
     }
   })
 
+  app.post('/api/tasks/:id/agent-runs/reorder', async (request, response, next) => {
+    try {
+      const direction = String(request.body?.direction ?? '')
+      if (!['up', 'down', 'top'].includes(direction)) {
+        response.status(400).json({ message: 'Напрямок має бути up, down або top.' })
+        return
+      }
+
+      const run = store.reorderQueuedRun(request.params.id, direction)
+      if (!run) {
+        response.status(404).json({ message: 'Задача не стоїть у черзі.' })
+        return
+      }
+
+      response.json(await store.find(request.params.id))
+    } catch (error) {
+      next(error)
+    }
+  })
+
   app.post('/api/tasks/:id/attachments', upload.array('attachments', 6), async (request, response, next) => {
     try {
       if (!request.files.length) {

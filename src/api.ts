@@ -62,3 +62,11 @@ export function deleteTaskAttachment(taskId: string, attachmentId: string) {
 export function deleteTask(id: string) {
   return request<void>(`/api/tasks/${id}`, { method: 'DELETE' })
 }
+
+export function reorderQueuedTask(id: string, direction: 'up' | 'down' | 'top') {
+  return request<Task>(`/api/tasks/${id}/agent-runs/reorder`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ direction }),
+  })
+}

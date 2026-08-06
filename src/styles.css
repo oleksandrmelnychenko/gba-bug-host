@@ -2680,3 +2680,48 @@ main {
   background: #fff;
   box-shadow: 0 -6px 14px -12px rgba(10, 13, 18, 0.5);
 }
+
+.pipeline-queue-open {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.pipeline-queue-actions {
+  display: inline-flex;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.pipeline-queue-actions button {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--gray-200);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--gray-600);
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.pipeline-queue-actions button:hover:not(:disabled) {
+  border-color: var(--brand-300);
+  color: var(--brand-700);
+  background: var(--brand-25);
+}
+
+.pipeline-queue-actions button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}

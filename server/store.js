@@ -94,6 +94,7 @@ function agentRunFromRow(row) {
     attempt: row.attempt,
     reviewComment: row.review_comment || inputSnapshot?.reviewComment || '',
     inputSnapshot,
+    queuePriority: row.queue_priority ?? 0,
     branch: row.branch,
     worktreePath: row.worktree_path,
     summary: row.summary,
@@ -263,6 +264,9 @@ export class TaskStore {
       }
       if (!agentRunColumns.has('input_snapshot')) {
         this.database.exec("ALTER TABLE agent_runs ADD COLUMN input_snapshot TEXT NOT NULL DEFAULT '{}'")
+      }
+      if (!agentRunColumns.has('queue_priority')) {
+        this.database.exec('ALTER TABLE agent_runs ADD COLUMN queue_priority INTEGER NOT NULL DEFAULT 0')
       }
     })
 
@@ -511,7 +515,7 @@ export class TaskStore {
   claimNextAgentRun() {
     return this.transaction(() => {
       const row = this.database
-        .prepare("SELECT * FROM agent_runs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1")
+        .prepare("SELECT * FROM agent_runs WHERE status = 'queued' ORDER BY queue_priority DESC, created_at ASC LIMIT 1")
         .get()
       if (!row) return null
 
@@ -520,6 +524,52 @@ export class TaskStore {
         .prepare("UPDATE agent_runs SET status = 'running', started_at = ?, updated_at = ? WHERE id = ? AND status = 'queued'")
         .run(now, now, row.id)
       return result.changes === 1 ? this.findAgentRun(row.id) : null
+    })
+  }
+
+  reorderQueuedRun(taskId, direction) {
+    return this.transaction(() => {
+      const queued = this.database
+        .prepare("SELECT * FROM agent_runs WHERE status = 'queued' ORDER BY queue_priority DESC, created_at ASC")
+        .all()
+      const index = queued.findIndex((row) => row.task_id === taskId)
+      if (index < 0) return null
+
+      const target = queued[index]
+      const now = new Date().toISOString()
+
+      if (direction === 'top') {
+        if (index === 0) return agentRunFromRow(target)
+        const topPriority = queued[0].queue_priority ?? 0
+        this.database
+          .prepare('UPDATE agent_runs SET queue_priority = ?, updated_at = ? WHERE id = ?')
+          .run(topPriority + 1, now, target.id)
+        return this.findAgentRun(target.id)
+      }
+
+      const neighbourIndex = direction === 'up' ? index - 1 : index + 1
+      if (neighbourIndex < 0 || neighbourIndex >= queued.length) return agentRunFromRow(target)
+
+      const neighbour = queued[neighbourIndex]
+      const targetPriority = target.queue_priority ?? 0
+      const neighbourPriority = neighbour.queue_priority ?? 0
+
+      if (targetPriority === neighbourPriority) {
+        // Однаковий пріоритет: порядок визначає created_at, тож піднімаємо
+        // саме цільовий рядок на один щабель над сусідом.
+        this.database
+          .prepare('UPDATE agent_runs SET queue_priority = ?, updated_at = ? WHERE id = ?')
+          .run(direction === 'up' ? neighbourPriority + 1 : neighbourPriority - 1, now, target.id)
+      } else {
+        this.database
+          .prepare('UPDATE agent_runs SET queue_priority = ?, updated_at = ? WHERE id = ?')
+          .run(neighbourPriority, now, target.id)
+        this.database
+          .prepare('UPDATE agent_runs SET queue_priority = ?, updated_at = ? WHERE id = ?')
+          .run(targetPriority, now, neighbour.id)
+      }
+
+      return this.findAgentRun(target.id)
     })
   }
 

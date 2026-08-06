@@ -9,6 +9,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronUp,
+  ChevronsUp,
   History,
   Image as ImageIcon,
   Layers3,
@@ -41,6 +42,7 @@ import {
   getCurrentBuild,
   getTaskAgentRuns,
   getTasks,
+  reorderQueuedTask,
   updateTask,
 } from './api'
 import {
@@ -1512,12 +1514,16 @@ function PipelineRunCard({
 
 function PipelineView({
   tasks,
+  reorderingId,
   onOpenTask,
   onOpenConclusion,
+  onReorder,
 }: {
   tasks: Task[]
+  reorderingId: string | null
   onOpenTask: (taskId: string) => void
   onOpenConclusion: (task: Task) => void
+  onReorder: (taskId: string, direction: 'up' | 'down' | 'top') => void
 }) {
   const running = tasks
     .filter((task) => task.agentRun?.status === 'running')
@@ -1576,15 +1582,40 @@ function PipelineView({
         {queued.length ? (
           <div className="pipeline-queue pipeline-scroll">
             {queued.map((task, index) => (
-              <button type="button" className="pipeline-queue-row" key={task.id} onClick={() => onOpenTask(task.id)}>
+              <div className="pipeline-queue-row" key={task.id}>
                 <span className="pipeline-queue-position">{index + 1}</span>
-                <span className="task-id">{task.id}</span>
-                <span className="pipeline-queue-title">{task.title}</span>
-                <span className="pipeline-queue-project">{projectMeta[task.project ?? 'console'].label}</span>
-                {(task.agentRun!.trigger === 'review_again' || task.agentRun!.attempt > 1) && (
-                  <span className="pipeline-attempt">спроба {task.agentRun!.attempt}</span>
-                )}
-              </button>
+                <button type="button" className="pipeline-queue-open" onClick={() => onOpenTask(task.id)}>
+                  <span className="task-id">{task.id}</span>
+                  <span className="pipeline-queue-title">{task.title}</span>
+                  <span className="pipeline-queue-project">{projectMeta[task.project ?? 'console'].label}</span>
+                  {(task.agentRun!.trigger === 'review_again' || task.agentRun!.attempt > 1) && (
+                    <span className="pipeline-attempt">спроба {task.agentRun!.attempt}</span>
+                  )}
+                </button>
+                <span className="pipeline-queue-actions">
+                  <button
+                    type="button"
+                    title="У початок черги"
+                    aria-label={`Підняти ${task.id} у початок черги`}
+                    disabled={index === 0 || reorderingId === task.id}
+                    onClick={() => onReorder(task.id, 'top')}
+                  ><ChevronsUp size={15} /></button>
+                  <button
+                    type="button"
+                    title="На позицію вище"
+                    aria-label={`Підняти ${task.id} на позицію вище`}
+                    disabled={index === 0 || reorderingId === task.id}
+                    onClick={() => onReorder(task.id, 'up')}
+                  ><ChevronUp size={15} /></button>
+                  <button
+                    type="button"
+                    title="На позицію нижче"
+                    aria-label={`Опустити ${task.id} на позицію нижче`}
+                    disabled={index === queued.length - 1 || reorderingId === task.id}
+                    onClick={() => onReorder(task.id, 'down')}
+                  ><ChevronDown size={15} /></button>
+                </span>
+              </div>
             ))}
           </div>
         ) : <p className="pipeline-empty">Черга порожня.</p>}
@@ -1613,7 +1644,7 @@ function PipelineView({
           <h3><Check size={16} /> Випущено на dev сьогодні</h3>
           <div className="pipeline-queue pipeline-scroll">
             {releasedToday.map((task) => (
-              <button type="button" className="pipeline-queue-row" key={`released-${task.id}`} onClick={() => onOpenTask(task.id)}>
+              <button type="button" className="pipeline-queue-row pipeline-queue-row-plain" key={`released-${task.id}`} onClick={() => onOpenTask(task.id)}>
                 <span className="task-id">{task.id}</span>
                 <span className="pipeline-queue-title">{task.title}</span>
                 <span className="pipeline-queue-project">{RELEASED_MARKER.exec(task.notes ?? '')?.[1]}</span>
@@ -1644,6 +1675,7 @@ function App() {
   const [toast, setToast] = useState('')
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('console')
   const [conclusionTask, setConclusionTask] = useState<Task | null>(null)
+  const [reorderingId, setReorderingId] = useState<string | null>(null)
   const [notificationsReady, setNotificationsReady] = useState(
     () => 'Notification' in window && Notification.permission === 'granted',
   )
@@ -1750,6 +1782,20 @@ function App() {
     if (page > pageCount) setPage(pageCount)
   }, [page, pageCount])
 
+  const reorderQueue = async (taskId: string, direction: 'up' | 'down' | 'top') => {
+    setReorderingId(taskId)
+    try {
+      const updated = await reorderQueuedTask(taskId, direction)
+      setTasks((current) => current.map((task) => task.id === updated.id ? updated : task))
+      void getTasks().then(setTasks).catch(() => undefined)
+      setToast(`${taskId}: черга оновлена`)
+    } catch {
+      setToast('Не вдалося змінити позицію в черзі')
+    } finally {
+      setReorderingId(null)
+    }
+  }
+
   const replaceTask = (nextTask: Task) => {
     setTasks((current) => current.map((task) => task.id === nextTask.id ? nextTask : task))
   }
@@ -1853,7 +1899,13 @@ function App() {
             loading ? (
               <div className="loading-state"><LoaderCircle className="spin" /><span>Завантажую конвеєр…</span></div>
             ) : (
-              <PipelineView tasks={tasks} onOpenTask={setSelectedId} onOpenConclusion={setConclusionTask} />
+              <PipelineView
+                tasks={tasks}
+                reorderingId={reorderingId}
+                onOpenTask={setSelectedId}
+                onOpenConclusion={setConclusionTask}
+                onReorder={(taskId, direction) => void reorderQueue(taskId, direction)}
+              />
             )
           ) : (
           <>

@@ -305,3 +305,39 @@ test('API відхиляє невалідну задачу', async () => {
     assert.match(response.body.message, /щонайменше 3 символи/)
   })
 })
+
+test('API піднімає задачу в черзі Codex', async () => {
+  await withTestApp(async ({ app, store }) => {
+    const first = await request(app).post('/api/tasks').field('title', 'Перша у черзі').expect(201)
+    const second = await request(app).post('/api/tasks').field('title', 'Друга у черзі').expect(201)
+    const third = await request(app).post('/api/tasks').field('title', 'Третя у черзі').expect(201)
+
+    const queueOrder = () => {
+      const claimed = []
+      let run
+      while ((run = store.claimNextAgentRun())) claimed.push(run)
+      for (const item of claimed) store.updateAgentRun(item.id, { status: 'queued' })
+      return claimed.map((item) => item.taskId)
+    }
+
+    await request(app)
+      .post(`/api/tasks/${third.body.id}/agent-runs/reorder`)
+      .send({ direction: 'top' })
+      .expect(200)
+
+    assert.equal(queueOrder()[0], third.body.id)
+
+    await request(app)
+      .post(`/api/tasks/${second.body.id}/agent-runs/reorder`)
+      .send({ direction: 'up' })
+      .expect(200)
+
+    const order = queueOrder()
+    assert.equal(order.indexOf(second.body.id) < order.indexOf(first.body.id), true)
+
+    await request(app)
+      .post(`/api/tasks/${first.body.id}/agent-runs/reorder`)
+      .send({ direction: 'сюди' })
+      .expect(400)
+  })
+})

@@ -33,6 +33,7 @@ export interface AgentRun {
   attempt: number
   reviewComment: string
   inputSnapshot: AgentRunInputSnapshot | null
+  queuePriority: number
   branch: string
   worktreePath: string
   summary: string
