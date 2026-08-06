@@ -1715,16 +1715,19 @@ function PipelineView({
           <span>Release-воркер</span>
           <strong>{releasedToday.length} випущено сьогодні</strong>
         </div>
-        <button
-          type="button"
-          className="pipeline-stat pipeline-stat-action"
-          disabled={finished.length === 0}
-          onClick={onOpenConclusionList}
-        >
-          <span>Висновки агента</span>
-          <strong>{finished.length}</strong>
-        </button>
       </div>
+
+      <button
+        type="button"
+        className="pipeline-agent-data"
+        disabled={finished.length === 0}
+        onClick={onOpenConclusionList}
+      >
+        <Bot size={17} />
+        <span>Показати дані агентів</span>
+        <strong>{finished.length}</strong>
+        <ChevronRight size={16} />
+      </button>
 
       <section className="pipeline-section">
         <h3><LoaderCircle className={running.length ? 'spin' : ''} size={16} /> Зараз у роботі</h3>
