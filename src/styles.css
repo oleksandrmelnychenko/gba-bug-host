@@ -1385,14 +1385,18 @@ main {
 
 .agent-table-state {
   width: max-content;
-  max-width: 72px;
+  max-width: 100%;
   flex: 0 0 auto;
   margin-top: 0;
-  display: flex;
+  padding: 1px 7px 1px 5px;
+  display: inline-flex;
   align-items: center;
   gap: 3px;
   overflow: hidden;
   color: var(--agent-color, var(--gray-600));
+  background: var(--agent-bg, var(--gray-50));
+  border: 1px solid var(--agent-border, var(--gray-200));
+  border-radius: 999px;
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 8.5px;
   font-weight: 600;
@@ -1403,9 +1407,15 @@ main {
   white-space: nowrap;
 }
 
-.agent-run-queued { --agent-color: #175cd3; }
+.agent-run-queued {
+  --agent-color: #175cd3;
+  --agent-bg: #eff8ff;
+  --agent-border: #b2ddff;
+}
 .agent-run-running {
-  --agent-color: var(--brand-600);
+  --agent-color: var(--brand-700);
+  --agent-bg: var(--brand-50);
+  --agent-border: var(--brand-200);
   animation: agent-running-pulse 1.6s ease-in-out infinite;
 }
 
@@ -1413,10 +1423,22 @@ main {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.45; }
 }
-.agent-run-completed { --agent-color: #067647; }
-.agent-run-needs_review { --agent-color: #b54708; }
+.agent-run-completed {
+  --agent-color: #067647;
+  --agent-bg: #ecfdf3;
+  --agent-border: #abefc6;
+}
+.agent-run-needs_review {
+  --agent-color: #b54708;
+  --agent-bg: #fffaeb;
+  --agent-border: #fedf89;
+}
 .agent-run-blocked,
-.agent-run-failed { --agent-color: #b42318; }
+.agent-run-failed {
+  --agent-color: #b42318;
+  --agent-bg: #fef3f2;
+  --agent-border: #fecdca;
+}
 
 .agent-history-section {
   margin-top: 4px;
