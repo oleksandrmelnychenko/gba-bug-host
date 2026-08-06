@@ -18,7 +18,7 @@ export const defaultRepoPlan = {
   'gba-server': {
     branch: 'development',
     root: '/root/projects/gba-server',
-    services: ['data-concord'],
+    services: ['data-concord', 'data-analytics'],
     checks: [
       ['dotnet', 'build', 'src/Global.Business.Assistant.Api/Global.Business.Assistant.Api.csproj', '-v', 'q', '--nologo'],
       ['dotnet', 'test', 'tests/Global.Business.Assistant.Platform.Actors.Tests/Global.Business.Assistant.Platform.Actors.Tests.csproj', '-v', 'q', '--nologo'],

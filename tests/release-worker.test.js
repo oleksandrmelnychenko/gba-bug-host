@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { branchName, isReleased, isSandboxLimitedReview, selectReleasableTasks, taskSlug } from '../server/release-worker.js'
+import { branchName, defaultRepoPlan, isReleased, isSandboxLimitedReview, selectReleasableTasks, taskSlug } from '../server/release-worker.js'
 
 test('слаг і назва гілки збігаються з worker-конвенцією', () => {
   assert.equal(taskSlug('BUG-1024'), 'bug-1024')
@@ -48,4 +48,16 @@ test('sandbox-вердикт потрапляє у вибірку релізу',
     { id: 'T', status: 'done', notes: '', agentRun: { status: 'needs_review', summary: 'sandbox блокує dotnet test' } },
   ]
   assert.deepEqual(selectReleasableTasks(tasks).map((task) => task.id), ['S'])
+})
+
+test('план покриває всі сервіси, що збираються з цих репозиторіїв', () => {
+  const expected = {
+    gba_console: ['gba-console'],
+    'gba-server': ['data-concord', 'data-analytics'],
+    gba_ecommerce: ['gba-ecommerce'],
+    'gba-ecommerce-api': ['gba-ecommerce-api'],
+  }
+  for (const [repo, services] of Object.entries(expected)) {
+    assert.deepEqual(defaultRepoPlan[repo].services, services, repo)
+  }
 })
