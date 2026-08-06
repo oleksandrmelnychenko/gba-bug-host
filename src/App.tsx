@@ -80,7 +80,7 @@ const emptyDraft: TaskDraft = {
 
 const statusOrder: TaskStatus[] = ['new', 'in_progress', 'review_again', 'ready_for_retest', 'blocked', 'done']
 const priorityOrder: TaskPriority[] = ['critical', 'high', 'medium', 'low']
-const pageSizeOptions = [10, 25, 50]
+const pageSizeOptions = [20, 50, 100]
 
 type DateSortDirection = 'desc' | 'asc'
 
