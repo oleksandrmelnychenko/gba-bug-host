@@ -6,6 +6,8 @@ import {
   CalendarDays,
   Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   ChevronUp,
   Image as ImageIcon,
   Layers3,
@@ -42,7 +44,6 @@ import {
 import {
   priorityMeta,
   projectMeta,
-  projectOrder,
   statusMeta,
   type AgentRunStatus,
   type BuildInfo,
@@ -68,13 +69,29 @@ const emptyDraft: TaskDraft = {
 
 const statusOrder: TaskStatus[] = ['new', 'in_progress', 'review_again', 'ready_for_retest', 'blocked', 'done']
 const priorityOrder: TaskPriority[] = ['critical', 'high', 'medium', 'low']
+const pageSizeOptions = [10, 25, 50]
 
-const COLUMN_WIDTHS_STORAGE_KEY = 'gba-qa-desk-column-widths'
+type DateSortDirection = 'desc' | 'asc'
+
+type WorkspaceTab = TaskProject | 'auto'
+
+const workspaceTabs: Array<{ key: WorkspaceTab; label: string }> = [
+  { key: 'console', label: projectMeta.console.label },
+  { key: 'ecommerce', label: projectMeta.ecommerce.label },
+  { key: 'auto', label: 'Логи (авто)' },
+]
+
+function isSentinelTask(task: Task) {
+  return (task.notes ?? '').includes('[sentinel:')
+}
+
+const COLUMN_WIDTHS_STORAGE_KEY = 'gba-qa-desk-column-widths-v2'
 const tableColumns: Array<{ key: string; label: string; className?: string; srOnly?: boolean }> = [
   { key: 'id', label: 'Номер', className: 'column-id' },
+  { key: 'created', label: 'Дата й час', className: 'column-created' },
   { key: 'title', label: 'Задача' },
   { key: 'area', label: 'Розділ' },
-  { key: 'url', label: 'URL сайту' },
+  { key: 'url', label: 'URL сторінки' },
   { key: 'notes', label: 'Нотатки' },
   { key: 'priority', label: 'Пріоритет' },
   { key: 'status', label: 'Статус' },
@@ -96,6 +113,16 @@ function formatDate(value: string) {
     day: '2-digit',
     month: 'short',
     year: 'numeric',
+  }).format(new Date(value))
+}
+
+function formatDateTime(value: string) {
+  return new Intl.DateTimeFormat('uk-UA', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
   }).format(new Date(value))
 }
 
@@ -232,7 +259,7 @@ function BuildTicker({
         aria-haspopup="dialog"
       >
         <span className="build-live-dot" aria-hidden="true" />
-        <span>BUILD</span>
+        <span className="build-label">BUILD</span>
         <strong>{build?.number ?? '—'}</strong>
         <span className="build-bug-count"><Bug size={11} /> {build?.bugs.length ?? 0}</span>
         <ChevronUp className={open ? 'is-open' : ''} size={14} />
@@ -324,22 +351,20 @@ function AttachmentStack({
 function TaskTable({
   tasks,
   updatingId,
+  sortDirection,
   onOpenTask,
   onStatusChange,
-  onQuickSave,
+  onSortDirectionChange,
   onOpenAttachment,
 }: {
   tasks: Task[]
   updatingId: string | null
+  sortDirection: DateSortDirection
   onOpenTask: (task: Task) => void
   onStatusChange: (task: Task, status: TaskStatus) => void
-  onQuickSave: (task: Task, draft: TaskDraft) => Promise<void>
+  onSortDirectionChange: (direction: DateSortDirection) => void
   onOpenAttachment: (attachment: TaskAttachment) => void
 }) {
-  const [editingId, setEditingId] = useState<string | null>(null)
-  const [editDraft, setEditDraft] = useState<TaskDraft>(emptyDraft)
-  const [savingEdit, setSavingEdit] = useState(false)
-  const [editError, setEditError] = useState('')
   const headerRowRef = useRef<HTMLTableRowElement | null>(null)
   const [columnWidths, setColumnWidths] = useState<Record<string, number> | null>(() => {
     try {
@@ -383,39 +408,6 @@ function TaskTable({
 
   const resetColumnWidths = () => setColumnWidths(null)
 
-  const beginEdit = (task: Task) => {
-    setEditingId(task.id)
-    setEditDraft(taskToDraft(task))
-    setEditError('')
-  }
-
-  const setEditField = <Key extends keyof TaskDraft>(key: Key, value: TaskDraft[Key]) => {
-    setEditDraft((current) => ({ ...current, [key]: value }))
-  }
-
-  const cancelEdit = () => {
-    if (savingEdit) return
-    setEditingId(null)
-    setEditError('')
-  }
-
-  const saveEdit = async (task: Task) => {
-    if (editDraft.title.trim().length < 3) {
-      setEditError('Назва має містити щонайменше 3 символи.')
-      return
-    }
-    setSavingEdit(true)
-    setEditError('')
-    try {
-      await onQuickSave(task, editDraft)
-      setEditingId(null)
-    } catch (caughtError) {
-      setEditError(caughtError instanceof Error ? caughtError.message : 'Не вдалося зберегти зміни.')
-    } finally {
-      setSavingEdit(false)
-    }
-  }
-
   return (
     <>
       <div className="table-scroll">
@@ -431,7 +423,19 @@ function TaskTable({
             <tr ref={headerRowRef}>
               {tableColumns.map((column, index) => (
                 <th key={column.key} className={column.className}>
-                  {column.srOnly ? <span className="sr-only">{column.label}</span> : column.label}
+                  {column.key === 'created' ? (
+                    <button
+                      type="button"
+                      className="sort-heading"
+                      onClick={() => onSortDirectionChange(sortDirection === 'desc' ? 'asc' : 'desc')}
+                      aria-label={`Сортування за датою створення: ${sortDirection === 'desc' ? 'спочатку нові' : 'спочатку старі'}`}
+                    >
+                      Дата й час
+                      {sortDirection === 'desc' ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+                    </button>
+                  ) : column.srOnly ? (
+                    <span className="sr-only">{column.label}</span>
+                  ) : column.label}
                   {index < tableColumns.length - 1 && (
                     <span
                       className="column-resizer"
@@ -445,17 +449,10 @@ function TaskTable({
             </tr>
           </thead>
           <tbody>
-            {tasks.map((task, index) => {
-              const isEditing = editingId === task.id
-              return (
+            {tasks.map((task, index) => (
                 <tr
                   key={task.id}
-                  className={isEditing ? 'editing-row' : undefined}
-                  onClick={isEditing ? undefined : () => onOpenTask(task)}
-                  onKeyDown={isEditing ? (event) => {
-                    if (event.key === 'Escape') cancelEdit()
-                    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void saveEdit(task)
-                  } : undefined}
+                  onClick={() => onOpenTask(task)}
                   style={{ '--row-delay': `${Math.min(index, 7) * 35}ms` } as React.CSSProperties}
                 >
                   <td>
@@ -469,45 +466,17 @@ function TaskTable({
                     )}
                   </td>
                   <td>
-                    {isEditing ? (
-                      <div className="quick-title-fields">
-                        <input
-                          className="table-edit-input"
-                          autoFocus
-                          required
-                          minLength={3}
-                          maxLength={140}
-                          value={editDraft.title}
-                          onChange={(event) => setEditField('title', event.target.value)}
-                          aria-label="Назва задачі"
-                        />
-                        <textarea
-                          className="table-edit-input"
-                          rows={2}
-                          maxLength={3000}
-                          value={editDraft.description}
-                          onChange={(event) => setEditField('description', event.target.value)}
-                          aria-label="Опис задачі"
-                          placeholder="Опис"
-                        />
-                        {editError && <span className="quick-edit-error" role="alert">{editError}</span>}
-                      </div>
-                    ) : (
-                      <div className="task-title-cell">
-                        <strong>{task.title}</strong>
-                        <span>{task.description || 'Без додаткового опису'}</span>
-                      </div>
-                    )}
+                    <time className="created-at" dateTime={task.createdAt}>{formatDateTime(task.createdAt)}</time>
                   </td>
                   <td>
-                    {isEditing ? (
-                      <input className="table-edit-input" maxLength={80} value={editDraft.area} onChange={(event) => setEditField('area', event.target.value)} aria-label="Розділ" />
-                    ) : <span className="area-label">{task.area}</span>}
+                    <div className="task-title-cell">
+                      <strong>{task.title}</strong>
+                      <span>{task.description || 'Без додаткового опису'}</span>
+                    </div>
                   </td>
+                  <td><span className="area-label">{task.area}</span></td>
                   <td>
-                    {isEditing ? (
-                      <input className="table-edit-input table-edit-mono" inputMode="url" maxLength={2048} value={editDraft.siteUrl} onChange={(event) => setEditField('siteUrl', event.target.value)} aria-label="URL сайту" placeholder="https://…" />
-                    ) : task.siteUrl ? (
+                    {task.siteUrl ? (
                       <a
                         className="task-url"
                         href={task.siteUrl}
@@ -521,18 +490,8 @@ function TaskTable({
                       </a>
                     ) : <span className="empty-cell">—</span>}
                   </td>
-                  <td>
-                    {isEditing ? (
-                      <textarea className="table-edit-input table-edit-mono" rows={3} maxLength={10000} value={editDraft.notes} onChange={(event) => setEditField('notes', event.target.value)} aria-label="Нотатки" placeholder="HTTP request…" />
-                    ) : <span className="notes-cell" title={task.notes}>{task.notes || '—'}</span>}
-                  </td>
-                  <td>
-                    {isEditing ? (
-                      <select className="table-edit-input table-edit-select" value={editDraft.priority} onChange={(event) => setEditField('priority', event.target.value as TaskPriority)} aria-label="Пріоритет">
-                        {priorityOrder.map((priority) => <option value={priority} key={priority}>{priorityMeta[priority].label}</option>)}
-                      </select>
-                    ) : <PriorityBadge priority={task.priority} />}
-                  </td>
+                  <td><span className="notes-cell" title={task.notes}>{task.notes || '—'}</span></td>
+                  <td><PriorityBadge priority={task.priority} /></td>
                   <td onClick={(event) => event.stopPropagation()}>
                     {task.agentRun && (task.agentRun.status === 'queued' || task.agentRun.status === 'running') && (
                       <span className={`codex-progress codex-progress-${task.agentRun.status}`}>
@@ -540,35 +499,19 @@ function TaskTable({
                         {task.agentRun.status === 'running' ? 'Codex працює…' : 'У черзі Codex'}
                       </span>
                     )}
-                    {isEditing ? (
-                      <select className="table-edit-input table-edit-select" value={editDraft.status} onChange={(event) => setEditField('status', event.target.value as TaskStatus)} aria-label="Статус">
-                        {statusOrder.map((status) => <option value={status} key={status}>{statusMeta[status].label}</option>)}
-                      </select>
-                    ) : (
-                      <StatusSelect
-                        value={task.status}
-                        compact
-                        disabled={updatingId === task.id}
-                        onChange={(status) => onStatusChange(task, status)}
-                      />
-                    )}
+                    <StatusSelect
+                      value={task.status}
+                      compact
+                      disabled={updatingId === task.id}
+                      onChange={(status) => onStatusChange(task, status)}
+                    />
                   </td>
                   <td><AttachmentStack task={task} onOpen={onOpenAttachment} /></td>
                   <td onClick={(event) => event.stopPropagation()}>
-                    {isEditing ? (
-                      <div className="quick-edit-actions">
-                        <button className="quick-edit-save" onClick={() => void saveEdit(task)} disabled={savingEdit} aria-label={`Зберегти ${task.id}`}>
-                          {savingEdit ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />}
-                        </button>
-                        <button className="quick-edit-cancel" onClick={cancelEdit} disabled={savingEdit} aria-label="Скасувати редагування"><X size={15} /></button>
-                      </div>
-                    ) : (
-                      <button className="row-arrow" onClick={() => beginEdit(task)} aria-label={`Швидко редагувати ${task.id}`} title="Швидке редагування"><Pencil size={15} /></button>
-                    )}
+                    <button className="row-arrow" onClick={() => onOpenTask(task)} aria-label={`Редагувати ${task.id}`} title="Редагувати"><Pencil size={15} /></button>
                   </td>
                 </tr>
-              )
-            })}
+            ))}
           </tbody>
         </table>
       </div>
@@ -584,6 +527,7 @@ function TaskTable({
             <p>{task.description || 'Без додаткового опису'}</p>
             <div className="task-card-meta">
               <span><Layers3 size={14} /> {task.area}</span>
+              <time dateTime={task.createdAt}><CalendarDays size={14} /> {formatDateTime(task.createdAt)}</time>
             </div>
             {task.siteUrl && (
               <a
@@ -608,6 +552,52 @@ function TaskTable({
         ))}
       </div>
     </>
+  )
+}
+
+function TaskPagination({
+  page,
+  pageCount,
+  pageSize,
+  filteredTotal,
+  total,
+  onPageChange,
+  onPageSizeChange,
+}: {
+  page: number
+  pageCount: number
+  pageSize: number
+  filteredTotal: number
+  total: number
+  onPageChange: (page: number) => void
+  onPageSizeChange: (pageSize: number) => void
+}) {
+  const rangeStart = filteredTotal ? (page - 1) * pageSize + 1 : 0
+  const rangeEnd = Math.min(page * pageSize, filteredTotal)
+
+  return (
+    <div className="table-footer">
+      <span>
+        Показано {rangeStart}–{rangeEnd} із {filteredTotal}
+        {filteredTotal !== total ? ` · усього ${total}` : ''}
+      </span>
+      <div className="pagination-controls" aria-label="Пагінація задач">
+        <label className="page-size-select">
+          <span>На сторінці</span>
+          <select value={pageSize} onChange={(event) => onPageSizeChange(Number(event.target.value))} aria-label="Кількість задач на сторінці">
+            {pageSizeOptions.map((option) => <option key={option} value={option}>{option}</option>)}
+          </select>
+        </label>
+        <button type="button" onClick={() => onPageChange(page - 1)} disabled={page === 1} aria-label="Попередня сторінка">
+          <ChevronLeft size={16} />
+        </button>
+        <span className="page-indicator">Сторінка {page} з {pageCount}</span>
+        <button type="button" onClick={() => onPageChange(page + 1)} disabled={page === pageCount} aria-label="Наступна сторінка">
+          <ChevronRight size={16} />
+        </button>
+      </div>
+      <span className="auto-save-state"><i /> Зміни зберігаються автоматично</span>
+    </div>
   )
 }
 
@@ -738,7 +728,7 @@ function CreateTaskDialog({
 
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
-      <section className="create-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="create-title">
+      <section className="task-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="create-title">
         <div className="dialog-header">
           <div>
             <span className="eyebrow">Нова задача · {projectMeta[project].label}</span>
@@ -772,17 +762,23 @@ function CreateTaskDialog({
               placeholder="Коротко опишіть кроки й очікуваний результат…"
             />
           </div>
-          <div className="form-field form-field-wide">
-            <label htmlFor="new-site-url">URL сайту</label>
-            <input
-              id="new-site-url"
-              type="text"
-              inputMode="url"
-              maxLength={2048}
-              value={draft.siteUrl}
-              onChange={(event) => setField('siteUrl', event.target.value)}
-              placeholder="https://example.com/problem-page"
-            />
+          <div className="form-grid">
+            <div className="form-field">
+              <label htmlFor="new-area">Розділ</label>
+              <input id="new-area" maxLength={80} value={draft.area} onChange={(event) => setField('area', event.target.value)} placeholder="Продажі" />
+            </div>
+            <div className="form-field">
+              <label htmlFor="new-site-url">URL сторінки</label>
+              <input
+                id="new-site-url"
+                type="text"
+                inputMode="url"
+                maxLength={2048}
+                value={draft.siteUrl}
+                onChange={(event) => setField('siteUrl', event.target.value)}
+                placeholder="https://example.com/problem-page"
+              />
+            </div>
           </div>
           <div className="form-field form-field-wide">
             <label htmlFor="new-notes">Нотатки</label>
@@ -797,10 +793,6 @@ function CreateTaskDialog({
             />
           </div>
           <div className="form-grid">
-            <div className="form-field">
-              <label htmlFor="new-area">Розділ</label>
-              <input id="new-area" maxLength={80} value={draft.area} onChange={(event) => setField('area', event.target.value)} placeholder="Продажі" />
-            </div>
             <div className="form-field">
               <label htmlFor="new-priority">Пріоритет</label>
               <div className="native-select">
@@ -840,7 +832,7 @@ function CreateTaskDialog({
   )
 }
 
-function TaskDetailDrawer({
+function EditTaskDialog({
   task,
   onClose,
   onUpdated,
@@ -928,17 +920,18 @@ function TaskDetailDrawer({
   }
 
   return (
-    <div className="drawer-backdrop" onMouseDown={onClose}>
-      <aside className="task-drawer" onMouseDown={(event) => event.stopPropagation()} aria-labelledby="task-drawer-title">
-        <div className="drawer-head">
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <section className="task-dialog edit-task-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="edit-task-title">
+        <div className="dialog-header">
           <div>
-            <span className="task-id">{task.id}</span>
+            <span className="eyebrow">{task.id}</span>
+            <h2 id="edit-task-title">Редагувати задачу</h2>
             <span className="updated-at">Оновлено {formatDate(task.updatedAt)}</span>
           </div>
           <button className="icon-button" onClick={onClose} aria-label="Закрити"><X size={19} /></button>
         </div>
 
-        <form onSubmit={save} className="drawer-form">
+        <form onSubmit={save}>
           <div className="form-field form-field-wide">
             <label htmlFor="detail-title">Назва</label>
             <input id="detail-title" required minLength={3} maxLength={140} value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} />
@@ -947,9 +940,15 @@ function TaskDetailDrawer({
             <label htmlFor="detail-description">Опис</label>
             <textarea id="detail-description" rows={5} maxLength={3000} value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} />
           </div>
-          <div className="form-field form-field-wide">
-            <label htmlFor="detail-site-url">URL сайту</label>
-            <input id="detail-site-url" type="text" inputMode="url" maxLength={2048} value={draft.siteUrl} onChange={(event) => setDraft({ ...draft, siteUrl: event.target.value })} placeholder="https://example.com/problem-page" />
+          <div className="form-grid">
+            <div className="form-field">
+              <label htmlFor="detail-area">Розділ</label>
+              <input id="detail-area" maxLength={80} value={draft.area} onChange={(event) => setDraft({ ...draft, area: event.target.value })} />
+            </div>
+            <div className="form-field">
+              <label htmlFor="detail-site-url">URL сторінки</label>
+              <input id="detail-site-url" type="text" inputMode="url" maxLength={2048} value={draft.siteUrl} onChange={(event) => setDraft({ ...draft, siteUrl: event.target.value })} placeholder="https://example.com/problem-page" />
+            </div>
           </div>
           <div className="form-field form-field-wide">
             <label htmlFor="detail-notes">Нотатки</label>
@@ -971,14 +970,11 @@ function TaskDetailDrawer({
               </div>
             </div>
             <div className="form-field">
-              <label htmlFor="detail-area">Розділ</label>
-              <input id="detail-area" maxLength={80} value={draft.area} onChange={(event) => setDraft({ ...draft, area: event.target.value })} />
-            </div>
-            <div className="form-field">
               <label htmlFor="detail-project">Проєкт</label>
               <div className="native-select">
                 <select id="detail-project" value={draft.project} onChange={(event) => setDraft({ ...draft, project: event.target.value as TaskProject })}>
-                  {projectOrder.map((item) => <option value={item} key={item}>{projectMeta[item].label}</option>)}
+                  <option value="console">{projectMeta.console.label}</option>
+                  <option value="ecommerce">{projectMeta.ecommerce.label}</option>
                 </select>
                 <ChevronDown size={15} />
               </div>
@@ -1030,7 +1026,7 @@ function TaskDetailDrawer({
           </div>
 
           {error && <div className="form-error" role="alert">{error}</div>}
-          <div className="drawer-actions">
+          <div className="dialog-actions edit-dialog-actions">
             <button type="button" className="delete-button" onClick={removeTask} disabled={saving}><Trash2 size={16} /> Видалити</button>
             <button className="button button-primary" type="submit" disabled={saving || draft.title.trim().length < 3}>
               {saving ? <LoaderCircle className="spin" size={17} /> : <Check size={17} />}
@@ -1038,7 +1034,7 @@ function TaskDetailDrawer({
             </button>
           </div>
         </form>
-      </aside>
+      </section>
     </div>
   )
 }
@@ -1080,14 +1076,17 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [query, setQuery] = useState('')
-  const [project, setProject] = useState<TaskProject>('console')
   const [statusFilter, setStatusFilter] = useState<TaskStatus | 'all'>('all')
   const [priorityFilter, setPriorityFilter] = useState<TaskPriority | 'all'>('all')
+  const [sortDirection, setSortDirection] = useState<DateSortDirection>('desc')
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(pageSizeOptions[0])
   const [createOpen, setCreateOpen] = useState(false)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [lightboxAttachment, setLightboxAttachment] = useState<TaskAttachment | null>(null)
   const [updatingId, setUpdatingId] = useState<string | null>(null)
   const [toast, setToast] = useState('')
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>('console')
   const [notificationsReady, setNotificationsReady] = useState(
     () => 'Notification' in window && Notification.permission === 'granted',
   )
@@ -1157,21 +1156,41 @@ function App() {
 
   const selectedTask = tasks.find((task) => task.id === selectedId) ?? null
 
-  const projectTasks = useMemo(
-    () => tasks.filter((task) => (task.project ?? 'console') === project),
-    [project, tasks],
-  )
+  const tabTasks = useMemo(() => {
+    if (activeTab === 'auto') return tasks.filter(isSentinelTask)
+    return tasks.filter((task) => (task.project ?? 'console') === activeTab && !isSentinelTask(task))
+  }, [activeTab, tasks])
 
   const filteredTasks = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase('uk-UA')
-    return projectTasks.filter((task) => {
+    const filtered = tabTasks.filter((task) => {
       const matchesQuery = !normalizedQuery || [task.id, task.title, task.description, task.siteUrl, task.notes, task.area]
         .some((value) => value.toLocaleLowerCase('uk-UA').includes(normalizedQuery))
       const matchesStatus = statusFilter === 'all' || task.status === statusFilter
       const matchesPriority = priorityFilter === 'all' || task.priority === priorityFilter
       return matchesQuery && matchesStatus && matchesPriority
     })
-  }, [priorityFilter, projectTasks, query, statusFilter])
+
+    return filtered.sort((firstTask, secondTask) => {
+      const difference = Date.parse(firstTask.createdAt) - Date.parse(secondTask.createdAt)
+      return sortDirection === 'asc' ? difference : -difference
+    })
+  }, [priorityFilter, query, sortDirection, statusFilter, tabTasks])
+
+  const pageCount = Math.max(1, Math.ceil(filteredTasks.length / pageSize))
+  const currentPage = Math.min(page, pageCount)
+  const paginatedTasks = useMemo(() => {
+    const offset = (currentPage - 1) * pageSize
+    return filteredTasks.slice(offset, offset + pageSize)
+  }, [currentPage, filteredTasks, pageSize])
+
+  useEffect(() => {
+    setPage(1)
+  }, [activeTab, pageSize, priorityFilter, query, sortDirection, statusFilter])
+
+  useEffect(() => {
+    if (page > pageCount) setPage(pageCount)
+  }, [page, pageCount])
 
   const replaceTask = (nextTask: Task) => {
     setTasks((current) => current.map((task) => task.id === nextTask.id ? nextTask : task))
@@ -1193,21 +1212,9 @@ function App() {
     }
   }
 
-  const quickSave = async (task: Task, draft: TaskDraft) => {
-    setUpdatingId(task.id)
-    try {
-      replaceTask(await updateTask(task.id, draft))
-      setToast(`${task.id}: зміни збережено`)
-    } catch (caughtError) {
-      setToast('Не вдалося зберегти зміни')
-      throw caughtError
-    } finally {
-      setUpdatingId(null)
-    }
-  }
-
   const handleCreated = (task: Task) => {
     setTasks((current) => [task, ...current])
+    setPage(1)
     setToast(`${task.id} створено`)
   }
 
@@ -1233,22 +1240,28 @@ function App() {
           )}
           <span className="live-indicator"><i /> Система онлайн</span>
           <span className="topbar-date"><CalendarDays size={15} /> {formatDate(new Date().toISOString())}</span>
+          <BuildTicker
+            refreshKey={tasks.map((task) => `${task.id}:${task.status}:${task.updatedAt}`).join('|')}
+            onOpenTask={setSelectedId}
+          />
         </div>
       </header>
 
       <main id="top">
         <section className="workspace">
           <nav className="project-tabs" aria-label="Проєкти">
-            {projectOrder.map((item) => {
-              const count = tasks.filter((task) => (task.project ?? 'console') === item).length
+            {workspaceTabs.map((tab) => {
+              const count = tab.key === 'auto'
+                ? tasks.filter(isSentinelTask).length
+                : tasks.filter((task) => (task.project ?? 'console') === tab.key && !isSentinelTask(task)).length
               return (
                 <button
-                  key={item}
+                  key={tab.key}
                   type="button"
-                  className={`project-tab${project === item ? ' project-tab-active' : ''}`}
-                  onClick={() => setProject(item)}
+                  className={`project-tab${activeTab === tab.key ? ' project-tab-active' : ''}`}
+                  onClick={() => setActiveTab(tab.key)}
                 >
-                  {projectMeta[item].label}
+                  {tab.label}
                   <span className="project-tab-count">{count}</span>
                 </button>
               )
@@ -1275,6 +1288,13 @@ function App() {
               </select>
               <ChevronDown size={14} />
             </div>
+            <div className="filter-select">
+              <select value={sortDirection} onChange={(event) => setSortDirection(event.target.value as DateSortDirection)} aria-label="Сортування за датою створення">
+                <option value="desc">Нові спочатку</option>
+                <option value="asc">Старі спочатку</option>
+              </select>
+              <ChevronDown size={14} />
+            </div>
           </div>
 
           {loading ? (
@@ -1283,34 +1303,37 @@ function App() {
             <div className="load-error"><strong>Не вдалося відкрити журнал</strong><span>{loadError}</span><button className="button button-secondary" onClick={() => void loadTasks()}><RefreshCw size={16} /> Спробувати ще</button></div>
           ) : filteredTasks.length ? (
             <TaskTable
-              tasks={filteredTasks}
+              tasks={paginatedTasks}
               updatingId={updatingId}
+              sortDirection={sortDirection}
               onOpenTask={(task) => setSelectedId(task.id)}
               onStatusChange={(task, status) => void changeStatus(task, status)}
-              onQuickSave={quickSave}
+              onSortDirectionChange={setSortDirection}
               onOpenAttachment={setLightboxAttachment}
             />
           ) : <EmptyState onCreate={() => setCreateOpen(true)} />}
 
           {!loading && !loadError && filteredTasks.length > 0 && (
-            <div className="table-footer">
-              <span>Показано {filteredTasks.length} із {projectTasks.length} · {projectMeta[project].label}</span>
-              <span><i /> Зміни зберігаються автоматично</span>
-            </div>
+            <TaskPagination
+              page={currentPage}
+              pageCount={pageCount}
+              pageSize={pageSize}
+              filteredTotal={filteredTasks.length}
+              total={tabTasks.length}
+              onPageChange={(nextPage) => setPage(Math.min(Math.max(nextPage, 1), pageCount))}
+              onPageSizeChange={setPageSize}
+            />
           )}
         </section>
       </main>
 
-      <footer className="footer">
-        <span>GBA QA DESK · 2026</span>
-        <BuildTicker
-          refreshKey={tasks.map((task) => `${task.id}:${task.status}:${task.updatedAt}`).join('|')}
-          onOpenTask={setSelectedId}
-        />
-      </footer>
-
-      <CreateTaskDialog open={createOpen} project={project} onClose={() => setCreateOpen(false)} onCreated={handleCreated} />
-      <TaskDetailDrawer
+      <CreateTaskDialog
+        open={createOpen}
+        project={activeTab === 'auto' ? 'console' : activeTab}
+        onClose={() => setCreateOpen(false)}
+        onCreated={handleCreated}
+      />
+      <EditTaskDialog
         task={selectedTask}
         onClose={() => setSelectedId(null)}
         onUpdated={(task) => {
