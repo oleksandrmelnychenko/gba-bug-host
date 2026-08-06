@@ -102,6 +102,7 @@ function taskFromRow(row, attachments = [], agentRun = null) {
     description: row.description,
     siteUrl: row.site_url ?? '',
     notes: row.notes ?? '',
+    reviewComment: row.review_comment ?? '',
     area: row.area,
     project: row.project ?? 'console',
     status: row.status,
@@ -147,6 +148,7 @@ export class TaskStore {
         description TEXT NOT NULL DEFAULT '',
         site_url TEXT NOT NULL DEFAULT '',
         notes TEXT NOT NULL DEFAULT '',
+        review_comment TEXT NOT NULL DEFAULT '',
         area TEXT NOT NULL,
         status TEXT NOT NULL,
         priority TEXT NOT NULL,
@@ -209,6 +211,9 @@ export class TaskStore {
     if (!taskColumns.has('notes')) {
       this.database.exec("ALTER TABLE tasks ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
     }
+    if (!taskColumns.has('review_comment')) {
+      this.database.exec("ALTER TABLE tasks ADD COLUMN review_comment TEXT NOT NULL DEFAULT ''")
+    }
     if (!taskColumns.has('project')) {
       this.database.exec("ALTER TABLE tasks ADD COLUMN project TEXT NOT NULL DEFAULT 'console'")
     }
@@ -230,6 +235,7 @@ export class TaskStore {
           ...task,
           siteUrl: task.siteUrl ?? '',
           notes: task.notes ?? '',
+          reviewComment: task.reviewComment ?? '',
           attachments: (task.attachments ?? []).map((attachment) => ({
             ...attachment,
             kind: attachment.kind ?? (attachment.type?.startsWith('video/') ? 'video' : 'image'),
@@ -256,14 +262,15 @@ export class TaskStore {
 
   insertTask(task) {
     this.database.prepare(`
-      INSERT INTO tasks (id, title, description, site_url, notes, area, project, status, priority, assignee, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO tasks (id, title, description, site_url, notes, review_comment, area, project, status, priority, assignee, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       task.id,
       task.title,
       task.description,
       task.siteUrl ?? '',
       task.notes ?? '',
+      task.reviewComment ?? '',
       task.area,
       task.project ?? 'console',
       task.status,
@@ -352,7 +359,7 @@ export class TaskStore {
     const existingTask = this.find(id)
     if (!existingTask) return null
 
-    const allowedFields = ['title', 'description', 'siteUrl', 'notes', 'area', 'project', 'status', 'priority', 'assignee']
+    const allowedFields = ['title', 'description', 'siteUrl', 'notes', 'reviewComment', 'area', 'project', 'status', 'priority', 'assignee']
     const fields = allowedFields.filter((field) => Object.hasOwn(values, field))
     const updatedAt = new Date().toISOString()
 
@@ -362,6 +369,7 @@ export class TaskStore {
         description: 'description',
         siteUrl: 'site_url',
         notes: 'notes',
+        reviewComment: 'review_comment',
         area: 'area',
         project: 'project',
         status: 'status',

@@ -32,6 +32,9 @@ test('Codex worker працює в окремому worktree та зберіга
 import { writeFileSync } from 'node:fs'
 const args = process.argv.slice(2)
 const outputPath = args[args.indexOf('--output-last-message') + 1]
+let prompt = ''
+for await (const chunk of process.stdin) prompt += chunk
+writeFileSync('prompt.txt', prompt, 'utf8')
 writeFileSync('target/app.txt', 'after\\n', 'utf8')
 writeFileSync(outputPath, JSON.stringify({
   outcome: 'fixed',
@@ -48,6 +51,7 @@ writeFileSync(outputPath, JSON.stringify({
     store.transaction(() => {
       for (const task of getSeedTasks()) store.insertTask(task)
     })
+    store.patch('BUG-1051', { reviewComment: 'Після першого виправлення пошук усе ще падає на порожньому рядку.' })
     const queued = store.enqueueAgentRun('RUN-TEST-1', 'BUG-1051', 'manual')
     assert.equal(queued.created, true)
     const run = store.claimNextAgentRun()
@@ -71,6 +75,10 @@ writeFileSync(outputPath, JSON.stringify({
     assert.equal(store.find('BUG-1051').status, 'ready_for_retest')
     assert.equal(store.currentBuild('worker-test-build').bugs[0].source, 'codex')
     assert.equal(await readFile(path.join(worktreesDirectory, 'bug-1051', 'target', 'app.txt'), 'utf8'), 'after\n')
+    assert.match(
+      await readFile(path.join(worktreesDirectory, 'bug-1051', 'prompt.txt'), 'utf8'),
+      /Після першого виправлення пошук усе ще падає на порожньому рядку/,
+    )
     assert.equal(await readFile(path.join(targetRepository, 'app.txt'), 'utf8'), 'before\n')
     assert.equal(git(targetRepository, 'status', '--short'), '')
   } finally {

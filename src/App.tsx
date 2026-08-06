@@ -61,6 +61,7 @@ const emptyDraft: TaskDraft = {
   description: '',
   siteUrl: '',
   notes: '',
+  reviewComment: '',
   area: '',
   project: 'console',
   status: 'new',
@@ -87,9 +88,8 @@ function isSentinelTask(task: Task) {
 
 const COLUMN_WIDTHS_STORAGE_KEY = 'gba-qa-desk-column-widths-v2'
 const tableColumns: Array<{ key: string; label: string; className?: string; srOnly?: boolean }> = [
-  { key: 'id', label: 'Номер', className: 'column-id' },
-  { key: 'created', label: 'Дата й час', className: 'column-created' },
   { key: 'title', label: 'Задача' },
+  { key: 'created', label: 'Створено', className: 'column-created' },
   { key: 'area', label: 'Розділ' },
   { key: 'url', label: 'URL сторінки' },
   { key: 'notes', label: 'Нотатки' },
@@ -145,6 +145,7 @@ function taskToDraft(task: Task): TaskDraft {
     description: task.description,
     siteUrl: task.siteUrl,
     notes: task.notes,
+    reviewComment: task.reviewComment,
     area: task.area,
     project: task.project ?? 'console',
     status: task.status,
@@ -430,7 +431,7 @@ function TaskTable({
                       onClick={() => onSortDirectionChange(sortDirection === 'desc' ? 'asc' : 'desc')}
                       aria-label={`Сортування за датою створення: ${sortDirection === 'desc' ? 'спочатку нові' : 'спочатку старі'}`}
                     >
-                      Дата й час
+                      Створено
                       {sortDirection === 'desc' ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
                     </button>
                   ) : column.srOnly ? (
@@ -455,24 +456,27 @@ function TaskTable({
                   onClick={() => onOpenTask(task)}
                   style={{ '--row-delay': `${Math.min(index, 7) * 35}ms` } as React.CSSProperties}
                 >
-                  <td>
-                    <span className="task-id">{task.id}</span>
-                    {task.agentRun && (
-                      <span className={`agent-table-state agent-run-${task.agentRun.status}`} title={agentRunMeta[task.agentRun.status].label}>
-                        {task.agentRun.status === 'running'
-                          ? <LoaderCircle className="spin" size={11} />
-                          : <Bot size={11} />} {agentRunMeta[task.agentRun.status].shortLabel}
-                      </span>
-                    )}
+                  <td className="task-main-column">
+                    <div className="task-title-cell">
+                      <strong>{task.title}</strong>
+                      <div className="task-title-meta">
+                        <span className="task-id">{task.id}</span>
+                        {task.agentRun && (task.agentRun.status === 'queued' || task.agentRun.status === 'running') ? (
+                          <span className={`codex-progress codex-progress-${task.agentRun.status}`} title={agentRunMeta[task.agentRun.status].label}>
+                            <LoaderCircle className="spin" size={10} />
+                            {task.agentRun.status === 'running' ? 'Codex' : 'Черга'}
+                          </span>
+                        ) : task.agentRun ? (
+                          <span className={`agent-table-state agent-run-${task.agentRun.status}`} title={agentRunMeta[task.agentRun.status].label}>
+                            <Bot size={10} /> {agentRunMeta[task.agentRun.status].shortLabel}
+                          </span>
+                        ) : null}
+                        <span className="task-description">{task.description || 'Без додаткового опису'}</span>
+                      </div>
+                    </div>
                   </td>
                   <td>
                     <time className="created-at" dateTime={task.createdAt}>{formatDateTime(task.createdAt)}</time>
-                  </td>
-                  <td>
-                    <div className="task-title-cell">
-                      <strong>{task.title}</strong>
-                      <span>{task.description || 'Без додаткового опису'}</span>
-                    </div>
                   </td>
                   <td><span className="area-label">{task.area}</span></td>
                   <td>
@@ -493,12 +497,6 @@ function TaskTable({
                   <td><span className="notes-cell" title={task.notes}>{task.notes || '—'}</span></td>
                   <td><PriorityBadge priority={task.priority} /></td>
                   <td onClick={(event) => event.stopPropagation()}>
-                    {task.agentRun && (task.agentRun.status === 'queued' || task.agentRun.status === 'running') && (
-                      <span className={`codex-progress codex-progress-${task.agentRun.status}`}>
-                        <LoaderCircle className="spin" size={13} />
-                        {task.agentRun.status === 'running' ? 'Codex працює…' : 'У черзі Codex'}
-                      </span>
-                    )}
                     <StatusSelect
                       value={task.status}
                       compact
@@ -836,12 +834,14 @@ function EditTaskDialog({
   task,
   onClose,
   onUpdated,
+  onReviewAgain,
   onDeleted,
   onOpenAttachment,
 }: {
   task: Task | null
   onClose: () => void
   onUpdated: (task: Task) => void
+  onReviewAgain: (task: Task, patch: TaskDraft) => void
   onDeleted: (id: string) => void
   onOpenAttachment: (attachment: TaskAttachment) => void
 }) {
@@ -856,7 +856,7 @@ function EditTaskDialog({
       setDraft(taskToDraft(task))
       setError('')
     }
-  }, [task?.id])
+  }, [task?.id, task?.updatedAt])
 
   useEffect(() => {
     if (!task) return
@@ -871,6 +871,10 @@ function EditTaskDialog({
 
   const save = async (event: FormEvent) => {
     event.preventDefault()
+    if (draft.status === 'review_again' && task.status !== 'review_again') {
+      onReviewAgain(task, draft)
+      return
+    }
     setSaving(true)
     setError('')
     try {
@@ -953,6 +957,18 @@ function EditTaskDialog({
           <div className="form-field form-field-wide">
             <label htmlFor="detail-notes">Нотатки</label>
             <textarea id="detail-notes" className="technical-notes" rows={5} maxLength={10000} value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} placeholder="HTTP request, payload, response — без паролів і токенів" />
+          </div>
+          <div className="form-field form-field-wide ai-comment-field">
+            <label htmlFor="detail-review-comment">Останній коментар для AI</label>
+            <textarea
+              id="detail-review-comment"
+              rows={3}
+              maxLength={5000}
+              value={draft.reviewComment}
+              onChange={(event) => setDraft({ ...draft, reviewComment: event.target.value })}
+              placeholder="З’явиться після повторного запуску задачі"
+            />
+            <small>Новий коментар запитується окремо при статусі «Передивись ще раз».</small>
           </div>
 
           <div className="detail-control-grid">
@@ -1039,6 +1055,113 @@ function EditTaskDialog({
   )
 }
 
+type ReviewAgainRequest = {
+  task: Task
+  patch: Partial<TaskDraft>
+}
+
+function ReviewAgainDialog({
+  request,
+  onClose,
+  onSubmit,
+}: {
+  request: ReviewAgainRequest | null
+  onClose: () => void
+  onSubmit: (comment: string) => Promise<void>
+}) {
+  const [comment, setComment] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    setComment('')
+    setError('')
+  }, [request?.task.id, request?.task.agentRun?.attempt])
+
+  useEffect(() => {
+    if (!request) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !saving) onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [request, saving, onClose])
+
+  if (!request) return null
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault()
+    const normalizedComment = comment.trim()
+    if (normalizedComment.length < 3) {
+      setError('Опишіть, що саме залишилося невиправленим.')
+      return
+    }
+    setSaving(true)
+    setError('')
+    try {
+      await onSubmit(normalizedComment)
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : 'Не вдалося запустити AI повторно.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const nextAttempt = (request.task.agentRun?.attempt ?? 0) + 1
+
+  return (
+    <div className="modal-backdrop review-again-backdrop" onMouseDown={() => !saving && onClose()}>
+      <section className="task-dialog review-again-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="review-again-title">
+        <div className="dialog-header">
+          <div>
+            <span className="eyebrow">{request.task.id} · спроба #{nextAttempt}</span>
+            <h2 id="review-again-title">Що саме не так?</h2>
+          </div>
+          <button className="icon-button" onClick={onClose} disabled={saving} aria-label="Закрити"><X size={19} /></button>
+        </div>
+        <form onSubmit={submit}>
+          <div className="review-ai-context">
+            <span><Bot size={18} /></span>
+            <div>
+              <strong>Новий запуск почнеться автоматично</strong>
+              <p>AI отримає цей коментар разом з описом, URL, технічними нотатками та вкладеннями задачі.</p>
+            </div>
+          </div>
+          <div className="form-field form-field-wide">
+            <label htmlFor="review-comment">Коментар для AI <span>*</span></label>
+            <textarea
+              id="review-comment"
+              autoFocus
+              required
+              minLength={3}
+              maxLength={5000}
+              rows={6}
+              value={comment}
+              onChange={(event) => setComment(event.target.value)}
+              placeholder="Наприклад: форма вже відкривається, але після натискання «Зберегти» все ще повертається 500. Перевір POST /api/orders…"
+            />
+            <small className="field-counter">{comment.length} / 5000</small>
+          </div>
+          {request.task.reviewComment && (
+            <div className="previous-ai-comment">
+              <span>Попередній коментар</span>
+              <p>{request.task.reviewComment}</p>
+            </div>
+          )}
+          {error && <div className="form-error" role="alert">{error}</div>}
+          <div className="dialog-actions">
+            <button type="button" className="button button-secondary" onClick={onClose} disabled={saving}>Скасувати</button>
+            <button type="submit" className="button button-primary" disabled={saving || comment.trim().length < 3}>
+              {saving ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}
+              {saving ? 'Ставлю в чергу…' : 'Запустити AI ще раз'}
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  )
+}
+
 function Lightbox({ attachment, onClose }: { attachment: TaskAttachment | null; onClose: () => void }) {
   useEffect(() => {
     if (!attachment) return
@@ -1085,6 +1208,7 @@ function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [lightboxAttachment, setLightboxAttachment] = useState<TaskAttachment | null>(null)
   const [updatingId, setUpdatingId] = useState<string | null>(null)
+  const [reviewAgainRequest, setReviewAgainRequest] = useState<ReviewAgainRequest | null>(null)
   const [toast, setToast] = useState('')
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('console')
   const [notificationsReady, setNotificationsReady] = useState(
@@ -1164,7 +1288,7 @@ function App() {
   const filteredTasks = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase('uk-UA')
     const filtered = tabTasks.filter((task) => {
-      const matchesQuery = !normalizedQuery || [task.id, task.title, task.description, task.siteUrl, task.notes, task.area]
+      const matchesQuery = !normalizedQuery || [task.id, task.title, task.description, task.siteUrl, task.notes, task.reviewComment, task.area]
         .some((value) => value.toLocaleLowerCase('uk-UA').includes(normalizedQuery))
       const matchesStatus = statusFilter === 'all' || task.status === statusFilter
       const matchesPriority = priorityFilter === 'all' || task.priority === priorityFilter
@@ -1198,6 +1322,10 @@ function App() {
 
   const changeStatus = async (task: Task, status: TaskStatus) => {
     if (task.status === status) return
+    if (status === 'review_again') {
+      setReviewAgainRequest({ task, patch: { status } })
+      return
+    }
     const previousStatus = task.status
     setUpdatingId(task.id)
     setTasks((current) => current.map((item) => item.id === task.id ? { ...item, status } : item))
@@ -1216,6 +1344,24 @@ function App() {
     setTasks((current) => [task, ...current])
     setPage(1)
     setToast(`${task.id} створено`)
+  }
+
+  const submitReviewAgain = async (comment: string) => {
+    if (!reviewAgainRequest) return
+    const { task, patch } = reviewAgainRequest
+    setUpdatingId(task.id)
+    try {
+      const updatedTask = await updateTask(task.id, {
+        ...patch,
+        status: 'review_again',
+        reviewComment: comment,
+      })
+      replaceTask(updatedTask)
+      setReviewAgainRequest(null)
+      setToast(`${task.id}: AI запущено повторно`)
+    } finally {
+      setUpdatingId(null)
+    }
   }
 
   return (
@@ -1340,8 +1486,14 @@ function App() {
           replaceTask(task)
           setToast(`${task.id} збережено`)
         }}
+        onReviewAgain={(task, patch) => setReviewAgainRequest({ task, patch })}
         onDeleted={(id) => setTasks((current) => current.filter((task) => task.id !== id))}
         onOpenAttachment={setLightboxAttachment}
+      />
+      <ReviewAgainDialog
+        request={reviewAgainRequest}
+        onClose={() => setReviewAgainRequest(null)}
+        onSubmit={submitReviewAgain}
       />
       <Lightbox attachment={lightboxAttachment} onClose={() => setLightboxAttachment(null)} />
       {toast && <div className="toast"><Check size={15} /> {toast}</div>}

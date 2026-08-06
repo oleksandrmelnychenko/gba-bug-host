@@ -79,7 +79,7 @@ test('API створює задачу зі скріншотом і оновлю�
   })
 })
 
-test('SQLite автоматично додає URL і нотатки до існуючої схеми', async () => {
+test('SQLite автоматично додає URL, нотатки та AI-коментар до існуючої схеми', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'gba-bug-host-migration-'))
   const dataDirectory = path.join(root, 'data')
   const databasePath = path.join(dataDirectory, 'gba-qa.sqlite')
@@ -120,13 +120,16 @@ test('SQLite автоматично додає URL і нотатки до існ
     const task = store.find('BUG-1001')
     assert.equal(task.siteUrl, '')
     assert.equal(task.notes, '')
+    assert.equal(task.reviewComment, '')
 
     const updated = store.patch('BUG-1001', {
       siteUrl: 'https://example.com/problem',
       notes: 'GET /api/products → 500',
+      reviewComment: 'Кнопка все ще повертає 500.',
     })
     assert.equal(updated.siteUrl, 'https://example.com/problem')
     assert.equal(updated.notes, 'GET /api/products → 500')
+    assert.equal(updated.reviewComment, 'Кнопка все ще повертає 500.')
   } finally {
     store.close()
     await rm(root, { recursive: true, force: true })
@@ -193,12 +196,23 @@ test('API ставить Codex job у чергу та повторно реаг�
       finishedAt: new Date().toISOString(),
     })
 
-    const reviewAgain = await request(app)
+    const missingComment = await request(app)
       .patch('/api/tasks/BUG-1051')
       .send({ status: 'review_again' })
+      .expect(400)
+
+    assert.match(missingComment.body.message, /що саме залишилося невиправленим/i)
+
+    const reviewAgain = await request(app)
+      .patch('/api/tasks/BUG-1051')
+      .send({
+        status: 'review_again',
+        reviewComment: 'Поле очищується, але білий екран усе ще з’являється після другого пошуку.',
+      })
       .expect(200)
 
     assert.equal(reviewAgain.body.status, 'review_again')
+    assert.equal(reviewAgain.body.reviewComment, 'Поле очищується, але білий екран усе ще з’являється після другого пошуку.')
     assert.equal(reviewAgain.body.agentRun.status, 'queued')
     assert.equal(reviewAgain.body.agentRun.trigger, 'review_again')
     assert.equal(reviewAgain.body.agentRun.attempt, 2)

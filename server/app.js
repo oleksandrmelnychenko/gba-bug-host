@@ -93,6 +93,7 @@ function validateTaskInput(body, { partial = false } = {}) {
   const description = cleanText(body.description)
   const siteUrl = normalizeSiteUrl(body.siteUrl, errors)
   const notes = cleanText(body.notes)
+  const reviewComment = cleanText(body.reviewComment)
   const area = cleanText(body.area)
   const project = cleanText(body.project)
   const status = cleanText(body.status)
@@ -105,6 +106,7 @@ function validateTaskInput(body, { partial = false } = {}) {
   if (title.length > 140) errors.push('Назва задачі має бути коротшою за 140 символів.')
   if (description.length > 3000) errors.push('Опис має бути коротшим за 3000 символів.')
   if (notes.length > 10000) errors.push('Нотатки мають бути коротшими за 10000 символів.')
+  if (reviewComment.length > 5000) errors.push('Коментар для AI має бути коротшим за 5000 символів.')
   if (area.length > 80) errors.push('Назва розділу має бути коротшою за 80 символів.')
   if (assignee.length > 80) errors.push('Ім’я виконавця має бути коротшим за 80 символів.')
   if (status && !allowedStatuses.has(status)) errors.push('Невідомий статус задачі.')
@@ -113,7 +115,7 @@ function validateTaskInput(body, { partial = false } = {}) {
 
   return {
     errors,
-    values: { title, description, siteUrl, notes, area, project, status, priority, assignee },
+    values: { title, description, siteUrl, notes, reviewComment, area, project, status, priority, assignee },
   }
 }
 
@@ -192,6 +194,7 @@ export async function createApp(options = {}) {
         description: values.description,
         siteUrl: values.siteUrl,
         notes: values.notes,
+        reviewComment: values.reviewComment,
         area: values.area || 'Загальне',
         project: values.project || 'console',
         status: values.status || 'new',
@@ -223,11 +226,16 @@ export async function createApp(options = {}) {
         response.status(404).json({ message: 'Задачу не знайдено.' })
         return
       }
-      if (values.status === 'review_again' && existingTask.status !== 'review_again'
+      const startsReviewRun = values.status === 'review_again' && existingTask.status !== 'review_again'
+      if (startsReviewRun && (!Object.hasOwn(request.body, 'reviewComment') || values.reviewComment.length < 3)) {
+        response.status(400).json({ message: 'Опишіть для AI, що саме залишилося невиправленим.' })
+        return
+      }
+      if (startsReviewRun
         && !authorizeCodexTrigger(request, response)) return
 
       const patch = {}
-      for (const key of ['title', 'description', 'siteUrl', 'notes', 'area', 'project', 'status', 'priority', 'assignee']) {
+      for (const key of ['title', 'description', 'siteUrl', 'notes', 'reviewComment', 'area', 'project', 'status', 'priority', 'assignee']) {
         if (Object.hasOwn(request.body, key)) patch[key] = values[key]
       }
       if (Object.hasOwn(patch, 'project') && !patch.project) delete patch.project
@@ -237,7 +245,7 @@ export async function createApp(options = {}) {
         store.markTaskProcessed(buildNumber, request.params.id, 'manual')
       }
 
-      if (values.status === 'review_again' && existingTask.status !== 'review_again') {
+      if (startsReviewRun) {
         store.enqueueAgentRun(randomUUID(), request.params.id, 'review_again')
       }
       response.json(await store.find(request.params.id))

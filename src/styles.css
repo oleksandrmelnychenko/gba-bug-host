@@ -4,14 +4,16 @@
   font-family: Onest, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-  --brand-25: #fcfaff;
-  --brand-50: #f9f5ff;
-  --brand-100: #f4ebff;
-  --brand-200: #e9d7fe;
-  --brand-300: #d6bbfb;
-  --brand-500: #9e77ed;
-  --brand-600: #7f56d9;
-  --brand-700: #6941c6;
+  --mantine-color-orange-light-color: #d9480f;
+  --brand-25: #fffaf8;
+  --brand-50: #fff4ef;
+  --brand-100: #ffe8dc;
+  --brand-200: #ffcdb8;
+  --brand-300: #fea684;
+  --brand-400: #f8754a;
+  --brand-500: #ea5a27;
+  --brand-600: var(--mantine-color-orange-light-color);
+  --brand-700: #b9380a;
   --gray-25: #fdfdfd;
   --gray-50: #fafafa;
   --gray-100: #f5f5f5;
@@ -249,10 +251,21 @@ main {
   border-radius: 999px;
   font-size: 11px;
   font-weight: 600;
-  color: #5925dc;
-  background: linear-gradient(110deg, #f4ebff 30%, #e9d7fe 45%, #f4ebff 60%);
+  color: var(--brand-700);
+  background: linear-gradient(110deg, var(--brand-100) 30%, var(--brand-200) 45%, var(--brand-100) 60%);
   background-size: 220% 100%;
   animation: codex-progress-shimmer 1.8s linear infinite;
+}
+
+.task-title-meta .codex-progress {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 1px 6px 1px 4px;
+  gap: 3px;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 8.5px;
+  line-height: 13px;
+  text-transform: uppercase;
 }
 
 .codex-progress-queued {
@@ -321,6 +334,7 @@ main {
 
 .project-tabs {
   display: flex;
+  justify-content: center;
   gap: 4px;
   padding: 14px 24px 0;
   border-bottom: 1px solid var(--gray-200);
@@ -334,7 +348,7 @@ main {
   border: none;
   border-bottom: 2px solid transparent;
   background: none;
-  font: inherit;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 14px;
   font-weight: 600;
   color: var(--gray-500);
@@ -347,7 +361,7 @@ main {
 }
 
 .project-tab-active {
-  color: var(--brand-700);
+  color: var(--brand-600);
   border-bottom-color: var(--brand-600);
 }
 
@@ -366,7 +380,7 @@ main {
 
 .project-tab-active .project-tab-count {
   background: var(--brand-100);
-  color: var(--brand-700);
+  color: var(--brand-600);
 }
 
 .filters {
@@ -472,32 +486,31 @@ main {
 
 .task-table {
   width: 100%;
-  min-width: 1680px;
+  min-width: 1380px;
   border-spacing: 0;
   border-collapse: separate;
   table-layout: fixed;
 }
 
-.task-table th:nth-child(1) { width: 110px; }
-.task-table th:nth-child(2) { width: 160px; }
-.task-table th:nth-child(3) { width: 26%; }
-.task-table th:nth-child(4) { width: 120px; }
-.task-table th:nth-child(5) { width: 15%; }
-.task-table th:nth-child(6) { width: 17%; }
-.task-table th:nth-child(7) { width: 130px; }
-.task-table th:nth-child(8) { width: 210px; }
-.task-table th:nth-child(9) { width: 90px; }
-.task-table th:nth-child(10) { width: 76px; }
+.task-table th:nth-child(1) { width: 36%; }
+.task-table th:nth-child(2) { width: 105px; }
+.task-table th:nth-child(3) { width: 110px; }
+.task-table th:nth-child(4) { width: 165px; }
+.task-table th:nth-child(5) { width: 170px; }
+.task-table th:nth-child(6) { width: 112px; }
+.task-table th:nth-child(7) { width: 175px; }
+.task-table th:nth-child(8) { width: 82px; }
+.task-table th:nth-child(9) { width: 56px; }
 
 .task-table th {
-  height: 44px;
-  padding: 11px 16px;
+  height: 40px;
+  padding: 9px 12px;
   color: var(--gray-600);
   background: var(--gray-50);
   border-bottom: 1px solid var(--gray-200);
   text-align: left;
-  font-size: 12px;
-  line-height: 18px;
+  font-size: 11.5px;
+  line-height: 16px;
   font-weight: 600;
 }
 
@@ -517,13 +530,13 @@ main {
 }
 
 .task-table td {
-  height: 76px;
-  padding: 12px 16px;
+  height: 52px;
+  padding: 7px 12px;
   color: var(--gray-600);
   background: #fff;
   border-bottom: 1px solid var(--gray-200);
-  font-size: 13px;
-  line-height: 20px;
+  font-size: 12px;
+  line-height: 18px;
   vertical-align: middle;
 }
 
@@ -541,12 +554,8 @@ main {
   border-bottom: 0;
 }
 
-.column-id {
-  width: 106px;
-}
-
 .column-created {
-  width: 160px;
+  width: 105px;
 }
 
 .column-action {
@@ -555,19 +564,23 @@ main {
 
 .task-id {
   color: var(--brand-700);
-  font-size: 12px;
-  line-height: 18px;
+  font-size: 9.5px;
+  line-height: 14px;
   font-weight: 600;
-  letter-spacing: 0.01em;
+  letter-spacing: 0.035em;
   white-space: nowrap;
 }
 
 .created-at {
   color: var(--gray-600);
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 11px;
-  line-height: 18px;
+  font-size: 9.5px;
+  line-height: 15px;
   white-space: nowrap;
+}
+
+.task-main-column {
+  min-width: 0;
 }
 
 .task-title-cell {
@@ -575,29 +588,41 @@ main {
   max-width: 100%;
   display: flex;
   flex-direction: column;
+  gap: 2px;
 }
 
 .task-title-cell strong {
   overflow: hidden;
   color: var(--gray-900);
-  font-size: 14px;
-  line-height: 20px;
-  font-weight: 500;
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.task-title-cell span {
+.task-title-meta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  overflow: hidden;
+}
+
+.task-title-meta .task-description {
+  min-width: 0;
   overflow: hidden;
   color: var(--gray-500);
-  font-size: 13px;
+  font-size: 10.5px;
+  line-height: 14px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .area-label {
   color: var(--gray-700);
-  font-weight: 500;
+  font-size: 11.5px;
+  font-weight: 600;
 }
 
 .task-url,
@@ -621,7 +646,7 @@ main {
 
 .task-url:hover,
 .task-card-url:hover {
-  color: #53389e;
+  color: var(--brand-600);
   text-decoration: underline;
 }
 
@@ -644,19 +669,22 @@ main {
   width: max-content;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 2px 8px;
+  gap: 5px;
+  padding: 2px 7px;
   border: 1px solid;
   border-radius: 999px;
-  font-size: 12px;
-  line-height: 18px;
-  font-weight: 500;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 9.5px;
+  line-height: 15px;
+  font-weight: 600;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
   white-space: nowrap;
 }
 
 .priority-badge > span {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
   background: currentColor;
 }
@@ -699,8 +727,9 @@ main {
 }
 
 .status-select-wrap.is-compact {
-  width: 100%;
-  min-height: 28px;
+  width: max-content;
+  max-width: 100%;
+  min-height: 26px;
   border-radius: 999px;
   box-shadow: none;
 }
@@ -720,10 +749,17 @@ main {
 }
 
 .status-select-wrap.is-compact select {
-  min-width: 0;
-  min-height: 26px;
-  padding: 3px 27px 3px 24px;
-  font-size: 12px;
+  width: auto;
+  min-width: 138px;
+  max-width: 100%;
+  min-height: 24px;
+  padding: 2px 25px 2px 21px;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 9.5px;
+  line-height: 15px;
+  font-weight: 600;
+  letter-spacing: 0.025em;
+  text-transform: uppercase;
 }
 
 .status-select-wrap > svg {
@@ -747,9 +783,9 @@ main {
 }
 
 .is-compact .status-dot {
-  left: 9px;
-  width: 6px;
-  height: 6px;
+  left: 8px;
+  width: 5px;
+  height: 5px;
 }
 
 .status-new {
@@ -771,9 +807,9 @@ main {
 }
 
 .status-review_again {
-  color: #5925dc;
-  background: #f4f3ff;
-  border-color: #c7d7fe;
+  color: var(--brand-700);
+  background: var(--brand-50);
+  border-color: var(--brand-200);
 }
 
 .status-done {
@@ -796,15 +832,15 @@ main {
 }
 
 .attachment-stack {
-  min-width: 68px;
+  min-width: 58px;
   display: flex;
   align-items: center;
   padding-left: 4px;
 }
 
 .mini-thumbnail {
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   margin-left: -5px;
   padding: 0;
   overflow: hidden;
@@ -1036,6 +1072,109 @@ main {
   width: min(820px, 100%);
 }
 
+.review-again-backdrop {
+  z-index: 130;
+}
+
+.review-again-dialog {
+  width: min(560px, 100%);
+}
+
+.review-ai-context {
+  margin-bottom: 20px;
+  padding: 12px;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--gray-700);
+  background: var(--brand-25);
+  border: 1px solid var(--brand-200);
+  border-radius: 9px;
+}
+
+.review-ai-context > span {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  color: var(--brand-700);
+  background: #fff;
+  border: 1px solid var(--brand-200);
+  border-radius: 7px;
+}
+
+.review-ai-context strong {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--gray-900);
+  font-size: 13px;
+  line-height: 19px;
+}
+
+.review-ai-context p {
+  margin: 0;
+  color: var(--gray-600);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.field-counter {
+  margin-top: 5px;
+  display: block;
+  color: var(--gray-500);
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+  text-align: right;
+}
+
+.previous-ai-comment {
+  margin: -2px 0 18px;
+  padding: 10px 12px;
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
+  border-radius: 8px;
+}
+
+.previous-ai-comment > span {
+  color: var(--gray-500);
+  font-size: 10px;
+  line-height: 15px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.previous-ai-comment p {
+  max-height: 76px;
+  margin: 4px 0 0;
+  overflow: auto;
+  color: var(--gray-700);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: pre-wrap;
+}
+
+.ai-comment-field {
+  position: relative;
+}
+
+.ai-comment-field textarea {
+  min-height: 82px;
+  color: var(--gray-700);
+  background: var(--gray-50);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.ai-comment-field > small {
+  margin-top: 5px;
+  display: block;
+  color: var(--gray-500);
+  font-size: 11px;
+  line-height: 16px;
+}
+
 .dialog-header {
   padding: 24px;
   display: flex;
@@ -1247,22 +1386,26 @@ main {
 .agent-table-state {
   width: max-content;
   max-width: 72px;
-  margin-top: 5px;
+  flex: 0 0 auto;
+  margin-top: 0;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   overflow: hidden;
   color: var(--agent-color, var(--gray-600));
-  font-size: 9.5px;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 8.5px;
   font-weight: 600;
-  line-height: 14px;
+  line-height: 13px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .agent-run-queued { --agent-color: #175cd3; }
 .agent-run-running {
-  --agent-color: #5925dc;
+  --agent-color: var(--brand-600);
   animation: agent-running-pulse 1.6s ease-in-out infinite;
 }
 
@@ -1668,8 +1811,8 @@ main {
 }
 
 .build-source-codex {
-  color: #5925dc;
-  background: #f4f3ff;
+  color: var(--brand-700);
+  background: var(--brand-50);
 }
 
 .build-popover-state,
