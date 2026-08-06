@@ -1675,7 +1675,12 @@ function PipelineView({
     .sort((a, b) => Date.parse(a.agentRun!.createdAt) - Date.parse(b.agentRun!.createdAt))
   const queued = tasks
     .filter((task) => task.agentRun?.status === 'queued')
-    .sort((a, b) => Date.parse(a.agentRun!.createdAt) - Date.parse(b.agentRun!.createdAt))
+    .sort((a, b) => {
+      const byPriority = (b.agentRun!.queuePriority ?? 0) - (a.agentRun!.queuePriority ?? 0)
+      return byPriority !== 0
+        ? byPriority
+        : Date.parse(a.agentRun!.createdAt) - Date.parse(b.agentRun!.createdAt)
+    })
   const reruns = tasks.filter((task) => {
     const run = task.agentRun
     return run && (run.trigger === 'review_again' || run.attempt > 1) && (run.status === 'queued' || run.status === 'running')
