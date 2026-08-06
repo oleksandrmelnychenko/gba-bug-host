@@ -16,3 +16,4 @@ npm-debug.log*
 .playwright-cli/
 output/
 docker-compose.override.yml
+.codex-worker-home/

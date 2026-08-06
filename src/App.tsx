@@ -1,4 +1,6 @@
 import {
+  Bell,
+  BellOff,
   Bot,
   Bug,
   CalendarDays,
@@ -66,6 +68,19 @@ const emptyDraft: TaskDraft = {
 
 const statusOrder: TaskStatus[] = ['new', 'in_progress', 'review_again', 'ready_for_retest', 'blocked', 'done']
 const priorityOrder: TaskPriority[] = ['critical', 'high', 'medium', 'low']
+
+const COLUMN_WIDTHS_STORAGE_KEY = 'gba-qa-desk-column-widths'
+const tableColumns: Array<{ key: string; label: string; className?: string; srOnly?: boolean }> = [
+  { key: 'id', label: 'Номер', className: 'column-id' },
+  { key: 'title', label: 'Задача' },
+  { key: 'area', label: 'Розділ' },
+  { key: 'url', label: 'URL сайту' },
+  { key: 'notes', label: 'Нотатки' },
+  { key: 'priority', label: 'Пріоритет' },
+  { key: 'status', label: 'Статус' },
+  { key: 'evidence', label: 'Докази' },
+  { key: 'action', label: 'Відкрити', className: 'column-action', srOnly: true },
+]
 
 const agentRunMeta: Record<AgentRunStatus, { label: string; shortLabel: string }> = {
   queued: { label: 'У черзі', shortLabel: 'Черга' },
@@ -325,6 +340,48 @@ function TaskTable({
   const [editDraft, setEditDraft] = useState<TaskDraft>(emptyDraft)
   const [savingEdit, setSavingEdit] = useState(false)
   const [editError, setEditError] = useState('')
+  const headerRowRef = useRef<HTMLTableRowElement | null>(null)
+  const [columnWidths, setColumnWidths] = useState<Record<string, number> | null>(() => {
+    try {
+      const raw = localStorage.getItem(COLUMN_WIDTHS_STORAGE_KEY)
+      if (!raw) return null
+      const parsed = JSON.parse(raw) as Record<string, number>
+      return tableColumns.every((column) => typeof parsed[column.key] === 'number') ? parsed : null
+    } catch {
+      return null
+    }
+  })
+
+  useEffect(() => {
+    if (columnWidths) localStorage.setItem(COLUMN_WIDTHS_STORAGE_KEY, JSON.stringify(columnWidths))
+    else localStorage.removeItem(COLUMN_WIDTHS_STORAGE_KEY)
+  }, [columnWidths])
+
+  const startColumnResize = (key: string, event: React.PointerEvent<HTMLSpanElement>) => {
+    event.preventDefault()
+    event.stopPropagation()
+    const headerRow = headerRowRef.current
+    if (!headerRow) return
+
+    const baseline = columnWidths ?? Object.fromEntries(
+      tableColumns.map((column, index) => [column.key, headerRow.cells[index]?.offsetWidth ?? 120]),
+    )
+    const startX = event.clientX
+    const startWidth = baseline[key]
+
+    const onMove = (moveEvent: PointerEvent) => {
+      const width = Math.min(900, Math.max(56, Math.round(startWidth + moveEvent.clientX - startX)))
+      setColumnWidths({ ...baseline, [key]: width })
+    }
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
+
+  const resetColumnWidths = () => setColumnWidths(null)
 
   const beginEdit = (task: Task) => {
     setEditingId(task.id)
@@ -362,18 +419,29 @@ function TaskTable({
   return (
     <>
       <div className="table-scroll">
-        <table className="task-table">
+        <table className="task-table" style={columnWidths ? { tableLayout: 'fixed' } : undefined}>
+          {columnWidths && (
+            <colgroup>
+              {tableColumns.map((column) => (
+                <col key={column.key} style={{ width: `${columnWidths[column.key]}px` }} />
+              ))}
+            </colgroup>
+          )}
           <thead>
-            <tr>
-              <th className="column-id">Номер</th>
-              <th>Задача</th>
-              <th>Розділ</th>
-              <th>URL сайту</th>
-              <th>Нотатки</th>
-              <th>Пріоритет</th>
-              <th>Статус</th>
-              <th>Докази</th>
-              <th className="column-action"><span className="sr-only">Відкрити</span></th>
+            <tr ref={headerRowRef}>
+              {tableColumns.map((column, index) => (
+                <th key={column.key} className={column.className}>
+                  {column.srOnly ? <span className="sr-only">{column.label}</span> : column.label}
+                  {index < tableColumns.length - 1 && (
+                    <span
+                      className="column-resizer"
+                      title="Потягніть, щоб змінити ширину. Подвійний клік — скинути."
+                      onPointerDown={(event) => startColumnResize(column.key, event)}
+                      onDoubleClick={resetColumnWidths}
+                    />
+                  )}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
@@ -394,7 +462,9 @@ function TaskTable({
                     <span className="task-id">{task.id}</span>
                     {task.agentRun && (
                       <span className={`agent-table-state agent-run-${task.agentRun.status}`} title={agentRunMeta[task.agentRun.status].label}>
-                        <Bot size={11} /> {agentRunMeta[task.agentRun.status].shortLabel}
+                        {task.agentRun.status === 'running'
+                          ? <LoaderCircle className="spin" size={11} />
+                          : <Bot size={11} />} {agentRunMeta[task.agentRun.status].shortLabel}
                       </span>
                     )}
                   </td>
@@ -1012,6 +1082,9 @@ function App() {
   const [lightboxAttachment, setLightboxAttachment] = useState<TaskAttachment | null>(null)
   const [updatingId, setUpdatingId] = useState<string | null>(null)
   const [toast, setToast] = useState('')
+  const [notificationsReady, setNotificationsReady] = useState(
+    () => 'Notification' in window && Notification.permission === 'granted',
+  )
 
   const loadTasks = async () => {
     setLoading(true)
@@ -1031,11 +1104,42 @@ function App() {
 
   const hasActiveAgentRuns = tasks.some((task) => task.agentRun?.status === 'queued' || task.agentRun?.status === 'running')
 
+  const knownStatusesRef = useRef<Map<string, TaskStatus> | null>(null)
+
   useEffect(() => {
-    if (!hasActiveAgentRuns) return
+    knownStatusesRef.current = new Map(tasks.map((task) => [task.id, task.status]))
+  }, [tasks])
+
+  const announceRemoteChanges = (nextTasks: Task[]) => {
+    const known = knownStatusesRef.current
+    if (!known) return
+
+    const messages: string[] = []
+    for (const task of nextTasks) {
+      const previousStatus = known.get(task.id)
+      if (previousStatus === undefined) {
+        messages.push(`${task.id}: нова задача — ${task.title}`)
+      } else if (previousStatus !== task.status) {
+        messages.push(`${task.id}: ${statusMeta[task.status].label}`)
+      }
+    }
+    if (messages.length === 0) return
+
+    const summary = messages.length === 1 ? messages[0] : `${messages[0]} (+${messages.length - 1})`
+    setToast(summary)
+    if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
+      new Notification('GBA QA Desk', { body: messages.join('\n') })
+    }
+  }
+
+  useEffect(() => {
     const interval = window.setInterval(() => {
-      void getTasks().then(setTasks).catch(() => undefined)
-    }, 2500)
+      if (document.hidden && !hasActiveAgentRuns) return
+      void getTasks().then((nextTasks) => {
+        announceRemoteChanges(nextTasks)
+        setTasks(nextTasks)
+      }).catch(() => undefined)
+    }, hasActiveAgentRuns ? 2500 : 10000)
     return () => window.clearInterval(interval)
   }, [hasActiveAgentRuns])
 
@@ -1109,6 +1213,18 @@ function App() {
           <strong>GBA QA Desk</strong>
         </a>
         <div className="topbar-meta">
+          {'Notification' in window && (
+            <button
+              type="button"
+              className={`notify-toggle${notificationsReady ? ' notify-toggle-on' : ''}`}
+              title={notificationsReady ? 'Браузерні сповіщення увімкнено' : 'Увімкнути браузерні сповіщення про зміни статусів'}
+              onClick={() => {
+                void Notification.requestPermission().then((permission) => setNotificationsReady(permission === 'granted'))
+              }}
+            >
+              {notificationsReady ? <Bell size={15} /> : <BellOff size={15} />}
+            </button>
+          )}
           <span className="live-indicator"><i /> Система онлайн</span>
           <span className="topbar-date"><CalendarDays size={15} /> {formatDate(new Date().toISOString())}</span>
         </div>

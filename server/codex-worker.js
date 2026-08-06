@@ -271,6 +271,7 @@ export class CodexWorker {
       'exec',
       '--json',
       '--color', 'never',
+      '--skip-git-repo-check',
       '--sandbox', 'workspace-write',
       '-c', 'approval_policy="never"',
       '-c', `sandbox_workspace_write.network_access=${this.networkAccess}`,

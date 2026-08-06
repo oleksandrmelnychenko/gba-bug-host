@@ -236,6 +236,63 @@ main {
   box-shadow: var(--shadow-xs);
 }
 
+.task-table th {
+  position: relative;
+}
+
+.column-resizer {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  width: 9px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 2;
+  touch-action: none;
+}
+
+.column-resizer::after {
+  content: '';
+  position: absolute;
+  top: 22%;
+  bottom: 22%;
+  right: 3px;
+  width: 2px;
+  border-radius: 2px;
+  background: transparent;
+  transition: background 0.15s ease;
+}
+
+.column-resizer:hover::after,
+.column-resizer:active::after {
+  background: var(--brand-300);
+}
+
+.notify-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--gray-300);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--gray-500);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.notify-toggle:hover {
+  color: var(--gray-700);
+  border-color: var(--gray-400);
+}
+
+.notify-toggle-on {
+  color: var(--brand-600);
+  border-color: var(--brand-300);
+  background: var(--brand-50);
+}
+
 .project-tabs {
   display: flex;
   gap: 4px;
@@ -1226,7 +1283,15 @@ textarea.table-edit-input {
 }
 
 .agent-run-queued { --agent-color: #175cd3; }
-.agent-run-running { --agent-color: #5925dc; }
+.agent-run-running {
+  --agent-color: #5925dc;
+  animation: agent-running-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes agent-running-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
 .agent-run-completed { --agent-color: #067647; }
 .agent-run-needs_review { --agent-color: #b54708; }
 .agent-run-blocked,
