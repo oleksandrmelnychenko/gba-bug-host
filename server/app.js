@@ -278,6 +278,50 @@ export async function createApp(options = {}) {
     }
   })
 
+  app.post('/api/tasks/:id/agent-runs/stop', async (request, response, next) => {
+    try {
+      const revert = request.body?.revert === true
+      const result = store.requestStop(request.params.id, { revert })
+      if (!result) {
+        response.status(404).json({ message: 'Немає активного або чергового запуску для цієї задачі.' })
+        return
+      }
+
+      if (result.stoppedImmediately && revert) {
+        // Ран ще не стартував — worktree міг лишитись від попередньої спроби,
+        // прибирання робить воркер, тож лишаємо позначку для нього.
+        store.updateAgentRun(result.run.id, { error: 'Знято з черги оператором (із відкатом).' })
+      }
+      if (result.stoppedImmediately) {
+        await store.patch(request.params.id, { status: 'new' })
+      }
+
+      response.json(await store.find(request.params.id))
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  app.post('/api/tasks/:id/agent-runs/resume', async (request, response, next) => {
+    try {
+      const task = await store.find(request.params.id)
+      if (!task) {
+        response.status(404).json({ message: 'Задачу не знайдено.' })
+        return
+      }
+
+      const result = await store.enqueueAgentRun(randomUUID(), request.params.id, 'manual')
+      if (result.status === 'task_not_found') {
+        response.status(404).json({ message: 'Задачу не знайдено.' })
+        return
+      }
+
+      response.status(result.created ? 202 : 200).json(await store.find(request.params.id))
+    } catch (error) {
+      next(error)
+    }
+  })
+
   app.post('/api/tasks/:id/attachments', upload.array('attachments', 6), async (request, response, next) => {
     try {
       if (!request.files.length) {

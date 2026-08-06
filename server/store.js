@@ -95,6 +95,7 @@ function agentRunFromRow(row) {
     reviewComment: row.review_comment || inputSnapshot?.reviewComment || '',
     inputSnapshot,
     queuePriority: row.queue_priority ?? 0,
+    control: row.control ?? '',
     branch: row.branch,
     worktreePath: row.worktree_path,
     summary: row.summary,
@@ -267,6 +268,10 @@ export class TaskStore {
       }
       if (!agentRunColumns.has('queue_priority')) {
         this.database.exec('ALTER TABLE agent_runs ADD COLUMN queue_priority INTEGER NOT NULL DEFAULT 0')
+      }
+      if (!agentRunColumns.has('control')) {
+        // stop | stop_revert — керуюча команда оператора для активного рану.
+        this.database.exec("ALTER TABLE agent_runs ADD COLUMN control TEXT NOT NULL DEFAULT ''")
       }
     })
 
@@ -525,6 +530,44 @@ export class TaskStore {
         .run(now, now, row.id)
       return result.changes === 1 ? this.findAgentRun(row.id) : null
     })
+  }
+
+  requestStop(taskId, { revert = false } = {}) {
+    return this.transaction(() => {
+      const row = this.database
+        .prepare("SELECT * FROM agent_runs WHERE task_id = ? AND status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1")
+        .get(taskId)
+      if (!row) return null
+
+      const now = new Date().toISOString()
+      const control = revert ? 'stop_revert' : 'stop'
+
+      if (row.status === 'queued') {
+        // Черговий ран ще не стартував: гасимо одразу, воркеру нічого вбивати.
+        this.database
+          .prepare("UPDATE agent_runs SET status = 'blocked', control = ?, error = ?, finished_at = ?, updated_at = ? WHERE id = ?")
+          .run(control, revert ? 'Знято з черги оператором (із відкатом).' : 'Знято з черги оператором.', now, now, row.id)
+        return { run: this.findAgentRun(row.id), stoppedImmediately: true }
+      }
+
+      this.database
+        .prepare('UPDATE agent_runs SET control = ?, updated_at = ? WHERE id = ?')
+        .run(control, now, row.id)
+      return { run: this.findAgentRun(row.id), stoppedImmediately: false }
+    })
+  }
+
+  readControl(runId) {
+    const row = this.database.prepare('SELECT control FROM agent_runs WHERE id = ?').get(runId)
+    return row?.control ?? ''
+  }
+
+  markStopped(runId, { reverted = false } = {}) {
+    const now = new Date().toISOString()
+    this.database
+      .prepare("UPDATE agent_runs SET status = 'blocked', control = '', error = ?, finished_at = ?, updated_at = ? WHERE id = ?")
+      .run(reverted ? 'Зупинено оператором, зміни відкочено.' : 'Зупинено оператором.', now, now, runId)
+    return this.findAgentRun(runId)
   }
 
   reorderQueuedRun(taskId, direction) {

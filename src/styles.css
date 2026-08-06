@@ -2725,3 +2725,50 @@ main {
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+.pipeline-card-controls {
+  display: flex;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.pipeline-action-stop,
+.pipeline-queue-actions .pipeline-action-stop {
+  color: #b42318;
+  border-color: #fecdca;
+}
+
+.pipeline-action-stop:hover:not(:disabled) {
+  color: #912018;
+  border-color: #fda29b;
+  background: #fffbfa;
+}
+
+.pipeline-action-revert {
+  color: #b54708;
+  border-color: #fedf89;
+}
+
+.pipeline-action-revert:hover:not(:disabled) {
+  color: #93370d;
+  border-color: #fec84b;
+  background: #fffcf5;
+}
+
+.pipeline-action-resume {
+  color: #067647;
+  border-color: #abefc6;
+}
+
+.pipeline-action-resume:hover:not(:disabled) {
+  color: #085d3a;
+  border-color: #75e0a7;
+  background: #f6fef9;
+}
+
+.pipeline-queue-actions .button-small {
+  min-height: 26px;
+  padding: 3px 10px;
+  font-size: 12px;
+  width: auto;
+}

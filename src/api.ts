@@ -70,3 +70,15 @@ export function reorderQueuedTask(id: string, direction: 'up' | 'down' | 'top') 
     body: JSON.stringify({ direction }),
   })
 }
+
+export function stopAgentRun(id: string, revert = false) {
+  return request<Task>(`/api/tasks/${id}/agent-runs/stop`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ revert }),
+  })
+}
+
+export function resumeAgentRun(id: string) {
+  return request<Task>(`/api/tasks/${id}/agent-runs/resume`, { method: 'POST' })
+}

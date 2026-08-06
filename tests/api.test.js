@@ -341,3 +341,49 @@ test('API піднімає задачу в черзі Codex', async () => {
       .expect(400)
   })
 })
+
+test('API зупиняє чергову задачу і повертає її назад', async () => {
+  await withTestApp(async ({ app, store }) => {
+    const created = await request(app).post('/api/tasks').field('title', 'Задача для зупинки').expect(201)
+    assert.equal(created.body.agentRun.status, 'queued')
+
+    const stopped = await request(app)
+      .post(`/api/tasks/${created.body.id}/agent-runs/stop`)
+      .send({ revert: false })
+      .expect(200)
+    assert.equal(stopped.body.agentRun.status, 'blocked')
+    assert.match(stopped.body.agentRun.error, /Знято з черги/)
+    assert.equal(store.claimNextAgentRun(), null)
+
+    const resumed = await request(app)
+      .post(`/api/tasks/${created.body.id}/agent-runs/resume`)
+      .expect(202)
+    assert.equal(resumed.body.agentRun.status, 'queued')
+    assert.equal(store.claimNextAgentRun()?.taskId, created.body.id)
+
+    await request(app)
+      .post('/api/tasks/BUG-9999/agent-runs/stop')
+      .send({ revert: true })
+      .expect(404)
+  })
+})
+
+test('стоп із відкатом позначає керуючу команду для активного рану', async () => {
+  await withTestApp(async ({ app, store }) => {
+    const created = await request(app).post('/api/tasks').field('title', 'Активний ран').expect(201)
+    const claimed = store.claimNextAgentRun()
+    assert.equal(claimed.taskId, created.body.id)
+
+    await request(app)
+      .post(`/api/tasks/${created.body.id}/agent-runs/stop`)
+      .send({ revert: true })
+      .expect(200)
+
+    assert.equal(store.readControl(claimed.id), 'stop_revert')
+    assert.equal(store.findAgentRun(claimed.id).status, 'running')
+
+    const finished = store.markStopped(claimed.id, { reverted: true })
+    assert.equal(finished.status, 'blocked')
+    assert.match(finished.error, /відкочено/)
+  })
+})

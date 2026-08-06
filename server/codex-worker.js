@@ -57,13 +57,14 @@ function repositoryChecks(name) {
   return defaultRepoPlan[name]?.checks ?? []
 }
 
-function runProcess(command, args, { cwd, input = '', timeoutMs = 45 * 60 * 1000 } = {}) {
+function runProcess(command, args, { cwd, input = '', timeoutMs = 45 * 60 * 1000, onChild } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
       env: process.env,
       stdio: ['pipe', 'pipe', 'pipe'],
     })
+    onChild?.(child)
     let stdout = ''
     let stderr = ''
     let timedOut = false
@@ -288,6 +289,19 @@ export class CodexWorker {
     return items
   }
 
+  async revertTaskWork(taskId, worktrees) {
+    const slug = safeTaskSlug(taskId)
+    const branch = `codex/qa-${slug}`
+
+    for (const worktree of worktrees ?? []) {
+      // Знімаємо worktree і гілку: від спроби Codex не лишається нічого,
+      // основне робоче дерево репозиторію не чіпаємо.
+      await runProcess('git', ['-C', worktree.repositoryPath, 'worktree', 'remove', '--force', worktree.worktreePath])
+      await runProcess('git', ['-C', worktree.repositoryPath, 'branch', '-D', branch])
+    }
+    await runProcess('rm', ['-rf', path.join(this.worktreesDirectory, slug)])
+  }
+
   async processRun(run) {
     const currentTask = this.store.find(run.taskId)
     if (!currentTask) throw new Error(`Задачу ${run.taskId} не знайдено.`)
@@ -333,11 +347,35 @@ export class CodexWorker {
       ...imageArgs,
       '-',
     ]
+    let stopControl = ''
     const execution = await runProcess(this.codexBinary, args, {
       cwd: jobDirectory,
       input: buildPrompt(task, run, mediaPaths, worktrees),
       timeoutMs: this.timeoutMs,
+      onChild: (child) => {
+        // Оператор може зупинити ран із дески: опитуємо прапорець і глушимо
+        // процес Codex, не чекаючи на його завершення.
+        const poll = setInterval(() => {
+          const control = this.store.readControl(run.id)
+          if (!control) return
+          stopControl = control
+          clearInterval(poll)
+          child.kill('SIGTERM')
+          setTimeout(() => child.kill('SIGKILL'), 5_000).unref?.()
+        }, 2000)
+        poll.unref?.()
+        child.on('close', () => clearInterval(poll))
+      },
     })
+
+    if (stopControl) {
+      const reverted = stopControl === 'stop_revert'
+      if (reverted) await this.revertTaskWork(task.id, worktrees)
+      this.store.markStopped(run.id, { reverted })
+      this.store.patch(task.id, { status: 'new' })
+      console.log(`[Codex worker] ${task.id}: зупинено оператором${reverted ? ' з відкатом' : ''}`)
+      return
+    }
 
     if (execution.code !== 0) {
       const reason = execution.timedOut

@@ -34,6 +34,7 @@ export interface AgentRun {
   reviewComment: string
   inputSnapshot: AgentRunInputSnapshot | null
   queuePriority: number
+  control: string
   branch: string
   worktreePath: string
   summary: string

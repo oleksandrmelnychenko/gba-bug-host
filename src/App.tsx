@@ -19,6 +19,8 @@ import {
   Pencil,
   Play,
   Plus,
+  Square,
+  Undo2,
   RefreshCw,
   Search,
   Trash2,
@@ -43,6 +45,8 @@ import {
   getTaskAgentRuns,
   getTasks,
   reorderQueuedTask,
+  resumeAgentRun,
+  stopAgentRun,
   updateTask,
 } from './api'
 import {
@@ -1474,10 +1478,12 @@ function PipelineRunCard({
   task,
   onOpenTask,
   onOpenConclusion,
+  onStop,
 }: {
   task: Task
   onOpenTask: (taskId: string) => void
   onOpenConclusion: (task: Task) => void
+  onStop?: (taskId: string, revert: boolean) => void
 }) {
   const run = task.agentRun
   if (!run) return null
@@ -1508,6 +1514,25 @@ function PipelineRunCard({
         </div>
       )}
       <AgentConclusion run={run} onOpenConclusion={() => onOpenConclusion(task)} />
+      {onStop && run.status === 'running' && (
+        <div className="pipeline-card-controls" onClick={(event) => event.stopPropagation()}>
+          <button
+            type="button"
+            className="button button-small pipeline-action-stop"
+            onClick={() => onStop(task.id, false)}
+          ><Square size={13} /> Стоп</button>
+          <button
+            type="button"
+            className="button button-small pipeline-action-revert"
+            title="Зупинити і видалити worktree та гілку цієї спроби"
+            onClick={() => {
+              if (window.confirm(`Зупинити ${task.id} і повністю відкотити зміни Codex (worktree + гілка)?`)) {
+                onStop(task.id, true)
+              }
+            }}
+          ><Undo2 size={13} /> Стоп + відкат</button>
+        </div>
+      )}
     </button>
   )
 }
@@ -1518,12 +1543,16 @@ function PipelineView({
   onOpenTask,
   onOpenConclusion,
   onReorder,
+  onStop,
+  onResume,
 }: {
   tasks: Task[]
   reorderingId: string | null
   onOpenTask: (taskId: string) => void
   onOpenConclusion: (task: Task) => void
   onReorder: (taskId: string, direction: 'up' | 'down' | 'top') => void
+  onStop: (taskId: string, revert: boolean) => void
+  onResume: (taskId: string) => void
 }) {
   const running = tasks
     .filter((task) => task.agentRun?.status === 'running')
@@ -1540,6 +1569,10 @@ function PipelineView({
     return match && isSameDay(match[1].trim().replace(' ', 'T'))
   })
   const autoToday = tasks.filter((task) => isSentinelTask(task) && isSameDay(task.createdAt))
+  const stopped = tasks.filter((task) => {
+    const run = task.agentRun
+    return run?.status === 'blocked' && /Зупинено оператором|Знято з черги оператором/.test(run.error ?? '')
+  })
   const finished = tasks
     .filter((task) => {
       const run = task.agentRun
@@ -1572,7 +1605,15 @@ function PipelineView({
         <h3><LoaderCircle className={running.length ? 'spin' : ''} size={16} /> Зараз у роботі</h3>
         {running.length ? (
           <div className="pipeline-cards">
-            {running.map((task) => <PipelineRunCard key={task.id} task={task} onOpenTask={onOpenTask} onOpenConclusion={onOpenConclusion} />)}
+            {running.map((task) => (
+              <PipelineRunCard
+                key={task.id}
+                task={task}
+                onOpenTask={onOpenTask}
+                onOpenConclusion={onOpenConclusion}
+                onStop={onStop}
+              />
+            ))}
           </div>
         ) : <p className="pipeline-empty">Воркер вільний — черга порожня або обробка завершена.</p>}
       </section>
@@ -1614,6 +1655,13 @@ function PipelineView({
                     disabled={index === queued.length - 1 || reorderingId === task.id}
                     onClick={() => onReorder(task.id, 'down')}
                   ><ChevronDown size={15} /></button>
+                  <button
+                    type="button"
+                    className="pipeline-action-stop"
+                    title="Зняти з черги"
+                    aria-label={`Зняти ${task.id} з черги`}
+                    onClick={() => onStop(task.id, false)}
+                  ><Square size={13} /></button>
                 </span>
               </div>
             ))}
@@ -1626,6 +1674,30 @@ function PipelineView({
           <h3><RefreshCw size={16} /> Повторні цикли з промптами</h3>
           <div className="pipeline-cards pipeline-scroll">
             {reruns.map((task) => <PipelineRunCard key={`rerun-${task.id}`} task={task} onOpenTask={onOpenTask} onOpenConclusion={onOpenConclusion} />)}
+          </div>
+        </section>
+      )}
+
+      {stopped.length > 0 && (
+        <section className="pipeline-section">
+          <h3><Square size={15} /> Зупинені ({stopped.length})</h3>
+          <div className="pipeline-queue pipeline-scroll">
+            {stopped.map((task) => (
+              <div className="pipeline-queue-row" key={`stopped-${task.id}`}>
+                <button type="button" className="pipeline-queue-open" onClick={() => onOpenTask(task.id)}>
+                  <span className="task-id">{task.id}</span>
+                  <span className="pipeline-queue-title">{task.title}</span>
+                  <span className="pipeline-queue-project">{task.agentRun?.error || 'Зупинено'}</span>
+                </button>
+                <span className="pipeline-queue-actions">
+                  <button
+                    type="button"
+                    className="button button-small pipeline-action-resume"
+                    onClick={() => onResume(task.id)}
+                  ><Play size={13} /> Резум</button>
+                </span>
+              </div>
+            ))}
           </div>
         </section>
       )}
@@ -1676,6 +1748,7 @@ function App() {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('console')
   const [conclusionTask, setConclusionTask] = useState<Task | null>(null)
   const [reorderingId, setReorderingId] = useState<string | null>(null)
+  const [, setControllingId] = useState<string | null>(null)
   const [notificationsReady, setNotificationsReady] = useState(
     () => 'Notification' in window && Notification.permission === 'granted',
   )
@@ -1796,6 +1869,24 @@ function App() {
     }
   }
 
+  const controlRun = async (taskId: string, action: 'stop' | 'stop-revert' | 'resume') => {
+    setControllingId(taskId)
+    try {
+      const updated = action === 'resume'
+        ? await resumeAgentRun(taskId)
+        : await stopAgentRun(taskId, action === 'stop-revert')
+      setTasks((current) => current.map((task) => task.id === updated.id ? updated : task))
+      void getTasks().then(setTasks).catch(() => undefined)
+      setToast(action === 'resume'
+        ? `${taskId}: повернуто в чергу`
+        : `${taskId}: зупинка${action === 'stop-revert' ? ' з відкатом' : ''} надіслана`)
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : 'Не вдалося виконати дію')
+    } finally {
+      setControllingId(null)
+    }
+  }
+
   const replaceTask = (nextTask: Task) => {
     setTasks((current) => current.map((task) => task.id === nextTask.id ? nextTask : task))
   }
@@ -1905,6 +1996,8 @@ function App() {
                 onOpenTask={setSelectedId}
                 onOpenConclusion={setConclusionTask}
                 onReorder={(taskId, direction) => void reorderQueue(taskId, direction)}
+                onStop={(taskId, revert) => void controlRun(taskId, revert ? 'stop-revert' : 'stop')}
+                onResume={(taskId) => void controlRun(taskId, 'resume')}
               />
             )
           ) : (
