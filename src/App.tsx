@@ -107,11 +107,11 @@ const COLUMN_WIDTHS_STORAGE_KEY = 'gba-qa-desk-column-widths-v2'
 const tableColumns: Array<{ key: string; label: string; className?: string; srOnly?: boolean }> = [
   { key: 'title', label: 'Задача' },
   { key: 'created', label: 'Створено', className: 'column-created' },
+  { key: 'status', label: 'Статус' },
   { key: 'area', label: 'Розділ' },
   { key: 'url', label: 'URL сторінки' },
   { key: 'notes', label: 'Нотатки' },
   { key: 'priority', label: 'Пріоритет' },
-  { key: 'status', label: 'Статус' },
   { key: 'evidence', label: 'Докази' },
   { key: 'action', label: 'Відкрити', className: 'column-action', srOnly: true },
 ]
@@ -551,6 +551,14 @@ function TaskTable({
                   <td>
                     <time className="created-at" dateTime={task.createdAt}>{formatDateTime(task.createdAt)}</time>
                   </td>
+                  <td onClick={(event) => event.stopPropagation()}>
+                    <StatusSelect
+                      value={task.status}
+                      compact
+                      disabled={updatingId === task.id}
+                      onChange={(status) => onStatusChange(task, status)}
+                    />
+                  </td>
                   <td><span className="area-label">{task.area}</span></td>
                   <td>
                     {task.siteUrl ? (
@@ -569,14 +577,6 @@ function TaskTable({
                   </td>
                   <td><span className="notes-cell" title={task.notes}>{task.notes || '—'}</span></td>
                   <td><PriorityBadge priority={task.priority} /></td>
-                  <td onClick={(event) => event.stopPropagation()}>
-                    <StatusSelect
-                      value={task.status}
-                      compact
-                      disabled={updatingId === task.id}
-                      onChange={(status) => onStatusChange(task, status)}
-                    />
-                  </td>
                   <td><AttachmentStack task={task} onOpen={onOpenAttachment} /></td>
                   <td onClick={(event) => event.stopPropagation()}>
                     <div className="row-actions">

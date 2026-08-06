@@ -494,11 +494,11 @@ main {
 
 .task-table th:nth-child(1) { width: 36%; }
 .task-table th:nth-child(2) { width: 105px; }
-.task-table th:nth-child(3) { width: 110px; }
-.task-table th:nth-child(4) { width: 165px; }
-.task-table th:nth-child(5) { width: 170px; }
-.task-table th:nth-child(6) { width: 112px; }
-.task-table th:nth-child(7) { width: 175px; }
+.task-table th:nth-child(3) { width: 175px; }
+.task-table th:nth-child(4) { width: 110px; }
+.task-table th:nth-child(5) { width: 165px; }
+.task-table th:nth-child(6) { width: 170px; }
+.task-table th:nth-child(7) { width: 112px; }
 .task-table th:nth-child(8) { width: 82px; }
 .task-table th:nth-child(9) { width: 56px; }
 
