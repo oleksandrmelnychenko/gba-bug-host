@@ -77,12 +77,23 @@ const seedTasks = [
 
 function agentRunFromRow(row) {
   if (!row) return null
+  let inputSnapshot = null
+  try {
+    const parsed = JSON.parse(row.input_snapshot ?? 'null')
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Object.keys(parsed).length > 0) {
+      inputSnapshot = parsed
+    }
+  } catch {
+    inputSnapshot = null
+  }
   return {
     id: row.id,
     taskId: row.task_id,
     trigger: row.trigger,
     status: row.status,
     attempt: row.attempt,
+    reviewComment: row.review_comment || inputSnapshot?.reviewComment || '',
+    inputSnapshot,
     branch: row.branch,
     worktreePath: row.worktree_path,
     summary: row.summary,
@@ -92,6 +103,28 @@ function agentRunFromRow(row) {
     startedAt: row.started_at,
     finishedAt: row.finished_at,
     updatedAt: row.updated_at,
+  }
+}
+
+function agentRunInputFromTask(task) {
+  return {
+    title: task.title,
+    description: task.description ?? '',
+    siteUrl: task.siteUrl ?? '',
+    notes: task.notes ?? '',
+    reviewComment: task.reviewComment ?? '',
+    area: task.area,
+    project: task.project ?? 'console',
+    status: task.status,
+    priority: task.priority,
+    attachments: (task.attachments ?? []).map((attachment) => ({
+      id: attachment.id,
+      name: attachment.name,
+      url: attachment.url,
+      type: attachment.type,
+      size: attachment.size,
+      kind: attachment.kind,
+    })),
   }
 }
 
@@ -140,6 +173,7 @@ export class TaskStore {
     await mkdir(this.dataDirectory, { recursive: true })
     this.database = new DatabaseSync(this.databasePath)
     this.database.exec(`
+      PRAGMA busy_timeout = 5000;
       PRAGMA journal_mode = WAL;
       PRAGMA foreign_keys = ON;
       CREATE TABLE IF NOT EXISTS tasks (
@@ -171,6 +205,8 @@ export class TaskStore {
         trigger TEXT NOT NULL CHECK (trigger IN ('manual', 'review_again')),
         status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'needs_review', 'blocked', 'failed')),
         attempt INTEGER NOT NULL,
+        review_comment TEXT NOT NULL DEFAULT '',
+        input_snapshot TEXT NOT NULL DEFAULT '{}',
         branch TEXT NOT NULL DEFAULT '',
         worktree_path TEXT NOT NULL DEFAULT '',
         summary TEXT NOT NULL DEFAULT '',
@@ -202,21 +238,33 @@ export class TaskStore {
       CREATE INDEX IF NOT EXISTS idx_build_tasks_processed_at ON build_tasks(build_number, processed_at DESC);
     `)
 
-    const taskColumns = new Set(
-      this.database.prepare('PRAGMA table_info(tasks)').all().map((column) => column.name),
-    )
-    if (!taskColumns.has('site_url')) {
-      this.database.exec("ALTER TABLE tasks ADD COLUMN site_url TEXT NOT NULL DEFAULT ''")
-    }
-    if (!taskColumns.has('notes')) {
-      this.database.exec("ALTER TABLE tasks ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
-    }
-    if (!taskColumns.has('review_comment')) {
-      this.database.exec("ALTER TABLE tasks ADD COLUMN review_comment TEXT NOT NULL DEFAULT ''")
-    }
-    if (!taskColumns.has('project')) {
-      this.database.exec("ALTER TABLE tasks ADD COLUMN project TEXT NOT NULL DEFAULT 'console'")
-    }
+    this.transaction(() => {
+      const taskColumns = new Set(
+        this.database.prepare('PRAGMA table_info(tasks)').all().map((column) => column.name),
+      )
+      if (!taskColumns.has('site_url')) {
+        this.database.exec("ALTER TABLE tasks ADD COLUMN site_url TEXT NOT NULL DEFAULT ''")
+      }
+      if (!taskColumns.has('notes')) {
+        this.database.exec("ALTER TABLE tasks ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
+      }
+      if (!taskColumns.has('review_comment')) {
+        this.database.exec("ALTER TABLE tasks ADD COLUMN review_comment TEXT NOT NULL DEFAULT ''")
+      }
+      if (!taskColumns.has('project')) {
+        this.database.exec("ALTER TABLE tasks ADD COLUMN project TEXT NOT NULL DEFAULT 'console'")
+      }
+
+      const agentRunColumns = new Set(
+        this.database.prepare('PRAGMA table_info(agent_runs)').all().map((column) => column.name),
+      )
+      if (!agentRunColumns.has('review_comment')) {
+        this.database.exec("ALTER TABLE agent_runs ADD COLUMN review_comment TEXT NOT NULL DEFAULT ''")
+      }
+      if (!agentRunColumns.has('input_snapshot')) {
+        this.database.exec("ALTER TABLE agent_runs ADD COLUMN input_snapshot TEXT NOT NULL DEFAULT '{}'")
+      }
+    })
 
     const { total } = this.database.prepare('SELECT COUNT(*) AS total FROM tasks').get()
     if (total === 0) {
@@ -417,7 +465,8 @@ export class TaskStore {
   }
 
   enqueueAgentRun(id, taskId, trigger = 'manual') {
-    if (!this.find(taskId)) return { status: 'task_not_found', run: null, created: false }
+    const task = this.find(taskId)
+    if (!task) return { status: 'task_not_found', run: null, created: false }
 
     const activeRow = this.database
       .prepare("SELECT * FROM agent_runs WHERE task_id = ? AND status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1")
@@ -428,12 +477,22 @@ export class TaskStore {
       .prepare('SELECT COALESCE(MAX(attempt), 0) + 1 AS nextAttempt FROM agent_runs WHERE task_id = ?')
       .get(taskId)
     const now = new Date().toISOString()
+    const inputSnapshot = agentRunInputFromTask(task)
     this.database.prepare(`
       INSERT INTO agent_runs (
-        id, task_id, trigger, status, attempt, branch, worktree_path,
+        id, task_id, trigger, status, attempt, review_comment, input_snapshot, branch, worktree_path,
         summary, details, error, created_at, started_at, finished_at, updated_at
-      ) VALUES (?, ?, ?, 'queued', ?, '', '', '', '', '', ?, NULL, NULL, ?)
-    `).run(id, taskId, trigger, nextAttempt, now, now)
+      ) VALUES (?, ?, ?, 'queued', ?, ?, ?, '', '', '', '', '', ?, NULL, NULL, ?)
+    `).run(
+      id,
+      taskId,
+      trigger,
+      nextAttempt,
+      task.reviewComment ?? '',
+      JSON.stringify(inputSnapshot),
+      now,
+      now,
+    )
 
     return { status: 'queued', run: this.findAgentRun(id), created: true }
   }

@@ -79,7 +79,7 @@ test('API створює задачу зі скріншотом і оновлю�
   })
 })
 
-test('SQLite автоматично додає URL, нотатки та AI-коментар до існуючої схеми', async () => {
+test('SQLite автоматично додає поля задачі та snapshots AI-запусків до існуючої схеми', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'gba-bug-host-migration-'))
   const dataDirectory = path.join(root, 'data')
   const databasePath = path.join(dataDirectory, 'gba-qa.sqlite')
@@ -107,9 +107,29 @@ test('SQLite автоматично додає URL, нотатки та AI-ко�
       size INTEGER NOT NULL,
       kind TEXT NOT NULL
     );
+    CREATE TABLE agent_runs (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      trigger TEXT NOT NULL,
+      status TEXT NOT NULL,
+      attempt INTEGER NOT NULL,
+      branch TEXT NOT NULL DEFAULT '',
+      worktree_path TEXT NOT NULL DEFAULT '',
+      summary TEXT NOT NULL DEFAULT '',
+      details TEXT NOT NULL DEFAULT '',
+      error TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      started_at TEXT,
+      finished_at TEXT,
+      updated_at TEXT NOT NULL
+    );
     INSERT INTO tasks VALUES (
       'BUG-1001', 'Стара задача', '', 'Продаж', 'new', 'medium',
       'Не призначено', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+    );
+    INSERT INTO agent_runs VALUES (
+      'RUN-LEGACY', 'BUG-1001', 'manual', 'completed', 1, '', '', 'Готово', '', '',
+      '2026-01-01T01:00:00.000Z', '2026-01-01T01:00:00.000Z', '2026-01-01T01:05:00.000Z', '2026-01-01T01:05:00.000Z'
     );
   `)
   legacyDatabase.close()
@@ -121,6 +141,8 @@ test('SQLite автоматично додає URL, нотатки та AI-ко�
     assert.equal(task.siteUrl, '')
     assert.equal(task.notes, '')
     assert.equal(task.reviewComment, '')
+    assert.equal(task.agentRun.reviewComment, '')
+    assert.equal(task.agentRun.inputSnapshot, null)
 
     const updated = store.patch('BUG-1001', {
       siteUrl: 'https://example.com/problem',
@@ -165,6 +187,8 @@ test('SQLite зберігає задачу та відео після повто
 
       assert.equal(restoredTask.title, 'Відео помилки зберігається')
       assert.equal(restoredTask.attachments[0].kind, 'video')
+      assert.equal(restoredTask.agentRun.inputSnapshot.title, 'Відео помилки зберігається')
+      assert.equal(restoredTask.agentRun.inputSnapshot.attachments[0].name, 'bug.mp4')
       assert.equal(existsSync(path.join(dataDirectory, 'gba-qa.sqlite')), true)
     } finally {
       secondStore.close()
@@ -184,6 +208,8 @@ test('API ставить Codex job у чергу та повторно реаг�
     assert.equal(firstRun.body.agentRun.status, 'queued')
     assert.equal(firstRun.body.agentRun.trigger, 'manual')
     assert.equal(firstRun.body.agentRun.attempt, 1)
+    assert.equal(firstRun.body.agentRun.reviewComment, '')
+    assert.equal(firstRun.body.agentRun.inputSnapshot.title, 'Пошук падає після очищення поля')
 
     const duplicate = await request(app)
       .post('/api/tasks/BUG-1051/agent-runs')
@@ -216,11 +242,21 @@ test('API ставить Codex job у чергу та повторно реаг�
     assert.equal(reviewAgain.body.agentRun.status, 'queued')
     assert.equal(reviewAgain.body.agentRun.trigger, 'review_again')
     assert.equal(reviewAgain.body.agentRun.attempt, 2)
+    assert.equal(reviewAgain.body.agentRun.reviewComment, 'Поле очищується, але білий екран усе ще з’являється після другого пошуку.')
+    assert.equal(reviewAgain.body.agentRun.inputSnapshot.reviewComment, reviewAgain.body.agentRun.reviewComment)
 
     const history = await request(app)
       .get('/api/tasks/BUG-1051/agent-runs')
       .expect(200)
     assert.equal(history.body.length, 2)
+    assert.equal(history.body[0].attempt, 2)
+    assert.equal(history.body[0].inputSnapshot.status, 'review_again')
+
+    store.patch('BUG-1051', { reviewComment: 'Новіший коментар не має змінити старий запуск.' })
+    const preservedHistory = await request(app)
+      .get('/api/tasks/BUG-1051/agent-runs')
+      .expect(200)
+    assert.equal(preservedHistory.body[0].reviewComment, 'Поле очищується, але білий екран усе ще з’являється після другого пошуку.')
   })
 })
 

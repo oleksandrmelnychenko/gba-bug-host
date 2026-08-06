@@ -9,6 +9,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronUp,
+  History,
   Image as ImageIcon,
   Layers3,
   Link2,
@@ -38,6 +39,7 @@ import {
   deleteTask,
   deleteTaskAttachment,
   getCurrentBuild,
+  getTaskAgentRuns,
   getTasks,
   updateTask,
 } from './api'
@@ -46,6 +48,7 @@ import {
   projectMeta,
   statusMeta,
   type AgentRunStatus,
+  type AgentRun,
   type BuildInfo,
   type Task,
   type TaskAttachment,
@@ -997,6 +1000,8 @@ function EditTaskDialog({
             </div>
           </div>
 
+          <AgentRunHistory task={task} />
+
           <div className="evidence-section">
             <div className="section-heading">
               <div>
@@ -1052,6 +1057,96 @@ function EditTaskDialog({
         </form>
       </section>
     </div>
+  )
+}
+
+function AgentRunHistory({ task }: { task: Task }) {
+  const [runs, setRuns] = useState<AgentRun[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [refreshKey, setRefreshKey] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError('')
+    void getTaskAgentRuns(task.id)
+      .then((nextRuns) => {
+        if (!cancelled) setRuns(nextRuns)
+      })
+      .catch((caughtError) => {
+        if (!cancelled) setError(caughtError instanceof Error ? caughtError.message : 'Не вдалося завантажити історію.')
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [task.id, task.agentRun?.updatedAt, refreshKey])
+
+  return (
+    <section className="agent-history-section" aria-labelledby="agent-history-title">
+      <div className="agent-history-heading">
+        <div>
+          <span className="eyebrow">AI</span>
+          <h3 id="agent-history-title">Історія запусків <span>{runs.length}</span></h3>
+        </div>
+        <button
+          type="button"
+          className="icon-button agent-history-refresh"
+          onClick={() => setRefreshKey((value) => value + 1)}
+          disabled={loading}
+          aria-label="Оновити історію AI-запусків"
+        >
+          {loading ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}
+        </button>
+      </div>
+
+      {error ? (
+        <div className="agent-history-state is-error">{error}</div>
+      ) : loading && runs.length === 0 ? (
+        <div className="agent-history-state"><LoaderCircle className="spin" size={16} /> Завантажую запуски…</div>
+      ) : runs.length === 0 ? (
+        <div className="agent-history-state"><History size={17} /> Запусків ще немає.</div>
+      ) : (
+        <div className="agent-history-list">
+          {runs.map((run) => {
+            const comment = run.reviewComment || run.inputSnapshot?.reviewComment || ''
+            const result = run.error || run.summary
+            const snapshotAttachments = Array.isArray(run.inputSnapshot?.attachments)
+              ? run.inputSnapshot.attachments.length
+              : 0
+            const snapshotProject = run.inputSnapshot
+              ? projectMeta[run.inputSnapshot.project]?.label ?? run.inputSnapshot.project
+              : ''
+            return (
+              <article className="agent-history-item" key={run.id}>
+                <div className="agent-history-topline">
+                  <div className="agent-history-attempt">
+                    <strong>Спроба #{run.attempt}</strong>
+                    <span>{run.trigger === 'review_again' ? 'Повторний перегляд' : 'Перший запуск'}</span>
+                  </div>
+                  <span className={`agent-history-status agent-run-${run.status}`}>
+                    <i aria-hidden="true" /> {agentRunMeta[run.status].label}
+                  </span>
+                  <time dateTime={run.createdAt}>{formatDateTime(run.createdAt)}</time>
+                </div>
+                <p className={`agent-history-comment${comment ? '' : ' is-empty'}`}>
+                  {comment || 'Первинний запуск без додаткового QA-коментаря.'}
+                </p>
+                {result && <p className={`agent-history-result${run.error ? ' is-error' : ''}`}>{result}</p>}
+                <div className="agent-history-snapshot">
+                  {run.inputSnapshot
+                    ? `Snapshot: ${snapshotAttachments} вкладень · ${snapshotProject}`
+                    : 'Legacy-запуск без snapshot даних'}
+                </div>
+              </article>
+            )
+          })}
+        </div>
+      )}
+    </section>
   )
 }
 

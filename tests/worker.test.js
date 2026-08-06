@@ -54,6 +54,9 @@ writeFileSync(outputPath, JSON.stringify({
     store.patch('BUG-1051', { reviewComment: 'Після першого виправлення пошук усе ще падає на порожньому рядку.' })
     const queued = store.enqueueAgentRun('RUN-TEST-1', 'BUG-1051', 'manual')
     assert.equal(queued.created, true)
+    assert.equal(queued.run.reviewComment, 'Після першого виправлення пошук усе ще падає на порожньому рядку.')
+    assert.equal(queued.run.inputSnapshot.title, 'Пошук падає після очищення поля')
+    store.patch('BUG-1051', { reviewComment: 'Це новіший коментар, який не належить RUN-TEST-1.' })
     const run = store.claimNextAgentRun()
 
     const worker = new CodexWorker({
@@ -75,10 +78,9 @@ writeFileSync(outputPath, JSON.stringify({
     assert.equal(store.find('BUG-1051').status, 'ready_for_retest')
     assert.equal(store.currentBuild('worker-test-build').bugs[0].source, 'codex')
     assert.equal(await readFile(path.join(worktreesDirectory, 'bug-1051', 'target', 'app.txt'), 'utf8'), 'after\n')
-    assert.match(
-      await readFile(path.join(worktreesDirectory, 'bug-1051', 'prompt.txt'), 'utf8'),
-      /Після першого виправлення пошук усе ще падає на порожньому рядку/,
-    )
+    const prompt = await readFile(path.join(worktreesDirectory, 'bug-1051', 'prompt.txt'), 'utf8')
+    assert.match(prompt, /Після першого виправлення пошук усе ще падає на порожньому рядку/)
+    assert.doesNotMatch(prompt, /Це новіший коментар, який не належить RUN-TEST-1/)
     assert.equal(await readFile(path.join(targetRepository, 'app.txt'), 'utf8'), 'before\n')
     assert.equal(git(targetRepository, 'status', '--short'), '')
   } finally {

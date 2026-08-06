@@ -3,12 +3,36 @@ export type TaskPriority = 'low' | 'medium' | 'high' | 'critical'
 export type TaskProject = 'console' | 'ecommerce'
 export type AgentRunStatus = 'queued' | 'running' | 'completed' | 'needs_review' | 'blocked' | 'failed'
 
+export interface TaskAttachment {
+  id: string
+  name: string
+  url: string
+  type: string
+  size: number
+  kind: 'image' | 'video'
+}
+
+export interface AgentRunInputSnapshot {
+  title: string
+  description: string
+  siteUrl: string
+  notes: string
+  reviewComment: string
+  area: string
+  project: TaskProject
+  status: TaskStatus
+  priority: TaskPriority
+  attachments: TaskAttachment[]
+}
+
 export interface AgentRun {
   id: string
   taskId: string
   trigger: 'manual' | 'review_again'
   status: AgentRunStatus
   attempt: number
+  reviewComment: string
+  inputSnapshot: AgentRunInputSnapshot | null
   branch: string
   worktreePath: string
   summary: string
@@ -35,15 +59,6 @@ export interface BuildInfo {
   number: string
   createdAt: string
   bugs: BuildBug[]
-}
-
-export interface TaskAttachment {
-  id: string
-  name: string
-  url: string
-  type: string
-  size: number
-  kind: 'image' | 'video'
 }
 
 export interface Task {

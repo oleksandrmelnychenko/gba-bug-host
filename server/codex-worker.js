@@ -121,7 +121,7 @@ URL: ${task.siteUrl || 'Не вказано'}
 ${task.notes || 'Немає'}
 
 Коментар QA до повторної спроби:
-${task.reviewComment || 'Немає — це первинний запуск задачі.'}
+${run.reviewComment || task.reviewComment || 'Немає — це первинний запуск задачі.'}
 
 Вкладення:
 ${media}
@@ -251,10 +251,20 @@ export class CodexWorker {
   }
 
   async processRun(run) {
-    const task = this.store.find(run.taskId)
-    if (!task) throw new Error(`Задачу ${run.taskId} не знайдено.`)
+    const currentTask = this.store.find(run.taskId)
+    if (!currentTask) throw new Error(`Задачу ${run.taskId} не знайдено.`)
+    const task = run.inputSnapshot
+      ? {
+          ...currentTask,
+          ...run.inputSnapshot,
+          id: currentTask.id,
+          attachments: Array.isArray(run.inputSnapshot.attachments)
+            ? run.inputSnapshot.attachments
+            : currentTask.attachments,
+        }
+      : currentTask
 
-    this.store.patch(task.id, { status: 'in_progress' })
+    this.store.patch(currentTask.id, { status: 'in_progress' })
     const stack = this.resolveProjectStack(task.project)
     const { branch, jobDirectory, worktrees } = await this.ensureWorktrees(task.id, stack)
     this.store.updateAgentRun(run.id, { branch, worktreePath: jobDirectory })
@@ -315,9 +325,9 @@ export class CodexWorker {
     })
 
     if (result.outcome === 'fixed') {
-      this.store.patch(task.id, { status: 'ready_for_retest' })
-      this.store.markTaskProcessed(this.buildNumber, task.id, 'codex')
+      this.store.patch(currentTask.id, { status: 'ready_for_retest' })
+      this.store.markTaskProcessed(this.buildNumber, currentTask.id, 'codex')
     }
-    if (result.outcome === 'blocked') this.store.patch(task.id, { status: 'blocked' })
+    if (result.outcome === 'blocked') this.store.patch(currentTask.id, { status: 'blocked' })
   }
 }

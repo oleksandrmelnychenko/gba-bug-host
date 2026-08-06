@@ -90,9 +90,12 @@ CODEX_TARGET_REPO=/srv/gba-console CODEX_WORKTREES_DIR=/srv/gba-worktrees npm ru
 ## Дані
 
 - SQLite: `data/gba-qa.sqlite`;
+- історія кожної AI-спроби з QA-коментарем та незмінним snapshot задачі зберігається в таблиці `agent_runs`;
 - медіа: `public/uploads`;
 - результати Codex: `data/agent-runs`;
 - локальні worktrees за замовчуванням: `data/agent-worktrees` або `CODEX_WORKTREES_DIR`.
+
+Схема SQLite оновлюється автоматично при старті API або worker. Перед production-оновленням однаково робіть backup `gba-qa.sqlite`, а `DATA_DIR` монтуйте як постійний volume.
 
 ## Перевірка
 

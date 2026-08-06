@@ -1,4 +1,4 @@
-import type { BuildInfo, Task, TaskDraft } from './types'
+import type { AgentRun, BuildInfo, Task, TaskDraft } from './types'
 
 class ApiError extends Error {
   status: number
@@ -28,6 +28,10 @@ export function getTasks() {
 
 export function getCurrentBuild() {
   return request<BuildInfo>('/api/builds/current')
+}
+
+export function getTaskAgentRuns(id: string) {
+  return request<AgentRun[]>(`/api/tasks/${id}/agent-runs`)
 }
 
 export function createTask(draft: TaskDraft, attachments: File[]) {
