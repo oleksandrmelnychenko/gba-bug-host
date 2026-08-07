@@ -1640,6 +1640,7 @@ function PipelineRunCard({
   onOpenConclusion: (task: Task) => void
   onStop?: (taskId: string, revert: boolean) => void
 }) {
+  const [promptOpen, setPromptOpen] = useState(false)
   const run = task.agentRun
   if (!run) return null
   const isRerun = run.trigger === 'review_again' || run.attempt > 1
@@ -1663,9 +1664,19 @@ function PipelineRunCard({
         {run.branch && <span className="pipeline-branch">{run.branch}</span>}
       </div>
       {isRerun && (
-        <div className="pipeline-prompt">
-          <span>Промпт для повторного циклу</span>
-          <p>{prompt || 'Без коментаря — Codex отримає лише статус «Передивись ще раз».'}</p>
+        <div className="pipeline-prompt" onClick={(event) => event.stopPropagation()}>
+          <button
+            type="button"
+            className="pipeline-prompt-toggle"
+            aria-expanded={promptOpen}
+            onClick={() => setPromptOpen((open) => !open)}
+          >
+            <ChevronDown size={13} className={promptOpen ? 'pipeline-prompt-chevron-open' : undefined} />
+            Промпт для повторного циклу
+          </button>
+          {promptOpen && (
+            <p>{prompt || 'Без коментаря — Codex отримає лише статус «Передивись ще раз».'}</p>
+          )}
         </div>
       )}
       <AgentConclusion run={run} onOpenConclusion={() => onOpenConclusion(task)} />
