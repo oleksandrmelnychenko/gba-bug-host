@@ -339,6 +339,45 @@ test('API ставить Codex job у чергу та повторно реаг�
   })
 })
 
+test('повторний AI-запуск атомарно додає новий скріншот у snapshot', async () => {
+  await withTestApp(async ({ app, store, uploadsDirectory }) => {
+    const firstRun = await request(app)
+      .post('/api/tasks/BUG-1051/agent-runs')
+      .expect(202)
+    store.updateAgentRun(firstRun.body.agentRun.id, {
+      status: 'completed',
+      summary: 'Перша спроба завершена.',
+      finishedAt: new Date().toISOString(),
+    })
+
+    await request(app)
+      .post('/api/tasks/BUG-1051/review-again')
+      .attach('attachments', Buffer.from('temporary-image'), {
+        filename: 'invalid-review.png',
+        contentType: 'image/png',
+      })
+      .expect(400)
+    assert.deepEqual(await readdir(uploadsDirectory), [])
+
+    const reviewAgain = await request(app)
+      .post('/api/tasks/BUG-1051/review-again')
+      .field('reviewComment', 'Після виправлення форма все ще падає на другому кроці.')
+      .attach('attachments', Buffer.from('review-image'), {
+        filename: 'second-step.png',
+        contentType: 'image/png',
+      })
+      .expect(202)
+
+    assert.equal(reviewAgain.body.status, 'review_again')
+    assert.equal(reviewAgain.body.attachments.length, 1)
+    assert.equal(reviewAgain.body.attachments[0].name, 'second-step.png')
+    assert.equal(reviewAgain.body.agentRun.trigger, 'review_again')
+    assert.equal(reviewAgain.body.agentRun.inputSnapshot.attachments.length, 1)
+    assert.equal(reviewAgain.body.agentRun.inputSnapshot.attachments[0].name, 'second-step.png')
+    assert.deepEqual(await readdir(uploadsDirectory), [path.basename(reviewAgain.body.attachments[0].url)])
+  })
+})
+
 test('API запускає Codex без окремого токена', async () => {
   await withTestApp(async ({ app }) => {
     const created = await request(app)

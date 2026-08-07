@@ -86,6 +86,16 @@ export function updateTask(id: string, patch: Partial<TaskDraft>) {
   })
 }
 
+export function reviewTaskAgain(id: string, patch: Partial<TaskDraft>, reviewComment: string, attachments: File[]) {
+  const body = new FormData()
+  for (const [key, value] of Object.entries(patch)) {
+    if (value !== undefined && key !== 'status' && key !== 'reviewComment') body.append(key, value)
+  }
+  body.append('reviewComment', reviewComment)
+  for (const attachment of attachments) body.append('attachments', attachment)
+  return request<Task>(`/api/tasks/${id}/review-again`, { method: 'POST', body })
+}
+
 export function addTaskAttachments(id: string, attachments: File[]) {
   const body = new FormData()
   for (const attachment of attachments) body.append('attachments', attachment)

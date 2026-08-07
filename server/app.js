@@ -305,6 +305,50 @@ export async function createApp(options = {}) {
     }
   })
 
+  app.post('/api/tasks/:id/review-again', upload.array('attachments', 6), async (request, response, next) => {
+    try {
+      const { errors, values } = validateTaskInput(request.body, { partial: true })
+      const mediaError = getMediaValidationError(request.files)
+      if (mediaError) errors.push(mediaError)
+      if (!Object.hasOwn(request.body, 'reviewComment') || values.reviewComment.length < 3) {
+        errors.push('Опишіть для AI, що саме залишилося невиправленим.')
+      }
+      if (errors.length > 0) {
+        await removeUploadedFiles(request.files)
+        response.status(400).json({ message: errors[0], errors })
+        return
+      }
+
+      const patch = { reviewComment: values.reviewComment }
+      for (const key of ['title', 'description', 'siteUrl', 'notes', 'area', 'project', 'priority', 'assignee']) {
+        if (Object.hasOwn(request.body, key)) patch[key] = values[key]
+      }
+      if (Object.hasOwn(patch, 'project') && !patch.project) delete patch.project
+
+      const result = store.reviewAgain(
+        randomUUID(),
+        request.params.id,
+        patch,
+        request.files.map(serializeAttachment),
+      )
+      if (result.status === 'task_not_found') {
+        await removeUploadedFiles(request.files)
+        response.status(404).json({ message: 'Задачу не знайдено.' })
+        return
+      }
+      if (result.status === 'active' || result.status === 'already_reviewing') {
+        await removeUploadedFiles(request.files)
+        response.status(409).json({ message: 'Для цієї задачі AI уже запущено або стоїть у черзі.' })
+        return
+      }
+
+      response.status(202).json(result.task)
+    } catch (error) {
+      await removeUploadedFiles(request.files)
+      next(error)
+    }
+  })
+
   app.get('/api/tasks/:id/agent-runs', async (request, response, next) => {
     try {
       if (!await store.find(request.params.id)) {

@@ -524,6 +524,30 @@ export class TaskStore {
     return this.find(id)
   }
 
+  reviewAgain(runId, taskId, values, attachments = []) {
+    return this.transaction(() => {
+      const existingTask = this.find(taskId)
+      if (!existingTask) return { status: 'task_not_found', task: null, run: null }
+      if (existingTask.status === 'review_again') {
+        return { status: 'already_reviewing', task: existingTask, run: existingTask.agentRun }
+      }
+
+      const activeRun = this.database
+        .prepare("SELECT * FROM agent_runs WHERE task_id = ? AND status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1")
+        .get(taskId)
+      if (activeRun) {
+        return { status: 'active', task: existingTask, run: agentRunFromRow(activeRun) }
+      }
+
+      this.patch(taskId, { ...values, status: 'review_again' })
+      for (const attachment of attachments) this.insertAttachment(taskId, attachment)
+
+      const queued = this.enqueueAgentRun(runId, taskId, 'review_again')
+      if (!queued.created) throw new Error(`Failed to enqueue review run: ${queued.status}`)
+      return { status: 'queued', task: this.find(taskId), run: queued.run }
+    })
+  }
+
   removeAttachment(taskId, attachmentId) {
     if (!this.find(taskId)) return { status: 'task_not_found' }
     const row = this.database

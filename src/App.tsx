@@ -46,6 +46,7 @@ import {
   getTaskAgentRuns,
   getTasks,
   reorderQueuedTask,
+  reviewTaskAgain,
   resumeAgentRun,
   stopAgentRun,
   transcribeAudio,
@@ -713,9 +714,11 @@ function TaskPagination({
 function UploadZone({
   files,
   onFiles,
+  inputId,
 }: {
   files: File[]
   onFiles: (files: File[]) => void
+  inputId?: string
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const previews = useMemo(
@@ -752,6 +755,7 @@ function UploadZone({
       >
         <input
           ref={inputRef}
+          id={inputId}
           type="file"
           accept="image/png,image/jpeg,image/webp,image/gif,image/avif,video/mp4,video/webm,video/quicktime"
           multiple
@@ -1438,29 +1442,22 @@ function ReviewAgainDialog({
   onClose,
   onSubmit,
 }: {
-  request: ReviewAgainRequest | null
+  request: ReviewAgainRequest
   onClose: () => void
-  onSubmit: (comment: string) => Promise<void>
+  onSubmit: (comment: string, attachments: File[]) => Promise<void>
 }) {
   const [comment, setComment] = useState('')
+  const [files, setFiles] = useState<File[]>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
-    setComment('')
-    setError('')
-  }, [request?.task.id, request?.task.agentRun?.attempt])
-
-  useEffect(() => {
-    if (!request) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !saving) onClose()
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [request, saving, onClose])
-
-  if (!request) return null
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
@@ -1472,7 +1469,7 @@ function ReviewAgainDialog({
     setSaving(true)
     setError('')
     try {
-      await onSubmit(normalizedComment)
+      await onSubmit(normalizedComment, files)
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : 'Не вдалося запустити AI повторно.')
     } finally {
@@ -1519,6 +1516,10 @@ function ReviewAgainDialog({
               />
             </div>
             <small className="field-counter">{comment.length} / 5000</small>
+          </div>
+          <div className="form-field form-field-wide">
+            <label htmlFor="review-attachments">Нові докази для AI</label>
+            <UploadZone files={files} onFiles={setFiles} inputId="review-attachments" />
           </div>
           {request.task.reviewComment && (
             <div className="previous-ai-comment">
@@ -2343,16 +2344,12 @@ function App() {
     setToast(`${task.id} створено`)
   }
 
-  const submitReviewAgain = async (comment: string) => {
+  const submitReviewAgain = async (comment: string, attachments: File[]) => {
     if (!reviewAgainRequest) return
     const { task, patch } = reviewAgainRequest
     setUpdatingId(task.id)
     try {
-      const updatedTask = await updateTask(task.id, {
-        ...patch,
-        status: 'review_again',
-        reviewComment: comment,
-      })
+      const updatedTask = await reviewTaskAgain(task.id, patch, comment, attachments)
       replaceTask(updatedTask)
       setReviewAgainRequest(null)
       setToast(`${task.id}: AI запущено повторно`)
@@ -2535,11 +2532,14 @@ function App() {
         onDeleted={(id) => setTasks((current) => current.filter((task) => task.id !== id))}
         onOpenAttachment={setLightboxAttachment}
       />
-      <ReviewAgainDialog
-        request={reviewAgainRequest}
-        onClose={() => setReviewAgainRequest(null)}
-        onSubmit={submitReviewAgain}
-      />
+      {reviewAgainRequest ? (
+        <ReviewAgainDialog
+          key={`${reviewAgainRequest.task.id}:${reviewAgainRequest.task.agentRun?.attempt ?? 0}`}
+          request={reviewAgainRequest}
+          onClose={() => setReviewAgainRequest(null)}
+          onSubmit={submitReviewAgain}
+        />
+      ) : null}
       <AgentConclusionListDialog
         open={conclusionListOpen}
         tasks={tasks}
