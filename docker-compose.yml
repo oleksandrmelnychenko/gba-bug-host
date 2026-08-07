@@ -10,6 +10,7 @@ services:
       DATA_DIR: /app/data
       UPLOAD_DIR: /app/public/uploads
       BUILD_SOURCE_URL: "${BUILD_SOURCE_URL:-http://host.docker.internal:8083}"
+      CODEX_RUN_STALE_MS: "${CODEX_RUN_STALE_MS:-30000}"
       VOICE_TRANSCRIBE_MODEL: "${VOICE_TRANSCRIBE_MODEL:-base}"
       VOICE_TRANSCRIBE_DEVICE: "${VOICE_TRANSCRIBE_DEVICE:-cpu}"
       VOICE_TRANSCRIBE_COMPUTE_TYPE: "${VOICE_TRANSCRIBE_COMPUTE_TYPE:-int8}"
@@ -46,6 +47,9 @@ services:
       CODEX_NETWORK_ACCESS: "${CODEX_NETWORK_ACCESS:-false}"
       CODEX_JOB_TIMEOUT_MS: "${CODEX_JOB_TIMEOUT_MS:-2700000}"
       CODEX_CONCURRENCY: "${CODEX_CONCURRENCY:-3}"
+      CODEX_WORKER_LEASE_NAME: "${CODEX_WORKER_LEASE_NAME:-codex-worker}"
+      CODEX_WORKER_LEASE_TTL_MS: "${CODEX_WORKER_LEASE_TTL_MS:-20000}"
+      CODEX_WORKER_HEARTBEAT_MS: "${CODEX_WORKER_HEARTBEAT_MS:-5000}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:?Set OPENAI_API_KEY in the server environment}"
     command: ["sh", "-lc", "printf '%s' \"$$OPENAI_API_KEY\" | codex login --with-api-key && npm run worker"]
     volumes:

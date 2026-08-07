@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { access, lstat, mkdir, readFile, readlink, symlink, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { defaultRepoPlan } from './release-worker.js'
@@ -57,13 +58,34 @@ function repositoryChecks(name) {
   return defaultRepoPlan[name]?.checks ?? []
 }
 
-function runProcess(command, args, { cwd, input = '', timeoutMs = 45 * 60 * 1000, onChild } = {}) {
+export function terminateProcessTree(child, signal = 'SIGTERM') {
+  if (!child?.pid) return
+  try {
+    if (child.gbaProcessGroup === true && process.platform !== 'win32') {
+      process.kill(-child.pid, signal)
+    } else {
+      child.kill(signal)
+    }
+  } catch {
+    // Процес уже завершився між перевіркою та сигналом.
+  }
+}
+
+function runProcess(command, args, {
+  cwd,
+  input = '',
+  timeoutMs = 45 * 60 * 1000,
+  onChild,
+  processGroup = false,
+} = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
       env: process.env,
       stdio: ['pipe', 'pipe', 'pipe'],
+      detached: processGroup && process.platform !== 'win32',
     })
+    child.gbaProcessGroup = processGroup && process.platform !== 'win32'
     onChild?.(child)
     let stdout = ''
     let stderr = ''
@@ -79,8 +101,8 @@ function runProcess(command, args, { cwd, input = '', timeoutMs = 45 * 60 * 1000
 
     const timeout = setTimeout(() => {
       timedOut = true
-      child.kill('SIGTERM')
-      setTimeout(() => child.kill('SIGKILL'), 5_000).unref()
+      terminateProcessTree(child, 'SIGTERM')
+      setTimeout(() => terminateProcessTree(child, 'SIGKILL'), 5_000).unref()
     }, timeoutMs)
     timeout.unref()
 
@@ -116,6 +138,13 @@ export function normalizeWorkerConcurrency(value, fallback = 3) {
   const parsed = Number.parseInt(String(value ?? ''), 10)
   if (!Number.isFinite(parsed) || parsed < 1) return fallback
   return Math.min(parsed, 3)
+}
+
+function requirePositiveMilliseconds(name, value) {
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`${name} має бути додатним цілим числом мілісекунд.`)
+  }
+  return value
 }
 
 function buildPrompt(task, run, mediaPaths, worktrees) {
@@ -190,6 +219,10 @@ export class CodexWorker {
     timeoutMs = Number.parseInt(process.env.CODEX_JOB_TIMEOUT_MS ?? String(45 * 60 * 1000), 10),
     networkAccess = process.env.CODEX_NETWORK_ACCESS === 'true',
     concurrency = normalizeWorkerConcurrency(process.env.CODEX_CONCURRENCY),
+    workerId = randomUUID(),
+    leaseName = process.env.CODEX_WORKER_LEASE_NAME ?? 'codex-worker',
+    leaseTtlMs = Number.parseInt(process.env.CODEX_WORKER_LEASE_TTL_MS ?? '20000', 10),
+    heartbeatIntervalMs = Number.parseInt(process.env.CODEX_WORKER_HEARTBEAT_MS ?? '5000', 10),
   }) {
     this.store = store
     this.rootDirectory = rootDirectory
@@ -205,37 +238,125 @@ export class CodexWorker {
     this.codexBinary = codexBinary
     this.model = model
     this.buildNumber = buildNumber
-    this.pollIntervalMs = pollIntervalMs
-    this.timeoutMs = timeoutMs
+    this.pollIntervalMs = requirePositiveMilliseconds('CODEX_POLL_INTERVAL_MS', pollIntervalMs)
+    this.timeoutMs = requirePositiveMilliseconds('CODEX_JOB_TIMEOUT_MS', timeoutMs)
     this.networkAccess = networkAccess
     this.concurrency = normalizeWorkerConcurrency(concurrency)
+    this.workerId = workerId
+    this.leaseName = leaseName
+    this.leaseTtlMs = requirePositiveMilliseconds('CODEX_WORKER_LEASE_TTL_MS', leaseTtlMs)
+    this.heartbeatIntervalMs = requirePositiveMilliseconds('CODEX_WORKER_HEARTBEAT_MS', heartbeatIntervalMs)
+    if (this.heartbeatIntervalMs >= this.leaseTtlMs) {
+      throw new Error('CODEX_WORKER_HEARTBEAT_MS має бути меншим за CODEX_WORKER_LEASE_TTL_MS.')
+    }
     this.activeRuns = new Map()
+    this.activeChildren = new Map()
     this.acceptingRuns = true
+    this.stopping = false
+    this.cleanupProcessing = false
     this.worktreeMutationChain = Promise.resolve()
     this.timer = null
+    this.heartbeatTimer = null
+    this.leaseHeld = false
   }
 
   start() {
-    this.acceptingRuns = true
-    const requeued = this.store.requeueOrphanedRuns()
-    if (requeued.length > 0) {
-      console.log(`[Codex worker] повернуто в чергу після рестарту: ${requeued.join(', ')}`)
+    if (this.leaseHeld) throw new Error('Codex worker уже запущено.')
+    const staleBefore = new Date(Date.now() - this.leaseTtlMs).toISOString()
+    if (!this.store.acquireWorkerLease(this.leaseName, this.workerId, staleBefore)) {
+      throw new Error(`Codex worker lease «${this.leaseName}» уже належить іншому живому процесу.`)
     }
-    this.timer = setInterval(() => void this.tick(), this.pollIntervalMs)
-    void this.tick()
+    this.leaseHeld = true
+    try {
+      this.stopping = false
+      this.acceptingRuns = true
+      const requeued = this.store.requeueOrphanedRuns()
+      if (requeued.length > 0) {
+        console.log(`[Codex worker] повернуто в чергу після рестарту: ${requeued.join(', ')}`)
+      }
+      this.timer = setInterval(() => void this.tick(), this.pollIntervalMs)
+      this.heartbeatTimer = setInterval(() => this.heartbeat(), this.heartbeatIntervalMs)
+      this.heartbeatTimer.unref?.()
+      this.heartbeat()
+      void this.tick()
+    } catch (error) {
+      this.store.releaseWorkerLease(this.leaseName, this.workerId)
+      this.leaseHeld = false
+      throw error
+    }
   }
 
-  stop() {
+  async stop() {
+    if (this.stopping) return
+    this.stopping = true
     this.acceptingRuns = false
     if (this.timer) clearInterval(this.timer)
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
     this.timer = null
+    this.heartbeatTimer = null
+
+    const children = [...this.activeChildren.values()]
+    for (const child of children) terminateProcessTree(child, 'SIGTERM')
+    const active = [...this.activeRuns.values()]
+    if (active.length > 0) {
+      await Promise.race([
+        Promise.allSettled(active),
+        new Promise((resolve) => setTimeout(resolve, 5_000)),
+      ])
+    }
+    // Навіть якщо батьківський Codex уже закрився після SIGTERM, у його
+    // process group могли лишитися build/test-нащадки. Добиваємо snapshot PID,
+    // а не поточну map, з якої close-handler уже міг видалити child.
+    for (const child of children) terminateProcessTree(child, 'SIGKILL')
+    if (this.activeRuns.size > 0) {
+      await Promise.race([
+        Promise.allSettled([...this.activeRuns.values()]),
+        new Promise((resolve) => setTimeout(resolve, 3_000)),
+      ])
+    }
+    for (const runId of this.activeRuns.keys()) {
+      this.store.requeueAgentRun(runId, this.workerId)
+    }
+    if (this.leaseHeld) {
+      // Якщо lease вже забрав новий процес, старий не має права затерти його
+      // telemetry станом «stopped».
+      const stillOwnsLease = this.store.heartbeatWorkerLease(this.leaseName, this.workerId)
+      if (stillOwnsLease) {
+        this.reportState('stopped')
+        this.store.releaseWorkerLease(this.leaseName, this.workerId)
+      }
+      this.leaseHeld = false
+    }
+  }
+
+  heartbeat() {
+    if (!this.leaseHeld || this.stopping) return
+    const ownsLease = this.store.heartbeatWorkerLease(this.leaseName, this.workerId)
+    if (!ownsLease) {
+      console.error('[Codex worker] lease втрачено; нові задачі зупинено.')
+      void this.stop()
+      return
+    }
+    this.store.heartbeatAgentRuns(this.workerId, [...this.activeRuns.keys()])
+    this.reportState('running')
+  }
+
+  reportState(status) {
+    this.store.saveSystemState('codex-worker', {
+      status,
+      workerId: this.workerId,
+      concurrency: this.concurrency,
+      activeRunIds: [...this.activeRuns.keys()],
+      activeCount: this.activeRuns.size,
+    })
   }
 
   tick() {
     if (!this.acceptingRuns) return
+    this.drainCleanupQueue()
 
     while (this.activeRuns.size < this.concurrency) {
-      const run = this.store.claimNextAgentRun()
+      const run = this.store.claimNextAgentRun(this.workerId)
       if (!run) return
 
       const execution = this.executeClaimedRun(run)
@@ -255,12 +376,40 @@ export class CodexWorker {
       await this.processRun(run)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      this.store.updateAgentRun(run.id, {
-        status: 'failed',
-        error: tail(message),
-        finishedAt: new Date().toISOString(),
-      })
+      if (this.stopping) this.store.requeueAgentRun(run.id, this.workerId)
+      else this.store.failAgentRun(run.id, run.taskId, tail(message))
       console.error(`[Codex worker] ${run.taskId}: ${message}`)
+    }
+  }
+
+  drainCleanupQueue() {
+    if (this.cleanupProcessing) return
+    const run = this.store.claimNextCleanupRun()
+    if (!run) return
+    this.cleanupProcessing = true
+    void this.cleanupRun(run).finally(() => {
+      this.cleanupProcessing = false
+      if (this.acceptingRuns) queueMicrotask(() => this.tick())
+    })
+  }
+
+  async cleanupRun(run) {
+    try {
+      const task = this.store.find(run.taskId)
+      if (!task) throw new Error(`Задачу ${run.taskId} не знайдено.`)
+      const repositories = this.resolveProjectStack(task.project)
+      const jobDirectory = path.join(this.worktreesDirectory, safeTaskSlug(task.id))
+      const worktrees = repositories.map((repository) => ({
+        ...repository,
+        worktreePath: path.join(jobDirectory, repository.name),
+      }))
+      await this.revertTaskWork(task.id, worktrees)
+      this.store.finishCleanupRun(run.id)
+      console.log(`[Codex worker] ${task.id}: відкладений worktree очищено`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.store.finishCleanupRun(run.id, `Не вдалося очистити worktree: ${tail(message, 1000)}`)
+      console.error(`[Codex worker] ${run.taskId}: cleanup: ${message}`)
     }
   }
 
@@ -360,12 +509,16 @@ export class CodexWorker {
     this.store.patch(currentTask.id, { status: 'in_progress' })
     const stack = this.resolveProjectStack(task.project)
     const { branch, jobDirectory, worktrees } = await this.ensureWorktrees(task.id, stack)
+    if (this.stopping) {
+      this.store.requeueAgentRun(run.id, this.workerId)
+      return
+    }
     this.store.updateAgentRun(run.id, { branch, worktreePath: jobDirectory })
     console.log(`[Codex worker] ${task.id} (${task.project ?? 'console'}): ${worktrees.map((worktree) => worktree.repositoryPath).join(', ')}`)
 
     const runDirectory = path.join(this.dataDirectory, 'agent-runs')
     await mkdir(runDirectory, { recursive: true })
-    const schemaPath = path.join(runDirectory, 'result-schema.json')
+    const schemaPath = path.join(runDirectory, `${run.id}-schema.json`)
     const resultPath = path.join(runDirectory, `${run.id}.json`)
     await writeFile(schemaPath, JSON.stringify(outputSchema, null, 2), 'utf8')
 
@@ -393,7 +546,9 @@ export class CodexWorker {
       cwd: jobDirectory,
       input: buildPrompt(task, run, mediaPaths, worktrees),
       timeoutMs: this.timeoutMs,
+      processGroup: true,
       onChild: (child) => {
+        this.activeChildren.set(run.id, child)
         // Оператор може зупинити ран із дески: опитуємо прапорець і глушимо
         // процес Codex, не чекаючи на його завершення.
         const poll = setInterval(() => {
@@ -401,13 +556,21 @@ export class CodexWorker {
           if (!control) return
           stopControl = control
           clearInterval(poll)
-          child.kill('SIGTERM')
-          setTimeout(() => child.kill('SIGKILL'), 5_000).unref?.()
+          terminateProcessTree(child, 'SIGTERM')
+          setTimeout(() => terminateProcessTree(child, 'SIGKILL'), 5_000).unref?.()
         }, 2000)
         poll.unref?.()
-        child.on('close', () => clearInterval(poll))
+        child.on('close', () => {
+          clearInterval(poll)
+          this.activeChildren.delete(run.id)
+        })
       },
     })
+
+    if (this.stopping) {
+      this.store.requeueAgentRun(run.id, this.workerId)
+      return
+    }
 
     if (stopControl) {
       const reverted = stopControl === 'stop_revert'
@@ -422,12 +585,12 @@ export class CodexWorker {
       const reason = execution.timedOut
         ? `Codex перевищив таймаут ${Math.round(this.timeoutMs / 60_000)} хв.`
         : execution.stderr || execution.stdout || `Codex завершився з кодом ${execution.code}.`
-      this.store.updateAgentRun(run.id, {
-        status: 'failed',
-        error: tail(reason),
-        details: JSON.stringify({ stdout: execution.stdout, stderr: execution.stderr }),
-        finishedAt: new Date().toISOString(),
-      })
+      this.store.failAgentRun(
+        run.id,
+        task.id,
+        tail(reason),
+        JSON.stringify({ stdout: execution.stdout, stderr: execution.stderr }),
+      )
       return
     }
 
@@ -442,9 +605,13 @@ export class CodexWorker {
     })
 
     if (result.outcome === 'fixed') {
+      // У бакет білда задача потрапляє НЕ тут: вердикт Codex ще не означає, що
+      // код у мейнлайні. Мітку ставить реліз-воркер після успішного мерджу й
+      // деплою — інакше в білді опиняються фікси, які гейт відхилив (BUG-1003).
       this.store.patch(currentTask.id, { status: 'ready_for_retest' })
-      this.store.markTaskProcessed(currentTask.id, 'codex')
     }
-    if (result.outcome === 'blocked') this.store.patch(currentTask.id, { status: 'blocked' })
+    if (result.outcome === 'blocked' || result.outcome === 'needs_review') {
+      this.store.patch(currentTask.id, { status: 'blocked' })
+    }
   }
 }

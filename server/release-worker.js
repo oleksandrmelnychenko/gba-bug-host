@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { access } from 'node:fs/promises'
+import { access, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -61,8 +61,14 @@ function latestMarkerAt(notes, marker) {
   let newest = null
   for (const match of (notes ?? '').matchAll(marker)) {
     found = true
-    // Стамп пишеться як «YYYY-MM-DD HH:MM» у UTC (зріз ISO), тож читаємо його як UTC.
-    const parsed = Date.parse(`${match[1].trim().slice(0, 16).replace(' ', 'T')}:00Z`)
+    const raw = match[1].trim()
+    const legacyMinute = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(raw)
+    // Старі мітки мали точність лише до хвилини. Для них межею є кінець
+    // хвилини, інакше run із finishedAt=:30 помилково випускається вдруге.
+    const parsedBase = legacyMinute
+      ? Date.parse(`${raw.replace(' ', 'T')}:00Z`)
+      : Date.parse(raw)
+    const parsed = legacyMinute && !Number.isNaN(parsedBase) ? parsedBase + 59_999 : parsedBase
     if (!Number.isNaN(parsed) && (newest === null || parsed > newest)) newest = parsed
   }
   // Мітка без читабельного часу (старий або зіпсований формат) має лишатись
@@ -72,6 +78,7 @@ function latestMarkerAt(notes, marker) {
 }
 
 export function isReleased(task) {
+  if (task.agentRun?.releaseStatus === 'released') return true
   return latestMarkerAt(task.notes, RELEASE_MARKER) !== null
 }
 
@@ -126,7 +133,9 @@ export function releaseStatusFor(task) {
 export function selectReleasableTasks(tasks) {
   return tasks.filter((task) =>
     (task.agentRun?.status === 'completed' || isSandboxLimitedReview(task)) &&
-    hasWorkNewerThanGate(task) &&
+    (task.agentRun?.releaseStatus
+      ? ['pending', 'processing', 'retrying'].includes(task.agentRun.releaseStatus)
+      : hasWorkNewerThanGate(task)) &&
     task.status !== 'done')
 }
 
@@ -176,6 +185,7 @@ export class ReleaseWorker {
     pollIntervalMs = Number.parseInt(process.env.RELEASE_POLL_INTERVAL_MS ?? '30000', 10),
     settleMs = Number.parseInt(process.env.RELEASE_SETTLE_MS ?? '180000', 10),
     heartbeatIntervalMs = Number.parseInt(process.env.RELEASE_HEARTBEAT_INTERVAL_MS ?? '30000', 10),
+    processRunner = runProcess,
   } = {}) {
     this.deskBaseUrl = deskBaseUrl.replace(/\/$/, '')
     this.worktreesDirectory = worktreesDirectory
@@ -184,9 +194,9 @@ export class ReleaseWorker {
     this.pollIntervalMs = pollIntervalMs
     this.settleMs = settleMs
     this.heartbeatIntervalMs = heartbeatIntervalMs
+    this.runProcess = processRunner
     this.busy = false
     this.firstSeenAt = new Map()
-    this.failures = new Map()
   }
 
   start() {
@@ -206,7 +216,7 @@ export class ReleaseWorker {
       .catch(() => [])
     if (wanted.length === 0) return
 
-    const shown = await runProcess(
+    const shown = await this.runProcess(
       'systemctl',
       ['show', '--no-pager', '--property=Id', '--property=ActiveState', ...wanted],
       {},
@@ -227,19 +237,24 @@ export class ReleaseWorker {
     try {
       const response = await fetch(`${this.deskBaseUrl}/api/tasks`)
       if (!response.ok) throw new Error(`desk → ${response.status}`)
-      const candidates = selectReleasableTasks(await response.json())
+      const tasks = await response.json()
+      await this.recoverReleasedWorktreeCleanup(tasks)
+      const candidates = selectReleasableTasks(tasks)
       if (candidates.length === 0) {
         this.firstSeenAt.clear()
         return
       }
 
       const now = Date.now()
+      const candidateIds = new Set(candidates.map((task) => task.id))
+      for (const taskId of this.firstSeenAt.keys()) {
+        if (!candidateIds.has(taskId)) this.firstSeenAt.delete(taskId)
+      }
       for (const task of candidates) {
         if (!this.firstSeenAt.has(task.id)) this.firstSeenAt.set(task.id, now)
       }
       const ready = candidates.filter((task) => now - this.firstSeenAt.get(task.id) >= this.settleMs)
       if (ready.length === 0) return
-      if (ready.length < candidates.length) return
 
       await this.releaseBatch(ready)
       for (const task of ready) this.firstSeenAt.delete(task.id)
@@ -260,18 +275,24 @@ export class ReleaseWorker {
         released.push({ task, alreadyMerged: Boolean(outcome.alreadyMerged) })
         for (const repo of outcome.repos) touchedRepos.add(repo)
       } else {
-        // Конфлікт мерджу не розсмокчеться сам: без цього лічильника задача
-        // ретраїлась кожні 3.5 хв нескінченно й засипала нотатки [release-fail].
-        const attempts = (this.failures.get(task.id) ?? 0) + 1
-        this.failures.set(task.id, attempts)
-        if (attempts >= MAX_RELEASE_ATTEMPTS) {
-          const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ')
+        const attempts = (task.agentRun?.releaseAttempts ?? 0) + 1
+        const deterministic = ['conflict', 'validation', 'repository'].includes(outcome.kind)
+        if (deterministic && attempts >= MAX_RELEASE_ATTEMPTS) {
+          const stamp = new Date().toISOString()
+          await this.updateRelease(task, {
+            status: 'blocked',
+            attempts,
+            error: outcome.reason,
+            taskStatus: 'blocked',
+          })
           await this.annotate(task, `[release-blocked:${stamp}] ${attempts} невдалих спроб: ${outcome.reason}. Потрібна людина або новий прогін Codex.`.slice(0, 500))
-          await this.setStatus(task, 'blocked')
-          this.failures.delete(task.id)
           console.error(`[release] ${task.id}: заблоковано після ${attempts} спроб — ${outcome.reason.slice(0, 160)}`)
         } else {
-          await this.annotate(task, `[release-fail] ${outcome.reason}`.slice(0, 500))
+          await this.updateRelease(task, {
+            status: 'retrying',
+            attempts,
+            error: outcome.reason,
+          })
           console.error(`[release] ${task.id}: ${outcome.reason.slice(0, 200)}`)
         }
       }
@@ -279,20 +300,28 @@ export class ReleaseWorker {
 
     if (touchedRepos.size > 0) {
       const services = [...touchedRepos].flatMap((repo) => this.repoPlan[repo].services)
-      const deploy = await runProcess(
+      const deploy = await this.runProcess(
         'docker',
         ['compose', '-p', 'gba-dev', '-f', 'docker-compose.yml', '-f', 'docker-compose.dev.yml', '--env-file', '.env.dev', 'up', '-d', '--build', ...services],
         { cwd: this.infraDirectory },
       )
       if (deploy.code !== 0) {
+        const reason = `Деплой не пройшов: ${deploy.output.slice(-1000)}`
         console.error(`[release] deploy failed: ${deploy.output.slice(-300)}`)
-        for (const { task } of released) await this.annotate(task, '[release-fail] деплой не пройшов, код у логах release-воркера')
+        for (const { task } of released) {
+          await this.updateRelease(task, {
+            status: 'retrying',
+            attempts: (task.agentRun?.releaseAttempts ?? 0) + 1,
+            error: reason,
+          })
+          await this.annotate(task, '[release-fail] деплой не пройшов, буде автоматична повторна спроба')
+        }
         return
       }
       console.log(`[release] задеплоєно: ${services.join(', ')}`)
     }
 
-    const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ')
+    const stamp = new Date().toISOString()
     for (const { task, alreadyMerged } of released) {
       const status = releaseStatusFor(task)
       const closing = status === 'done'
@@ -302,7 +331,16 @@ export class ReleaseWorker {
           : `[released:${stamp}] змерджено і задеплоєно на dev`,
         closing ? '[auto-closed] лог-задача: фікс у мейнлайні й на dev; якщо помилка повториться — вартовий заведе нову' : '',
       ].filter(Boolean).join('\n'))
-      if (task.status !== status) await this.setStatus(task, status)
+      await this.updateRelease(task, {
+        status: 'released',
+        error: '',
+        releasedAt: stamp,
+        taskStatus: status,
+      })
+      const cleanupErrors = await this.cleanupReleasedWorktrees(task)
+      if (cleanupErrors.length > 0) {
+        await this.annotate(task, `[release-cleanup-warning] ${cleanupErrors.join('; ')}`.slice(0, 500))
+      }
       console.log(`[release] ${task.id}: випущено${alreadyMerged ? ' (вже було влито)' : ''}${closing ? ' і закрито' : ''}`)
     }
   }
@@ -311,66 +349,138 @@ export class ReleaseWorker {
     const slug = taskSlug(task.id)
     const branch = branchName(task.id)
     const jobDirectory = path.join(this.worktreesDirectory, slug)
-    const repos = []
+    const repos = new Set(task.agentRun?.releaseRepositories ?? [])
 
     for (const [repo, plan] of Object.entries(this.repoPlan)) {
       const worktree = path.join(jobDirectory, repo)
       if (!(await pathExists(path.join(worktree, '.git')))) continue
 
-      const status = await runProcess('git', ['-C', worktree, 'status', '--porcelain'], {})
+      const status = await this.runProcess('git', ['-C', worktree, 'status', '--porcelain'], {})
       if (status.output.split('\n').some((line) => line.trim())) {
-        const stage = await runProcess('git', ['-C', worktree, 'add', '-A'], {})
-        if (stage.code !== 0) return { ok: false, reason: `stage у ${repo}: ${stage.output.slice(-200)}` }
-        const commit = await runProcess('git', ['-C', worktree, 'commit', '-m', `fix: ${task.title.slice(0, 90)} (${task.id})\n\nCo-Authored-By: Codex via GBA QA Desk`], {})
-        if (commit.code !== 0) return { ok: false, reason: `commit у ${repo}: ${commit.output.slice(-200)}` }
+        const stage = await this.runProcess('git', ['-C', worktree, 'add', '-A'], {})
+        if (stage.code !== 0) return { ok: false, kind: 'repository', reason: `stage у ${repo}: ${stage.output.slice(-200)}` }
+        const commit = await this.runProcess('git', ['-C', worktree, 'commit', '-m', `fix: ${task.title.slice(0, 90)} (${task.id})\n\nCo-Authored-By: Codex via GBA QA Desk`], {})
+        if (commit.code !== 0) return { ok: false, kind: 'repository', reason: `commit у ${repo}: ${commit.output.slice(-200)}` }
       }
 
-      const diff = await runProcess('git', ['-C', plan.root, 'rev-list', '--count', `${plan.branch}..${branch}`], {})
-      if (diff.code !== 0 || diff.output.trim() === '0') continue
-      repos.push(repo)
+      const diff = await this.runProcess('git', ['-C', plan.root, 'rev-list', '--count', `${plan.branch}..${branch}`], {})
+      if (diff.code !== 0) return { ok: false, kind: 'repository', reason: `${repo}: не вдалося порівняти ${branch} із ${plan.branch}` }
+      if (diff.output.trim() !== '0') repos.add(repo)
     }
 
-    if (repos.length === 0) return { ok: true, repos: [], alreadyMerged: true }
+    if (repos.size === 0) return { ok: true, repos: [], alreadyMerged: true }
+    const touchedRepos = [...repos]
+    await this.updateRelease(task, {
+      status: 'processing',
+      repositories: touchedRepos,
+      error: '',
+    })
 
-    for (const repo of repos) {
+    for (const repo of touchedRepos) {
       const plan = this.repoPlan[repo]
+      if (!plan) return { ok: false, kind: 'repository', reason: `Невідомий репозиторій у release-state: ${repo}` }
 
-      const dirty = await runProcess('git', ['-C', plan.root, 'status', '--porcelain'], {})
+      const dirty = await this.runProcess('git', ['-C', plan.root, 'status', '--porcelain'], {})
       if (dirty.output.split('\n').some((line) => line && !line.startsWith('??'))) {
-        return { ok: false, reason: `${repo}: у робочому дереві є незакомічені зміни — відкладено` }
+        return { ok: false, kind: 'transient', reason: `${repo}: у робочому дереві є незакомічені зміни — відкладено` }
       }
 
-      const baseline = await runProcess('git', ['-C', plan.root, 'rev-parse', 'HEAD'], {})
+      const baseline = await this.runProcess('git', ['-C', plan.root, 'rev-parse', 'HEAD'], {})
       const baselineCommit = /\b[0-9a-f]{40}\b/.exec(baseline.output)?.[0]
-      if (!baselineCommit) return { ok: false, reason: `${repo}: не вдалося зафіксувати HEAD перед мерджем` }
+      if (!baselineCommit) return { ok: false, kind: 'repository', reason: `${repo}: не вдалося зафіксувати HEAD перед мерджем` }
 
-      const merge = await runProcess('git', ['-C', plan.root, 'merge', '--no-edit', branch], {})
-      if (merge.code !== 0) {
-        await runProcess('git', ['-C', plan.root, 'merge', '--abort'], {})
-        return { ok: false, reason: `${repo}: конфлікт мерджу з ${branch}` }
+      const ancestor = await this.runProcess('git', ['-C', plan.root, 'merge-base', '--is-ancestor', branch, plan.branch], {})
+      let mergedNow = false
+      if (ancestor.code === 1) {
+        const merge = await this.runProcess('git', ['-C', plan.root, 'merge', '--no-edit', branch], {})
+        if (merge.code !== 0) {
+          await this.runProcess('git', ['-C', plan.root, 'merge', '--abort'], {})
+          return { ok: false, kind: 'conflict', reason: `${repo}: конфлікт мерджу з ${branch}` }
+        }
+        mergedNow = true
+      } else if (ancestor.code !== 0) {
+        return { ok: false, kind: 'repository', reason: `${repo}: не вдалося перевірити стан merge для ${branch}` }
       }
 
       for (const check of plan.checks) {
-        const result = await runProcess(check[0], check.slice(1), { cwd: plan.root })
+        const result = await this.runProcess(check[0], check.slice(1), { cwd: plan.root })
         if (result.code !== 0) {
-          await runProcess('git', ['-C', plan.root, 'reset', '--hard', baselineCommit], {})
-          return { ok: false, reason: `${repo}: перевірка «${check.join(' ')}» впала; мердж відкочено` }
+          if (mergedNow) await this.runProcess('git', ['-C', plan.root, 'reset', '--hard', baselineCommit], {})
+          return { ok: false, kind: 'validation', reason: `${repo}: перевірка «${check.join(' ')}» впала${mergedNow ? '; мердж відкочено' : ''}` }
         }
       }
 
-      const push = await runProcess('git', ['-C', plan.root, 'push', 'origin', plan.branch], {})
-      if (push.code !== 0) return { ok: false, reason: `${repo}: push не пройшов: ${push.output.slice(-200)}` }
+      const push = await this.runProcess('git', ['-C', plan.root, 'push', 'origin', plan.branch], {})
+      if (push.code !== 0) return { ok: false, kind: 'transient', reason: `${repo}: push не пройшов: ${push.output.slice(-200)}` }
     }
 
-    return { ok: true, repos }
+    return { ok: true, repos: touchedRepos }
   }
 
-  async setStatus(task, status) {
-    await fetch(`${this.deskBaseUrl}/api/tasks/${task.id}`, {
+  async updateRelease(task, values) {
+    const response = await fetch(`${this.deskBaseUrl}/api/agent-runs/${task.agentRun.id}/release`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status }),
-    }).catch(() => undefined)
+      body: JSON.stringify(values),
+    })
+    if (!response.ok) throw new Error(`release-state ${task.id} → ${response.status}`)
+    task.agentRun = await response.json()
+    if (values.taskStatus) task.status = values.taskStatus
+    return task.agentRun
+  }
+
+  async cleanupReleasedWorktrees(task) {
+    const slug = taskSlug(task.id)
+    const branch = branchName(task.id)
+    const jobDirectory = path.join(this.worktreesDirectory, slug)
+    const errors = []
+    let canRemoveJobDirectory = true
+
+    for (const [repo, plan] of Object.entries(this.repoPlan)) {
+      const worktree = path.join(jobDirectory, repo)
+      if (await pathExists(path.join(worktree, '.git'))) {
+        const removed = await this.runProcess('git', ['-C', plan.root, 'worktree', 'remove', '--force', worktree], {})
+        if (removed.code !== 0) {
+          canRemoveJobDirectory = false
+          errors.push(`${repo}: worktree не прибрано`)
+        }
+      }
+
+      const branchExists = await this.runProcess('git', ['-C', plan.root, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`], {})
+      if (branchExists.code === 1) continue
+      if (branchExists.code !== 0) {
+        errors.push(`${repo}: не вдалося перевірити локальну гілку`)
+        continue
+      }
+      const merged = await this.runProcess('git', ['-C', plan.root, 'merge-base', '--is-ancestor', branch, plan.branch], {})
+      if (merged.code !== 0) {
+        errors.push(`${repo}: локальна гілка не є частиною ${plan.branch}`)
+        continue
+      }
+      const deleted = await this.runProcess('git', ['-C', plan.root, 'branch', '-D', branch], {})
+      if (deleted.code !== 0) errors.push(`${repo}: гілку не прибрано`)
+    }
+
+    if (canRemoveJobDirectory) {
+      await rm(jobDirectory, { recursive: true, force: true }).catch(() => {
+        errors.push('папку задачі не прибрано')
+      })
+    }
+    return errors
+  }
+
+  async recoverReleasedWorktreeCleanup(tasks) {
+    for (const task of tasks) {
+      if (task.agentRun?.releaseStatus !== 'released') continue
+      const jobDirectory = path.join(this.worktreesDirectory, taskSlug(task.id))
+      if (!(await pathExists(jobDirectory))) continue
+      const errors = await this.cleanupReleasedWorktrees(task)
+      if (errors.length > 0) {
+        console.error(`[release] ${task.id}: cleanup retry: ${errors.join('; ')}`)
+      } else {
+        console.log(`[release] ${task.id}: завершено відкладений cleanup worktree`)
+      }
+    }
   }
 
   async annotate(task, line) {

@@ -67,6 +67,9 @@ CODEX_WORKTREES_HOST_PATH=/srv/gba-worktrees
 CODEX_NETWORK_ACCESS=false
 CODEX_JOB_TIMEOUT_MS=2700000
 CODEX_CONCURRENCY=3
+CODEX_WORKER_LEASE_TTL_MS=20000
+CODEX_WORKER_HEARTBEAT_MS=5000
+CODEX_RUN_STALE_MS=30000
 ```
 
 Потім запустіть:
@@ -85,6 +88,8 @@ Docker image для `web` містить `faster-whisper` і multilingual-мод
 Щоб Codex міг відкривати URL або завантажувати залежності, встановіть `CODEX_NETWORK_ACCESS=true`. Вмикайте це лише для довірених задач і репозиторію.
 
 `CODEX_CONCURRENCY` задає кількість паралельних Codex-агентів від 1 до 3; типовим значенням є `3`. Кожен агент отримує окремий git worktree, а release-черга лишається послідовною.
+
+Worker тримає singleton lease у спільній SQLite, оновлює heartbeat активних запусків і при коректній зупинці повертає незавершені задачі в чергу. `resume` не запускає другого агента поверх живого worktree: перезапуск дозволяється лише після `CODEX_RUN_STALE_MS`. Після успішного merge, push і deploy release-worker атомарно фіксує стан `released` та прибирає службовий worktree.
 
 ## Production без Docker
 

@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
-import { branchName, defaultRepoPlan, hasWorkNewerThanGate, isReleased, isSandboxLimitedReview, isSentinelTask, lastGateAt, releaseStatusFor, selectReleasableTasks, taskSlug } from '../server/release-worker.js'
+import { ReleaseWorker, branchName, defaultRepoPlan, hasWorkNewerThanGate, isReleased, isSandboxLimitedReview, isSentinelTask, lastGateAt, releaseStatusFor, selectReleasableTasks, taskSlug } from '../server/release-worker.js'
 
 test('слаг і назва гілки збігаються з worker-конвенцією', () => {
   assert.equal(taskSlug('BUG-1024'), 'bug-1024')
@@ -84,7 +87,9 @@ test('останній із кількох релізів визначає ме�
     notes: '[released:2026-08-05 10:00] перший\n[released:2026-08-07 09:00] другий',
     agentRun: { status: 'completed', finishedAt: '2026-08-06T12:00:00.000Z' },
   }
-  assert.equal(lastGateAt(task), Date.parse('2026-08-07T09:00:00Z'))
+  // Мітка з точністю до хвилини діє до кінця цієї хвилини, інакше прогін,
+  // що завершився на :30 тієї ж хвилини, випускався б удруге.
+  assert.equal(lastGateAt(task), Date.parse('2026-08-07T09:00:59.999Z'))
   assert.equal(hasWorkNewerThanGate(task), false)
 })
 
@@ -92,6 +97,148 @@ test('задача без жодної мітки випускається як 
   const task = { id: 'C', status: 'ready_for_retest', notes: '', agentRun: { status: 'completed', finishedAt: '2026-08-07T08:00:00.000Z' } }
   assert.equal(isReleased(task), false)
   assert.deepEqual(selectReleasableTasks([task]).map((item) => item.id), ['C'])
+})
+
+test('структурований release-state відновлює pending/retrying і не перевипускає released/blocked', () => {
+  const task = (id, releaseStatus) => ({
+    id,
+    status: 'ready_for_retest',
+    notes: '[released:2026-08-01 10:00] старий прогін',
+    agentRun: {
+      status: 'completed',
+      finishedAt: '2026-08-07T10:00:00.000Z',
+      releaseStatus,
+    },
+  })
+  const tasks = [
+    task('pending', 'pending'),
+    task('processing', 'processing'),
+    task('retrying', 'retrying'),
+    task('released', 'released'),
+    task('blocked', 'blocked'),
+  ]
+
+  assert.deepEqual(selectReleasableTasks(tasks).map((item) => item.id), ['pending', 'processing', 'retrying'])
+})
+
+test('settle одного нового кандидата не блокує вже готові задачі', async () => {
+  const originalFetch = global.fetch
+  const tasks = ['ready', 'new'].map((id) => ({
+    id,
+    status: 'ready_for_retest',
+    notes: '',
+    agentRun: { status: 'completed', releaseStatus: 'pending' },
+  }))
+  const released = []
+  const worker = new ReleaseWorker({ settleMs: 100 })
+  worker.firstSeenAt.set('ready', Date.now() - 1_000)
+  worker.releaseBatch = async (batch) => released.push(...batch.map((task) => task.id))
+  global.fetch = async () => ({ ok: true, json: async () => tasks })
+
+  try {
+    await worker.tick()
+    assert.deepEqual(released, ['ready'])
+    assert.equal(worker.firstSeenAt.has('new'), true)
+  } finally {
+    global.fetch = originalFetch
+  }
+})
+
+test('детермінована release-помилка блокується після третьої збереженої спроби', async () => {
+  const task = {
+    id: 'BUG-2001',
+    title: 'Конфлікт',
+    status: 'ready_for_retest',
+    notes: '',
+    agentRun: { id: 'RUN-2001', releaseAttempts: 2 },
+  }
+  const annotations = []
+  const worker = new ReleaseWorker()
+  worker.releaseTask = async () => ({ ok: false, kind: 'validation', reason: 'тести впали' })
+  worker.updateRelease = async (item, values) => {
+    item.agentRun.releaseStatus = values.status
+    item.agentRun.releaseAttempts = values.attempts
+    if (values.taskStatus) item.status = values.taskStatus
+  }
+  worker.annotate = async (_item, line) => annotations.push(line)
+
+  await worker.releaseBatch([task])
+
+  assert.equal(task.agentRun.releaseStatus, 'blocked')
+  assert.equal(task.agentRun.releaseAttempts, 3)
+  assert.equal(task.status, 'blocked')
+  assert.match(annotations[0], /release-blocked/)
+})
+
+test('deploy failure лишає задачу retrying, а наступний успіх завершує release', async () => {
+  const task = {
+    id: 'BUG-2002',
+    title: 'Retry deploy',
+    status: 'ready_for_retest',
+    notes: '',
+    agentRun: {
+      id: 'RUN-2002',
+      releaseAttempts: 0,
+      releaseRepositories: ['repo'],
+    },
+  }
+  const repoPlan = { repo: { branch: 'main', root: '/repo', services: ['service'], checks: [] } }
+  const annotations = []
+  const updateRelease = async (item, values) => {
+    item.agentRun.releaseStatus = values.status
+    if (values.attempts !== undefined) item.agentRun.releaseAttempts = values.attempts
+    if (values.taskStatus) item.status = values.taskStatus
+  }
+  const failed = new ReleaseWorker({
+    repoPlan,
+    processRunner: async () => ({ code: 1, output: 'compose failed' }),
+  })
+  failed.releaseTask = async () => ({ ok: true, repos: ['repo'] })
+  failed.updateRelease = updateRelease
+  failed.annotate = async (_item, line) => annotations.push(line)
+
+  await failed.releaseBatch([task])
+  assert.equal(task.agentRun.releaseStatus, 'retrying')
+  assert.equal(task.agentRun.releaseAttempts, 1)
+  assert.match(annotations.at(-1), /автоматична повторна спроба/)
+
+  const succeeded = new ReleaseWorker({
+    repoPlan,
+    processRunner: async () => ({ code: 0, output: '' }),
+  })
+  succeeded.releaseTask = async () => ({ ok: true, repos: ['repo'] })
+  succeeded.updateRelease = updateRelease
+  succeeded.annotate = async (_item, line) => annotations.push(line)
+  succeeded.cleanupReleasedWorktrees = async () => []
+
+  await succeeded.releaseBatch([task])
+  assert.equal(task.agentRun.releaseStatus, 'released')
+  assert.equal(task.status, 'ready_for_retest')
+})
+
+test('після release прибираються worktree і вже влита локальна гілка', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-release-cleanup-'))
+  const job = path.join(root, 'bug-2003', 'repo')
+  await mkdir(job, { recursive: true })
+  await writeFile(path.join(job, '.git'), 'gitdir fixture', 'utf8')
+  const calls = []
+  const worker = new ReleaseWorker({
+    worktreesDirectory: root,
+    repoPlan: { repo: { branch: 'main', root: '/repo', services: [], checks: [] } },
+    processRunner: async (command, args) => {
+      calls.push([command, ...args].join(' '))
+      return { code: 0, output: '' }
+    },
+  })
+
+  try {
+    assert.deepEqual(await worker.cleanupReleasedWorktrees({ id: 'BUG-2003' }), [])
+    assert.equal(calls.some((call) => call.includes('worktree remove --force')), true)
+    assert.equal(calls.some((call) => call.includes('branch -D codex/qa-bug-2003')), true)
+    await assert.rejects(access(path.join(root, 'bug-2003')), /ENOENT/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('план покриває всі сервіси, що збираються з цих репозиторіїв', () => {

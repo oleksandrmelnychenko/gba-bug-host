@@ -16,11 +16,14 @@ for (const [project, stack] of Object.entries(worker.projectStacks)) {
   console.log(`Codex worker запущено. Проєкт ${project}: ${stack.length ? stack.map((repository) => repository.repositoryPath).join(', ') : 'не налаштовано'}`)
 }
 
-function shutdown() {
-  worker.stop()
+let shuttingDown = false
+async function shutdown() {
+  if (shuttingDown) return
+  shuttingDown = true
+  await worker.stop()
   store.close()
   process.exit(0)
 }
 
-process.on('SIGINT', shutdown)
-process.on('SIGTERM', shutdown)
+process.on('SIGINT', () => void shutdown())
+process.on('SIGTERM', () => void shutdown())

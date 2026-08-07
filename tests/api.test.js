@@ -217,6 +217,11 @@ test('SQLite автоматично додає поля задачі та snapsh
     assert.equal(task.reviewComment, '')
     assert.equal(task.agentRun.reviewComment, '')
     assert.equal(task.agentRun.inputSnapshot, null)
+    assert.equal(task.agentRun.workerId, '')
+    assert.equal(task.agentRun.heartbeatAt, null)
+    assert.equal(task.agentRun.releaseStatus, '')
+    assert.equal(task.agentRun.releaseAttempts, 0)
+    assert.deepEqual(task.agentRun.releaseRepositories, [])
 
     const updated = store.patch('BUG-1001', {
       siteUrl: 'https://example.com/problem',
@@ -493,11 +498,52 @@ test('осиротілі running-рани повертаються в чергу
   })
 })
 
-test('резум знімає зависле running і ставить новий запуск', async () => {
+test('рестарт worker не скасовує stop_revert і відновлює перерваний cleanup', async () => {
+  await withTestApp(async ({ app, store }) => {
+    const created = await request(app).post('/api/tasks').field('title', 'Відкладене очищення').expect(201)
+    const claimed = store.claimNextAgentRun('worker-old')
+    await request(app)
+      .post(`/api/tasks/${created.body.id}/agent-runs/stop`)
+      .send({ revert: true })
+      .expect(200)
+
+    assert.deepEqual(store.requeueOrphanedRuns(), [])
+    const blocked = store.findAgentRun(claimed.id)
+    assert.equal(blocked.status, 'blocked')
+    assert.equal(blocked.control, 'stop_revert')
+    assert.equal(store.find(created.body.id).status, 'new')
+
+    const cleanup = store.claimNextCleanupRun()
+    assert.equal(cleanup.id, claimed.id)
+    assert.equal(cleanup.control, 'cleanup_running')
+
+    // Імітуємо ще один restart без finishCleanupRun.
+    store.requeueOrphanedRuns()
+    assert.equal(store.claimNextCleanupRun()?.id, claimed.id)
+  })
+})
+
+test('резум не перебиває живий running-запуск', async () => {
+  await withTestApp(async ({ app, store }) => {
+    const created = await request(app).post('/api/tasks').field('title', 'Живе виконання').expect(201)
+    const claimed = store.claimNextAgentRun('worker-live')
+    assert.equal(claimed.status, 'running')
+
+    const response = await request(app)
+      .post(`/api/tasks/${created.body.id}/agent-runs/resume`)
+      .expect(409)
+
+    assert.match(response.body.message, /ще працює/i)
+    assert.equal(store.findAgentRun(claimed.id).status, 'running')
+  })
+})
+
+test('резум атомарно знімає лише протухлий running і ставить новий запуск', async () => {
   await withTestApp(async ({ app, store }) => {
     const created = await request(app).post('/api/tasks').field('title', 'Зависле виконання').expect(201)
-    const claimed = store.claimNextAgentRun()
-    assert.equal(claimed.status, 'running')
+    const claimed = store.claimNextAgentRun('worker-stale')
+    store.database.prepare('UPDATE agent_runs SET heartbeat_at = ? WHERE id = ?')
+      .run('2020-01-01T00:00:00.000Z', claimed.id)
 
     const resumed = await request(app)
       .post(`/api/tasks/${created.body.id}/agent-runs/resume`)
@@ -505,5 +551,65 @@ test('резум знімає зависле running і ставить нови�
 
     assert.equal(resumed.body.agentRun.status, 'queued')
     assert.equal(store.findAgentRun(claimed.id).status, 'failed')
+  }, { agentRunStaleMs: 1000 })
+})
+
+test('lease допускає лише один живий Codex worker і дозволяє takeover після stale', async () => {
+  await withTestApp(async ({ store }) => {
+    const freshCutoff = new Date(Date.now() - 20_000).toISOString()
+    assert.equal(store.acquireWorkerLease('codex-worker', 'worker-a', freshCutoff), true)
+    assert.equal(store.acquireWorkerLease('codex-worker', 'worker-b', freshCutoff), false)
+    assert.equal(store.heartbeatWorkerLease('codex-worker', 'worker-a'), true)
+
+    store.database.prepare('UPDATE worker_leases SET heartbeat_at = ? WHERE name = ?')
+      .run('2020-01-01T00:00:00.000Z', 'codex-worker')
+    assert.equal(store.acquireWorkerLease('codex-worker', 'worker-b', freshCutoff), true)
+    assert.equal(store.releaseWorkerLease('codex-worker', 'worker-a'), false)
+    assert.equal(store.releaseWorkerLease('codex-worker', 'worker-b'), true)
+  })
+})
+
+test('release-state зберігається на run і лише released атомарно потрапляє у build', async () => {
+  await withTestApp(async ({ app, store }) => {
+    const created = await request(app).post('/api/tasks').field('title', 'Release state').expect(201)
+    const runId = created.body.agentRun.id
+    store.updateAgentRun(runId, {
+      status: 'completed',
+      finishedAt: new Date().toISOString(),
+    })
+
+    const processing = await request(app)
+      .patch(`/api/agent-runs/${runId}/release`)
+      .send({ status: 'processing', attempts: 1, repositories: ['gba_console', 'gba_console'] })
+      .expect(200)
+    assert.equal(processing.body.releaseStatus, 'processing')
+    assert.equal(processing.body.releaseAttempts, 1)
+    assert.deepEqual(processing.body.releaseRepositories, ['gba_console'])
+    assert.equal(store.currentBuild('__pending__'), null)
+
+    await request(app)
+      .patch(`/api/agent-runs/${runId}/release`)
+      .send({ status: 'released', taskStatus: 'ready_for_retest', releasedAt: new Date().toISOString() })
+      .expect(200)
+
+    assert.equal(store.find(created.body.id).status, 'ready_for_retest')
+    const shipped = store.ensureBuild('release-test-build')
+    assert.equal(shipped.bugs.length, 1)
+    assert.equal(shipped.bugs[0].id, created.body.id)
+    assert.equal(shipped.bugs[0].source, 'codex')
+  })
+})
+
+test('фінальний release-state відхиляється без узгодженого taskStatus', async () => {
+  await withTestApp(async ({ app }) => {
+    const created = await request(app).post('/api/tasks').field('title', 'Release validation').expect(201)
+    await request(app)
+      .patch(`/api/agent-runs/${created.body.agentRun.id}/release`)
+      .send({ status: 'released' })
+      .expect(422)
+    await request(app)
+      .patch(`/api/agent-runs/${created.body.agentRun.id}/release`)
+      .send({ status: 'blocked', taskStatus: 'done' })
+      .expect(422)
   })
 })

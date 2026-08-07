@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, readlink, rm, symlink, unlink, writeFi
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { CodexWorker, normalizeWorkerConcurrency } from '../server/codex-worker.js'
+import { CodexWorker, normalizeWorkerConcurrency, terminateProcessTree } from '../server/codex-worker.js'
 import { TaskStore, getSeedTasks } from '../server/store.js'
 
 function git(cwd, ...args) {
@@ -27,6 +27,32 @@ test('Codex worker обмежує конфігурацію трьома пара
   assert.equal(normalizeWorkerConcurrency('invalid'), 3)
 })
 
+test('Codex worker відхиляє heartbeat, який не встигає оновити lease', () => {
+  assert.throws(() => new CodexWorker({
+    store: {},
+    rootDirectory: '/tmp',
+    dataDirectory: '/tmp',
+    uploadsDirectory: '/tmp',
+    leaseTtlMs: 5_000,
+    heartbeatIntervalMs: 5_000,
+  }), /має бути меншим/)
+})
+
+test('зупинка detached Codex надсилає сигнал усій process group', () => {
+  const originalKill = process.kill
+  const calls = []
+  process.kill = (pid, signal) => {
+    calls.push({ pid, signal })
+    return true
+  }
+  try {
+    terminateProcessTree({ pid: 4321, gbaProcessGroup: true, kill: () => assert.fail('child.kill не очікувався') }, 'SIGTERM')
+    assert.deepEqual(calls, [{ pid: -4321, signal: 'SIGTERM' }])
+  } finally {
+    process.kill = originalKill
+  }
+})
+
 test('Codex worker одночасно обробляє три задачі й добирає наступну після звільнення слота', async () => {
   const queue = Array.from({ length: 5 }, (_, index) => ({
     id: `RUN-PARALLEL-${index + 1}`,
@@ -38,6 +64,7 @@ test('Codex worker одночасно обробляє три задачі й д
   let maximumActive = 0
   const store = {
     claimNextAgentRun: () => queue.shift() ?? null,
+    claimNextCleanupRun: () => null,
     updateAgentRun: () => undefined,
   }
   const worker = new CodexWorker({
@@ -71,7 +98,7 @@ test('Codex worker одночасно обробляє три задачі й д
   releases.get('RUN-PARALLEL-5')()
   await waitFor(() => worker.activeRuns.size === 0)
   assert.equal(maximumActive, 3)
-  worker.stop()
+  await worker.stop()
 })
 
 test('Codex worker працює в окремому worktree та зберігає результат', async () => {
@@ -139,7 +166,12 @@ writeFileSync(outputPath, JSON.stringify({
     assert.equal(result.status, 'completed')
     assert.equal(result.summary, 'Тестове виправлення готове.')
     assert.equal(store.find('BUG-1051').status, 'ready_for_retest')
-    assert.equal(store.ensureBuild('worker-test-build').bugs[0].source, 'codex')
+    // Вердикт Codex НЕ кладе задачу в бакет білда: код ще не в мейнлайні.
+    // Мітку ставить реліз-воркер після успішного мерджу й деплою.
+    assert.deepEqual(store.ensureBuild('worker-test-build').bugs, [])
+    const schema = JSON.parse(await readFile(path.join(dataDirectory, 'agent-runs', `${run.id}-schema.json`), 'utf8'))
+    assert.equal(schema.properties.outcome.type, 'string')
+    await assert.rejects(readFile(path.join(dataDirectory, 'agent-runs', 'result-schema.json'), 'utf8'), /ENOENT/)
     assert.equal(await readFile(path.join(worktreesDirectory, 'bug-1051', 'target', 'app.txt'), 'utf8'), 'after\n')
     const prompt = await readFile(path.join(worktreesDirectory, 'bug-1051', 'prompt.txt'), 'utf8')
     assert.match(prompt, /Після першого виправлення пошук усе ще падає на порожньому рядку/)

@@ -11,6 +11,8 @@ import { TranscriptionError, transcribeAudioWithShell } from './transcription.js
 const allowedStatuses = new Set(['new', 'in_progress', 'ready_for_retest', 'review_again', 'done', 'blocked'])
 const allowedPriorities = new Set(['low', 'medium', 'high', 'critical'])
 const allowedProjects = new Set(['console', 'ecommerce'])
+const allowedReleaseStatuses = new Set(['pending', 'processing', 'retrying', 'released', 'blocked'])
+const allowedReleaseTaskStatuses = new Set(['ready_for_retest', 'done', 'blocked'])
 const allowedMediaTypes = new Map([
   ['image/jpeg', { extension: '.jpg', kind: 'image', maxSize: 10 * 1024 * 1024 }],
   ['image/png', { extension: '.png', kind: 'image', maxSize: 10 * 1024 * 1024 }],
@@ -128,6 +130,11 @@ export async function createApp(options = {}) {
   const uploadsDirectory = options.uploadsDirectory ?? process.env.UPLOAD_DIR ?? path.join(rootDirectory, 'public', 'uploads')
   const buildNumber = options.buildNumber ?? process.env.APP_BUILD_NUMBER ?? '0.1.0-local'
   const buildSource = options.buildSource ?? new BuildNumberSource({ fallback: buildNumber })
+  const configuredAgentRunStaleMs = options.agentRunStaleMs
+    ?? Number.parseInt(process.env.CODEX_RUN_STALE_MS ?? '30000', 10)
+  const agentRunStaleMs = Number.isInteger(configuredAgentRunStaleMs) && configuredAgentRunStaleMs > 0
+    ? configuredAgentRunStaleMs
+    : 30_000
   const currentBuildNumber = () => buildSource.current()
   const store = options.store ?? new TaskStore(dataDirectory)
   const topology = options.topology ?? new TopologyService()
@@ -310,6 +317,73 @@ export async function createApp(options = {}) {
     }
   })
 
+  app.patch('/api/agent-runs/:id/release', (request, response, next) => {
+    try {
+      if (!store.findAgentRun(request.params.id)) {
+        response.status(404).json({ message: 'AI-запуск не знайдено.' })
+        return
+      }
+      const values = {}
+      if (Object.hasOwn(request.body, 'status')) {
+        const status = cleanText(request.body.status)
+        if (!allowedReleaseStatuses.has(status)) {
+          response.status(422).json({ message: 'Невідомий release-статус.' })
+          return
+        }
+        values.status = status
+      }
+      if (Object.hasOwn(request.body, 'attempts')) {
+        const attempts = Number(request.body.attempts)
+        if (!Number.isInteger(attempts) || attempts < 0) {
+          response.status(422).json({ message: 'Кількість release-спроб має бути невід’ємним цілим числом.' })
+          return
+        }
+        values.attempts = attempts
+      }
+      if (Object.hasOwn(request.body, 'repositories')) {
+        if (!Array.isArray(request.body.repositories) || request.body.repositories.some((item) => typeof item !== 'string')) {
+          response.status(422).json({ message: 'repositories має бути масивом рядків.' })
+          return
+        }
+        values.repositories = request.body.repositories
+      }
+      if (Object.hasOwn(request.body, 'error')) values.error = cleanText(request.body.error).slice(0, 3000)
+      if (Object.hasOwn(request.body, 'releasedAt')) {
+        const releasedAt = request.body.releasedAt
+        if (releasedAt !== null && Number.isNaN(Date.parse(releasedAt))) {
+          response.status(422).json({ message: 'releasedAt має бути ISO-датою або null.' })
+          return
+        }
+        values.releasedAt = releasedAt
+      }
+      const taskStatus = cleanText(request.body.taskStatus)
+      if (taskStatus && !allowedReleaseTaskStatuses.has(taskStatus)) {
+        response.status(422).json({ message: 'Невідомий статус задачі після release.' })
+        return
+      }
+      if (['released', 'blocked'].includes(values.status) && !taskStatus) {
+        response.status(422).json({ message: 'Фінальний release-статус вимагає taskStatus.' })
+        return
+      }
+      if (taskStatus && !['released', 'blocked'].includes(values.status)) {
+        response.status(422).json({ message: 'taskStatus дозволений лише для фінального release-статусу.' })
+        return
+      }
+      if (values.status === 'blocked' && taskStatus !== 'blocked') {
+        response.status(422).json({ message: 'Заблокований release вимагає taskStatus=blocked.' })
+        return
+      }
+      if (values.status === 'released' && taskStatus === 'blocked') {
+        response.status(422).json({ message: 'Успішний release не може блокувати задачу.' })
+        return
+      }
+      const updated = store.updateAgentRunRelease(request.params.id, values, taskStatus)
+      response.json(updated)
+    } catch (error) {
+      next(error)
+    }
+  })
+
   app.post('/api/tasks/:id/agent-runs', async (request, response, next) => {
     try {
       const result = await store.enqueueAgentRun(randomUUID(), request.params.id, 'manual')
@@ -375,10 +449,14 @@ export async function createApp(options = {}) {
         return
       }
 
-      // Зависле 'running' (процес помер, статус лишився) блокує нову постановку —
-      // знімаємо його, інакше «Резум» мовчки нічого не робить.
-      if (task.agentRun?.status === 'running' && request.body?.force !== false) {
-        store.releaseRunningRun(request.params.id)
+      // Живий run не можна «перебити» другим агентом у тому самому worktree.
+      // Resume дозволяємо лише коли heartbeat справді протух.
+      if (task.agentRun?.status === 'running') {
+        const staleBefore = new Date(Date.now() - agentRunStaleMs).toISOString()
+        if (!store.releaseStaleRunningRun(request.params.id, staleBefore)) {
+          response.status(409).json({ message: 'AI-запуск ще працює. Спочатку зупиніть його або дочекайтеся завершення.' })
+          return
+        }
       }
 
       const result = await store.enqueueAgentRun(randomUUID(), request.params.id, 'manual')

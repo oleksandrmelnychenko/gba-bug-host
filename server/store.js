@@ -101,6 +101,13 @@ function agentRunFromRow(row) {
   } catch {
     inputSnapshot = null
   }
+  let releaseRepositories = []
+  try {
+    const parsed = JSON.parse(row.release_repositories ?? '[]')
+    if (Array.isArray(parsed)) releaseRepositories = parsed.filter((item) => typeof item === 'string')
+  } catch {
+    releaseRepositories = []
+  }
   return {
     id: row.id,
     taskId: row.task_id,
@@ -116,6 +123,13 @@ function agentRunFromRow(row) {
     summary: row.summary,
     details: row.details,
     error: row.error,
+    workerId: row.worker_id ?? '',
+    heartbeatAt: row.heartbeat_at ?? null,
+    releaseStatus: row.release_status ?? '',
+    releaseAttempts: row.release_attempts ?? 0,
+    releaseRepositories,
+    releaseError: row.release_error ?? '',
+    releasedAt: row.released_at ?? null,
     createdAt: row.created_at,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
@@ -224,11 +238,20 @@ export class TaskStore {
         attempt INTEGER NOT NULL,
         review_comment TEXT NOT NULL DEFAULT '',
         input_snapshot TEXT NOT NULL DEFAULT '{}',
+        queue_priority INTEGER NOT NULL DEFAULT 0,
+        control TEXT NOT NULL DEFAULT '',
         branch TEXT NOT NULL DEFAULT '',
         worktree_path TEXT NOT NULL DEFAULT '',
         summary TEXT NOT NULL DEFAULT '',
         details TEXT NOT NULL DEFAULT '',
         error TEXT NOT NULL DEFAULT '',
+        worker_id TEXT NOT NULL DEFAULT '',
+        heartbeat_at TEXT,
+        release_status TEXT NOT NULL DEFAULT 'pending',
+        release_attempts INTEGER NOT NULL DEFAULT 0,
+        release_repositories TEXT NOT NULL DEFAULT '[]',
+        release_error TEXT NOT NULL DEFAULT '',
+        released_at TEXT,
         created_at TEXT NOT NULL,
         started_at TEXT,
         finished_at TEXT,
@@ -250,6 +273,11 @@ export class TaskStore {
         key TEXT PRIMARY KEY,
         payload TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS worker_leases (
+        name TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        heartbeat_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_attachments_task_id ON attachments(task_id);
       CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC);
@@ -293,6 +321,30 @@ export class TaskStore {
         // stop | stop_revert — керуюча команда оператора для активного рану.
         this.database.exec("ALTER TABLE agent_runs ADD COLUMN control TEXT NOT NULL DEFAULT ''")
       }
+      if (!agentRunColumns.has('worker_id')) {
+        this.database.exec("ALTER TABLE agent_runs ADD COLUMN worker_id TEXT NOT NULL DEFAULT ''")
+      }
+      if (!agentRunColumns.has('heartbeat_at')) {
+        this.database.exec('ALTER TABLE agent_runs ADD COLUMN heartbeat_at TEXT')
+      }
+      if (!agentRunColumns.has('release_status')) {
+        // Порожній статус означає legacy-run: до першого нового release він
+        // продовжує використовувати старий marker у notes.
+        this.database.exec("ALTER TABLE agent_runs ADD COLUMN release_status TEXT NOT NULL DEFAULT ''")
+      }
+      if (!agentRunColumns.has('release_attempts')) {
+        this.database.exec('ALTER TABLE agent_runs ADD COLUMN release_attempts INTEGER NOT NULL DEFAULT 0')
+      }
+      if (!agentRunColumns.has('release_repositories')) {
+        this.database.exec("ALTER TABLE agent_runs ADD COLUMN release_repositories TEXT NOT NULL DEFAULT '[]'")
+      }
+      if (!agentRunColumns.has('release_error')) {
+        this.database.exec("ALTER TABLE agent_runs ADD COLUMN release_error TEXT NOT NULL DEFAULT ''")
+      }
+      if (!agentRunColumns.has('released_at')) {
+        this.database.exec('ALTER TABLE agent_runs ADD COLUMN released_at TEXT')
+      }
+      this.database.exec('CREATE INDEX IF NOT EXISTS idx_agent_runs_heartbeat ON agent_runs(status, heartbeat_at)')
     })
 
     const { total } = this.database.prepare('SELECT COUNT(*) AS total FROM tasks').get()
@@ -510,8 +562,8 @@ export class TaskStore {
     this.database.prepare(`
       INSERT INTO agent_runs (
         id, task_id, trigger, status, attempt, review_comment, input_snapshot, branch, worktree_path,
-        summary, details, error, created_at, started_at, finished_at, updated_at
-      ) VALUES (?, ?, ?, 'queued', ?, ?, ?, '', '', '', '', '', ?, NULL, NULL, ?)
+        summary, details, error, release_status, created_at, started_at, finished_at, updated_at
+      ) VALUES (?, ?, ?, 'queued', ?, ?, ?, '', '', '', '', '', 'pending', ?, NULL, NULL, ?)
     `).run(
       id,
       taskId,
@@ -537,7 +589,7 @@ export class TaskStore {
       .map(agentRunFromRow)
   }
 
-  claimNextAgentRun() {
+  claimNextAgentRun(workerId = '') {
     return this.transaction(() => {
       const row = this.database
         .prepare("SELECT * FROM agent_runs WHERE status = 'queued' ORDER BY queue_priority DESC, created_at ASC LIMIT 1")
@@ -546,9 +598,73 @@ export class TaskStore {
 
       const now = new Date().toISOString()
       const result = this.database
-        .prepare("UPDATE agent_runs SET status = 'running', started_at = ?, updated_at = ? WHERE id = ? AND status = 'queued'")
-        .run(now, now, row.id)
+        .prepare("UPDATE agent_runs SET status = 'running', worker_id = ?, heartbeat_at = ?, started_at = ?, updated_at = ? WHERE id = ? AND status = 'queued'")
+        .run(workerId, now, now, now, row.id)
       return result.changes === 1 ? this.findAgentRun(row.id) : null
+    })
+  }
+
+  acquireWorkerLease(name, ownerId, staleBefore) {
+    return this.transaction(() => {
+      const current = this.database.prepare('SELECT * FROM worker_leases WHERE name = ?').get(name)
+      if (current && current.owner_id !== ownerId && current.heartbeat_at >= staleBefore) return false
+      const now = new Date().toISOString()
+      this.database.prepare(`
+        INSERT INTO worker_leases (name, owner_id, heartbeat_at) VALUES (?, ?, ?)
+        ON CONFLICT(name) DO UPDATE SET owner_id = excluded.owner_id, heartbeat_at = excluded.heartbeat_at
+      `).run(name, ownerId, now)
+      return true
+    })
+  }
+
+  heartbeatWorkerLease(name, ownerId) {
+    return this.database
+      .prepare('UPDATE worker_leases SET heartbeat_at = ? WHERE name = ? AND owner_id = ?')
+      .run(new Date().toISOString(), name, ownerId).changes === 1
+  }
+
+  releaseWorkerLease(name, ownerId) {
+    return this.database
+      .prepare('DELETE FROM worker_leases WHERE name = ? AND owner_id = ?')
+      .run(name, ownerId).changes === 1
+  }
+
+  heartbeatAgentRuns(workerId, runIds) {
+    if (!workerId || runIds.length === 0) return 0
+    const now = new Date().toISOString()
+    const placeholders = runIds.map(() => '?').join(', ')
+    return this.database.prepare(`
+      UPDATE agent_runs SET heartbeat_at = ?, updated_at = ?
+      WHERE worker_id = ? AND status = 'running' AND id IN (${placeholders})
+    `).run(now, now, workerId, ...runIds).changes
+  }
+
+  requeueAgentRun(runId, workerId, reason = 'Перервано зупинкою worker, повернуто в чергу.') {
+    const now = new Date().toISOString()
+    return this.database.prepare(`
+      UPDATE agent_runs
+      SET status = 'queued', worker_id = '', heartbeat_at = NULL, control = '', started_at = NULL,
+          error = ?, updated_at = ?
+      WHERE id = ? AND status = 'running' AND worker_id = ?
+    `).run(reason, now, runId, workerId).changes === 1
+  }
+
+  failAgentRun(runId, taskId, error, details = '') {
+    const now = new Date().toISOString()
+    return this.transaction(() => {
+      this.database.prepare(`
+        UPDATE agent_runs
+        SET status = 'failed', error = ?, details = ?, finished_at = ?, updated_at = ?
+        WHERE id = ?
+      `).run(error, details, now, now, runId)
+      const active = this.database
+        .prepare("SELECT 1 FROM agent_runs WHERE task_id = ? AND status IN ('queued', 'running') LIMIT 1")
+        .get(taskId)
+      if (!active) {
+        this.database.prepare("UPDATE tasks SET status = 'new', updated_at = ? WHERE id = ? AND status = 'in_progress'")
+          .run(now, taskId)
+      }
+      return this.findAgentRun(runId)
     })
   }
 
@@ -587,6 +703,26 @@ export class TaskStore {
     this.database
       .prepare("UPDATE agent_runs SET status = 'blocked', control = '', error = ?, finished_at = ?, updated_at = ? WHERE id = ?")
       .run(reverted ? 'Зупинено оператором, зміни відкочено.' : 'Зупинено оператором.', now, now, runId)
+    return this.findAgentRun(runId)
+  }
+
+  claimNextCleanupRun() {
+    return this.transaction(() => {
+      const row = this.database
+        .prepare("SELECT * FROM agent_runs WHERE status = 'blocked' AND control = 'stop_revert' ORDER BY updated_at ASC LIMIT 1")
+        .get()
+      if (!row) return null
+      const updated = this.database
+        .prepare("UPDATE agent_runs SET control = 'cleanup_running', updated_at = ? WHERE id = ? AND control = 'stop_revert'")
+        .run(new Date().toISOString(), row.id)
+      return updated.changes === 1 ? this.findAgentRun(row.id) : null
+    })
+  }
+
+  finishCleanupRun(runId, error = '') {
+    this.database
+      .prepare("UPDATE agent_runs SET control = '', error = ?, updated_at = ? WHERE id = ? AND control = 'cleanup_running'")
+      .run(error, new Date().toISOString(), runId)
     return this.findAgentRun(runId)
   }
 
@@ -657,6 +793,39 @@ export class TaskStore {
     return this.findAgentRun(id)
   }
 
+  updateAgentRunRelease(id, values, taskStatus = '') {
+    const allowedFields = ['status', 'attempts', 'repositories', 'error', 'releasedAt']
+    const fields = allowedFields.filter((field) => Object.hasOwn(values, field))
+    if (!fields.length && !taskStatus) return this.findAgentRun(id)
+    const columns = {
+      status: 'release_status',
+      attempts: 'release_attempts',
+      repositories: 'release_repositories',
+      error: 'release_error',
+      releasedAt: 'released_at',
+    }
+    const serialized = fields.map((field) => field === 'repositories'
+      ? JSON.stringify([...new Set(values[field] ?? [])])
+      : values[field])
+    const apply = () => {
+      const now = new Date().toISOString()
+      if (fields.length > 0) {
+        const assignments = fields.map((field) => `${columns[field]} = ?`).join(', ')
+        this.database.prepare(`UPDATE agent_runs SET ${assignments}, updated_at = ? WHERE id = ?`)
+          .run(...serialized, now, id)
+      }
+      const updated = this.findAgentRun(id)
+      if (!updated) return null
+      if (taskStatus) {
+        this.database.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?')
+          .run(taskStatus, now, updated.taskId)
+        if (values.status === 'released') this.markTaskProcessed(updated.taskId, 'codex')
+      }
+      return this.findAgentRun(id)
+    }
+    return taskStatus ? this.transaction(apply) : apply()
+  }
+
   recoverInterruptedAgentRuns(olderThan = new Date(0).toISOString()) {
     const now = new Date().toISOString()
     this.database.prepare(`
@@ -667,34 +836,79 @@ export class TaskStore {
   }
 
   requeueOrphanedRuns() {
-    // Воркер — єдиний власник черги, тож на його старті будь-який 'running'
-    // залишився від убитого процесу: повертаємо в чергу, а не лишаємо
-    // висіти зі спінером до таймауту.
-    const now = new Date().toISOString()
-    const orphaned = this.database
-      .prepare("SELECT id, task_id FROM agent_runs WHERE status = 'running'")
-      .all()
-    if (orphaned.length === 0) return []
+    // Воркер — єдиний власник черги. На старті звичайний orphaned run
+    // повертаємо в чергу, але вже прийняту команду stop не скасовуємо.
+    return this.transaction(() => {
+      const now = new Date().toISOString()
+      // Якщо процес упав уже під час cleanup, наступний власник lease має
+      // повторити прибирання, а не залишити run назавжди у cleanup_running.
+      this.database.prepare(`
+        UPDATE agent_runs SET control = 'stop_revert', updated_at = ?
+        WHERE status = 'blocked' AND control = 'cleanup_running'
+      `).run(now)
 
-    this.database.prepare(`
-      UPDATE agent_runs
-      SET status = 'queued', control = '', started_at = NULL, error = 'Перервано рестартом воркера, повернуто в чергу.', updated_at = ?
-      WHERE status = 'running'
-    `).run(now)
-    return orphaned.map((row) => row.task_id)
+      const orphaned = this.database
+        .prepare("SELECT id, task_id, control FROM agent_runs WHERE status = 'running'")
+        .all()
+      const requeued = []
+      for (const row of orphaned) {
+        if (row.control === 'stop_revert') {
+          this.database.prepare(`
+            UPDATE agent_runs
+            SET status = 'blocked', worker_id = '', heartbeat_at = NULL,
+                error = 'Worker перезапущено після команди зупинки; worktree очікує очищення.',
+                finished_at = ?, updated_at = ?
+            WHERE id = ?
+          `).run(now, now, row.id)
+          this.database.prepare("UPDATE tasks SET status = 'new', updated_at = ? WHERE id = ?")
+            .run(now, row.task_id)
+          continue
+        }
+        if (row.control === 'stop') {
+          this.database.prepare(`
+            UPDATE agent_runs
+            SET status = 'blocked', worker_id = '', heartbeat_at = NULL, control = '',
+                error = 'Зупинено оператором під час перезапуску worker.', finished_at = ?, updated_at = ?
+            WHERE id = ?
+          `).run(now, now, row.id)
+          this.database.prepare("UPDATE tasks SET status = 'new', updated_at = ? WHERE id = ?")
+            .run(now, row.task_id)
+          continue
+        }
+        this.database.prepare(`
+          UPDATE agent_runs
+          SET status = 'queued', worker_id = '', heartbeat_at = NULL, control = '', started_at = NULL,
+              error = 'Перервано рестартом воркера, повернуто в чергу.', updated_at = ?
+          WHERE id = ?
+        `).run(now, row.id)
+        requeued.push(row.task_id)
+      }
+      return requeued
+    })
   }
 
-  releaseRunningRun(taskId) {
-    const now = new Date().toISOString()
-    const row = this.database
-      .prepare("SELECT id FROM agent_runs WHERE task_id = ? AND status = 'running' ORDER BY created_at DESC LIMIT 1")
-      .get(taskId)
-    if (!row) return null
+  releaseStaleRunningRun(taskId, staleBefore) {
+    return this.transaction(() => {
+      const now = new Date().toISOString()
+      const row = this.database
+        .prepare(`
+          SELECT id FROM agent_runs
+          WHERE task_id = ? AND status = 'running' AND (heartbeat_at IS NULL OR heartbeat_at < ?)
+          ORDER BY created_at DESC LIMIT 1
+        `)
+        .get(taskId, staleBefore)
+      if (!row) return null
 
-    this.database
-      .prepare("UPDATE agent_runs SET status = 'failed', control = '', error = 'Знято оператором як зависле виконання.', finished_at = ?, updated_at = ? WHERE id = ?")
-      .run(now, now, row.id)
-    return this.findAgentRun(row.id)
+      const released = this.database
+        .prepare(`
+          UPDATE agent_runs
+          SET status = 'failed', worker_id = '', heartbeat_at = NULL, control = '',
+              error = 'Знято оператором як зависле виконання.', finished_at = ?, updated_at = ?
+          WHERE id = ? AND status = 'running' AND (heartbeat_at IS NULL OR heartbeat_at < ?)
+        `)
+        .run(now, now, row.id, staleBefore)
+      return released.changes === 1 ? this.findAgentRun(row.id) : null
+    })
   }
 
   saveSystemState(key, payload) {
