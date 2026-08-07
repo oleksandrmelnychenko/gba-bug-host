@@ -150,6 +150,7 @@ export interface TopologyEdge {
 
 export interface Topology {
   generatedAt: string
+  environment?: string
   groups: TopologyGroup[]
   nodes: TopologyNode[]
   edges: TopologyEdge[]

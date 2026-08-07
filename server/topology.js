@@ -46,7 +46,6 @@ export const TOPOLOGY_GROUPS = [
   { key: 'data', label: 'Дані', hint: 'сховища' },
   { key: 'ai', label: 'AI-флот', hint: 'сервіси на хості, systemd' },
   { key: 'qa', label: 'QA-конвеєр', hint: 'ця деска та її воркери' },
-  { key: 'prod', label: 'Прод-контур', hint: 'заморожений, лише спостереження' },
 ]
 
 export const TOPOLOGY_NODES = [
@@ -66,14 +65,14 @@ export const TOPOLOGY_NODES = [
   ...PUBLIC_VHOSTS,
   {
     id: 'net-docker', label: 'Docker-мережі', group: 'net', kind: 'net',
-    subtitle: 'gba-dev · gba-prod · desk · infra',
+    subtitle: 'dev · caddy · desk · infra',
     networks: ['gba-dev_default', 'gba-prod_default', 'gba-bug-host_default', 'gba-infra_default'],
-    note: 'Caddy під’єднано і до prod-, і до desk-мережі — саме тому проксі дістає обидва контури за іменами контейнерів',
+    note: 'мережа gba-prod_default — це мережа Caddy (стара назва проєкту); деску під’єднано до неї другою, щоб проксі ходив у контейнер за іменем',
   },
   {
     id: 'caddy', label: 'Caddy', group: 'edge', kind: 'edge',
     subtitle: 'reverse proxy · 80/443', container: 'gba-prod-caddy-1',
-    note: 'TLS, basic_auth для деска, маршрутизація на прод і на деску',
+    note: 'єдиний вхід ззовні: TLS від Let’s Encrypt, basic_auth для деска, vhost-и на dev-сервіси. Ім’я контейнера лишилось із назви compose-проєкту gba-prod — це не продакшен.',
   },
   {
     id: 'console-proxy', label: 'nginx у консолі', group: 'edge', kind: 'edge',
@@ -195,13 +194,6 @@ export const TOPOLOGY_NODES = [
     note: 'єдиний, хто мерджить і деплоїть; він же шле сюди стан systemd-юнітів хоста',
   },
 
-  { id: 'prod-caddy-note', label: 'Прод: фронти', group: 'prod', kind: 'web', subtitle: 'client · shop', container: 'gba-prod-gba-client-1' },
-  { id: 'prod-shop', label: 'Прод: магазин', group: 'prod', kind: 'web', subtitle: 'Next.js', container: 'gba-prod-gba-ecommerce-1' },
-  { id: 'prod-concord', label: 'Прод: data-concord', group: 'prod', kind: 'api', subtitle: 'заморожено', container: 'gba-prod-data-concord-1' },
-  { id: 'prod-analytics', label: 'Прод: data-analytics', group: 'prod', kind: 'api', subtitle: 'заморожено', container: 'gba-prod-data-analytics-1' },
-  { id: 'prod-ecom-api', label: 'Прод: ecommerce-api', group: 'prod', kind: 'api', subtitle: 'заморожено', container: 'gba-prod-gba-ecommerce-api-1' },
-  { id: 'prod-mssql', label: 'Прод: MSSQL', group: 'prod', kind: 'data', subtitle: 'заморожено', container: 'gba-prod-gba-mssql-1' },
-  { id: 'prod-elastic', label: 'Прод: Elasticsearch', group: 'prod', kind: 'data', subtitle: 'заморожено', container: 'gba-prod-elasticsearch-1' },
 ]
 
 export const TOPOLOGY_EDGES = [
@@ -211,8 +203,6 @@ export const TOPOLOGY_EDGES = [
   ...PUBLIC_VHOSTS.map((item) => ({ from: item.id, to: 'caddy', label: 'vhost' })),
   ...PUBLIC_VHOSTS.map((item) => ({ from: 'caddy', to: item.target, label: 'reverse_proxy' })),
   { from: 'caddy', to: 'desk-web', label: 'basic_auth' },
-  { from: 'caddy', to: 'prod-caddy-note', label: 'прод' },
-  { from: 'caddy', to: 'prod-shop' },
   { from: 'console', to: 'console-proxy', label: 'усі виклики' },
   { from: 'console-proxy', to: 'concord', label: '/api /hubs' },
   { from: 'console-proxy', to: 'analytics', label: '/history /report' },
@@ -633,6 +623,7 @@ export class TopologyService {
       ?? path.join(process.env.DATA_DIR ?? './data', 'topology.local.json'),
   } = {}) {
     this.overlayPath = overlayPath
+    this.environment = process.env.TOPOLOGY_ENVIRONMENT ?? 'Девелопмент'
     this.dockerSocket = dockerSocket
     this.nodes = nodes
     this.edges = edges
@@ -743,6 +734,7 @@ export class TopologyService {
 
     return {
       generatedAt: new Date().toISOString(),
+      environment: this.environment,
       groups: inventory.groups,
       nodes,
       edges: inventory.edges,

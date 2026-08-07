@@ -203,6 +203,7 @@ export function ArchitectureView() {
     <section className="architecture">
       <header className="architecture-bar">
         <div className="architecture-summary">
+          {topology.environment && <span className="arch-env">{topology.environment}</span>}
           {statusOrder.map((status) => (
             <span key={status} className={`arch-chip arch-chip-${status}`}>
               <i /> {nodeStatusMeta[status].label}
