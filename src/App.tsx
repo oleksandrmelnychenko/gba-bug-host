@@ -2144,9 +2144,17 @@ function App() {
 
   useEffect(() => {
     if (deepLinkAppliedRef.current || tasks.length === 0) return
-    const requested = new URLSearchParams(window.location.search).get('task')?.trim().toUpperCase()
+    const parameters = new URLSearchParams(window.location.search)
+    const requested = parameters.get('task')?.trim().toUpperCase()
     deepLinkAppliedRef.current = true
     if (!requested) return
+
+    // Прибираємо ?task= одразу після використання: інакше він висить в адресі
+    // назавжди — потрапляє в закладки, а кожне перезавантаження знову силоміць
+    // відкриває ту саму задачу (навіть уже закриту, якої немає в таблиці).
+    parameters.delete('task')
+    const query = parameters.toString()
+    window.history.replaceState({}, '', `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`)
 
     const target = tasks.find((task) => task.id.toUpperCase() === requested)
     if (!target) {
