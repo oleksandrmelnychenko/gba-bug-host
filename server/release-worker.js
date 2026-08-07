@@ -349,7 +349,8 @@ export class ReleaseWorker {
     const slug = taskSlug(task.id)
     const branch = branchName(task.id)
     const jobDirectory = path.join(this.worktreesDirectory, slug)
-    const repos = new Set(task.agentRun?.releaseRepositories ?? [])
+    const persistedRepos = new Set(task.agentRun?.releaseRepositories ?? [])
+    const repos = new Set()
 
     for (const [repo, plan] of Object.entries(this.repoPlan)) {
       const worktree = path.join(jobDirectory, repo)
@@ -363,9 +364,30 @@ export class ReleaseWorker {
         if (commit.code !== 0) return { ok: false, kind: 'repository', reason: `commit у ${repo}: ${commit.output.slice(-200)}` }
       }
 
-      const diff = await this.runProcess('git', ['-C', plan.root, 'rev-list', '--count', `${plan.branch}..${branch}`], {})
-      if (diff.code !== 0) return { ok: false, kind: 'repository', reason: `${repo}: не вдалося порівняти ${branch} із ${plan.branch}` }
-      if (diff.output.trim() !== '0') repos.add(repo)
+      const unique = await this.runProcess(
+        'git',
+        ['-C', plan.root, 'log', '--cherry-pick', '--right-only', '--no-merges', '--format=%H', `${plan.branch}...${branch}`],
+        {},
+      )
+      if (unique.code !== 0) return { ok: false, kind: 'repository', reason: `${repo}: не вдалося порівняти ${branch} із ${plan.branch}` }
+      if (unique.output.trim()) {
+        repos.add(repo)
+        continue
+      }
+
+      // Після ручного/попереднього merge у гілці вже немає унікальних патчів,
+      // але збережений release-state ще має довезти push/deploy та фінальний статус.
+      if (persistedRepos.has(repo)) {
+        const alreadyMerged = await this.runProcess(
+          'git',
+          ['-C', plan.root, 'merge-base', '--is-ancestor', branch, plan.branch],
+          {},
+        )
+        if (alreadyMerged.code === 0) repos.add(repo)
+        else if (alreadyMerged.code !== 1) {
+          return { ok: false, kind: 'repository', reason: `${repo}: не вдалося перевірити, чи ${branch} уже в mainline` }
+        }
+      }
     }
 
     if (repos.size === 0) return { ok: true, repos: [], alreadyMerged: true }

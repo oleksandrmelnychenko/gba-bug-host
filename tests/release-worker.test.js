@@ -170,6 +170,38 @@ test('детермінована release-помилка блокується п�
   assert.match(annotations[0], /release-blocked/)
 })
 
+test('застарілий full-stack repo без унікальних патчів не потрапляє у release', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-release-main-'))
+  const worktrees = await mkdtemp(path.join(tmpdir(), 'gba-release-worktrees-'))
+  const worktree = path.join(worktrees, 'bug-2089', 'repo')
+  await mkdir(worktree, { recursive: true })
+  await writeFile(path.join(worktree, '.git'), 'gitdir fixture', 'utf8')
+  const worker = new ReleaseWorker({
+    worktreesDirectory: worktrees,
+    repoPlan: {
+      repo: { branch: 'main', root, services: [], checks: [['verify']] },
+    },
+    processRunner: async (_command, args) => {
+      if (args.includes('log')) return { code: 0, output: '' }
+      if (args.includes('merge-base')) return { code: 1, output: '' }
+      return { code: 0, output: '' }
+    },
+  })
+
+  try {
+    const outcome = await worker.releaseTask({
+      id: 'BUG-2089',
+      title: 'Console-only fix',
+      agentRun: { releaseRepositories: ['repo'] },
+    })
+
+    assert.deepEqual(outcome, { ok: true, repos: [], alreadyMerged: true })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    await rm(worktrees, { recursive: true, force: true })
+  }
+})
+
 test('перевірка нового мерджу виконується у task-worktree і не змінює mainline при падінні', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'gba-release-main-'))
   const worktrees = await mkdtemp(path.join(tmpdir(), 'gba-release-worktrees-'))
@@ -196,7 +228,7 @@ test('перевірка нового мерджу виконується у tas
     processRunner: async (command, args, options = {}) => {
       calls.push({ command, args, cwd: options.cwd })
       if (command === 'verify') return { code: 1, output: 'red' }
-      if (args.includes('rev-list')) return { code: 0, output: '1' }
+      if (args.includes('log')) return { code: 0, output: 'c'.repeat(40) }
       if (args.includes('rev-parse')) return { code: 0, output: baseline }
       if (args.includes('merge-base')) return { code: 1, output: '' }
       return { code: 0, output: '' }
@@ -251,7 +283,7 @@ test('зелений кандидат fast-forward-иться у mainline лиш
     },
     processRunner: async (command, args, options = {}) => {
       calls.push({ command, args, cwd: options.cwd })
-      if (args.includes('rev-list')) return { code: 0, output: '1' }
+      if (args.includes('log')) return { code: 0, output: 'c'.repeat(40) }
       if (args.includes('rev-parse')) return { code: 0, output: baseline }
       if (args.includes('merge-base')) return { code: 1, output: '' }
       return { code: 0, output: '' }
