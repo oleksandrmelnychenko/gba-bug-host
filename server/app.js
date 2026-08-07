@@ -6,6 +6,7 @@ import multer from 'multer'
 import { BuildNumberSource } from './build-source.js'
 import { TaskStore } from './store.js'
 import { TopologyService } from './topology.js'
+import { TranscriptionError, transcribeAudioWithShell } from './transcription.js'
 
 const allowedStatuses = new Set(['new', 'in_progress', 'ready_for_retest', 'review_again', 'done', 'blocked'])
 const allowedPriorities = new Set(['low', 'medium', 'high', 'critical'])
@@ -19,6 +20,17 @@ const allowedMediaTypes = new Map([
   ['video/mp4', { extension: '.mp4', kind: 'video', maxSize: 200 * 1024 * 1024 }],
   ['video/webm', { extension: '.webm', kind: 'video', maxSize: 200 * 1024 * 1024 }],
   ['video/quicktime', { extension: '.mov', kind: 'video', maxSize: 200 * 1024 * 1024 }],
+])
+const allowedVoiceTypes = new Map([
+  ['audio/webm', '.webm'],
+  ['video/webm', '.webm'],
+  ['audio/mp4', '.m4a'],
+  ['video/mp4', '.mp4'],
+  ['audio/mpeg', '.mp3'],
+  ['audio/mp3', '.mp3'],
+  ['audio/mpga', '.mpga'],
+  ['audio/wav', '.wav'],
+  ['audio/x-wav', '.wav'],
 ])
 
 function createFileName(file) {
@@ -120,6 +132,7 @@ export async function createApp(options = {}) {
   const store = options.store ?? new TaskStore(dataDirectory)
   const topology = options.topology ?? new TopologyService()
   topology.persist = (heartbeat) => store.saveSystemState('systemd-heartbeat', heartbeat)
+  const transcribeAudio = options.transcribeAudio ?? transcribeAudioWithShell
 
   await mkdir(uploadsDirectory, { recursive: true })
   await store.ensureReady()
@@ -135,6 +148,17 @@ export async function createApp(options = {}) {
     fileFilter: (_request, file, callback) => {
       if (!allowedMediaTypes.has(file.mimetype)) {
         callback(new multer.MulterError('LIMIT_UNEXPECTED_FILE', 'attachments'))
+        return
+      }
+      callback(null, true)
+    },
+  })
+  const voiceUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 25 * 1024 * 1024, files: 1 },
+    fileFilter: (_request, file, callback) => {
+      if (!allowedVoiceTypes.has(file.mimetype)) {
+        callback(new multer.MulterError('LIMIT_UNEXPECTED_FILE', 'audio'))
         return
       }
       callback(null, true)
@@ -182,6 +206,19 @@ export async function createApp(options = {}) {
   app.get('/api/builds/current', async (_request, response, next) => {
     try {
       response.json(await store.ensureBuild(await currentBuildNumber()))
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  app.post('/api/transcriptions', voiceUpload.single('audio'), async (request, response, next) => {
+    try {
+      if (!request.file?.size) {
+        response.status(400).json({ message: 'Спочатку запишіть голосове повідомлення.' })
+        return
+      }
+
+      response.json({ text: await transcribeAudio(request.file) })
     } catch (error) {
       next(error)
     }
@@ -437,10 +474,20 @@ export async function createApp(options = {}) {
 
   app.use((error, _request, response, _next) => {
     if (error instanceof multer.MulterError) {
-      const message = error.code === 'LIMIT_FILE_SIZE'
-        ? 'Файл завеликий. Зображення — до 10 МБ, відео — до 200 МБ.'
-        : 'Можна завантажити до 6 файлів: JPG, PNG, WEBP, GIF, AVIF, MP4, WEBM або MOV.'
+      const isVoiceUpload = error.field === 'audio'
+      const message = isVoiceUpload
+        ? error.code === 'LIMIT_FILE_SIZE'
+          ? 'Голосовий запис завеликий. Максимальний розмір — 25 МБ.'
+          : 'Цей формат аудіо не підтримується. Запишіть голос ще раз у цьому браузері.'
+        : error.code === 'LIMIT_FILE_SIZE'
+          ? 'Файл завеликий. Зображення — до 10 МБ, відео — до 200 МБ.'
+          : 'Можна завантажити до 6 файлів: JPG, PNG, WEBP, GIF, AVIF, MP4, WEBM або MOV.'
       response.status(400).json({ message })
+      return
+    }
+
+    if (error instanceof TranscriptionError) {
+      response.status(error.status).json({ message: error.message })
       return
     }
 

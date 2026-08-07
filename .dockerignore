@@ -1,9 +1,12 @@
 node_modules
 dist
 .git
+.voice-venv
+**/__pycache__
 data/tasks.json
 data/agent-runs
 data/agent-worktrees
+data/whisper-cache
 public/uploads/*
 output
 npm-debug.log*

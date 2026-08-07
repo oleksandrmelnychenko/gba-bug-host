@@ -7,6 +7,7 @@
 - створення, inline-редагування та видалення задач;
 - статуси, пріоритети, URL проблемної сторінки й технічні нотатки;
 - завантаження і перегляд зображень та відео;
+- запис опису голосом із перетворенням української мови на текст;
 - окрема SQLite-база й локальне файлове сховище;
 - автоматичний запуск Codex після створення задачі;
 - автоматичний повторний запуск через статус «Передивись ще раз»;
@@ -26,12 +27,16 @@ Worker не робить commit, push або merge. Основна робоча 
 
 ## Локальний запуск
 
-Потрібні Node.js 24+, Git, встановлений та авторизований Codex CLI.
+Потрібні Node.js 24+, Git, встановлений та авторизований Codex CLI. Для голосового вводу локально встановіть CPU-версію `faster-whisper` в окреме Python-середовище:
 
 ```bash
 npm install
-CODEX_TARGET_REPO="/absolute/path/to/gba-console" npm run dev
+python3 -m venv .voice-venv
+.voice-venv/bin/pip install faster-whisper==1.2.1
+VOICE_TRANSCRIBE_PYTHON="$PWD/.voice-venv/bin/python" CODEX_TARGET_REPO="/absolute/path/to/gba-console" npm run dev
 ```
+
+Браузер надсилає завершений запис до `/api/transcriptions`, після чого Node запускає локальний `faster-whisper` через shell і повертає текст. Зовнішній speech API та ключ для voice не потрібні. Тимчасове аудіо гарантовано видаляється й не зберігається в SQLite або uploads. Для доступу до мікрофона на віддаленому сервері сайт має працювати через HTTPS; `localhost` підтримується браузерами окремо.
 
 `npm run dev` запускає React, API та worker. Окремі команди:
 
@@ -56,6 +61,7 @@ sudo chown -R 1000:1000 /srv/gba-worktrees /srv/gba-console
 QA_DESK_PORT=4000
 APP_BUILD_NUMBER=2026.08.06.1
 OPENAI_API_KEY=your_api_key
+VOICE_TRANSCRIBE_MODEL=base
 CODEX_TARGET_REPO_HOST_PATH=/srv/gba-console
 CODEX_WORKTREES_HOST_PATH=/srv/gba-worktrees
 CODEX_NETWORK_ACCESS=false
@@ -72,6 +78,8 @@ docker compose logs -f worker
 
 Контейнери `web` і `worker` використовують спільні volumes для SQLite та uploads. Розміщуйте їх на одному сервері з локальним диском; SQLite-файл не слід тримати на NFS.
 
+Docker image для `web` містить `faster-whisper` і multilingual-модель `base`; модель завантажується один раз під час `docker compose build`. Транскрипція працює на CPU в режимі `int8` і не використовує зовнішній API.
+
 `APP_BUILD_NUMBER` має бути однаковим для `web` і `worker` та змінюватися під час кожного нового deployment. Задачі, переведені в ретест або закриті, автоматично записуються в історію цього build.
 
 Щоб Codex міг відкривати URL або завантажувати залежності, встановіть `CODEX_NETWORK_ACCESS=true`. Вмикайте це лише для довірених задач і репозиторію.
@@ -84,11 +92,11 @@ API та worker запускаються окремими процесами п�
 
 ```bash
 npm run build
-npm start
+VOICE_TRANSCRIBE_PYTHON="$PWD/.voice-venv/bin/python" npm start
 CODEX_TARGET_REPO=/srv/gba-console CODEX_WORKTREES_DIR=/srv/gba-worktrees npm run worker
 ```
 
-Для worker потрібно один раз виконати `codex login --with-api-key` або налаштувати інший підтримуваний спосіб авторизації Codex CLI.
+Для voice worker перед стартом API створіть `.voice-venv` за командами з локального запуску. Для Codex worker потрібно один раз виконати `codex login --with-api-key` або налаштувати інший підтримуваний спосіб авторизації Codex CLI.
 
 ## Дані
 

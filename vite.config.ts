@@ -5,6 +5,9 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
+    watch: {
+      ignored: ['**/.voice-venv/**', '**/data/whisper-cache/**'],
+    },
     proxy: {
       '/api': 'http://localhost:4000',
       '/uploads': 'http://localhost:4000',

@@ -1257,6 +1257,115 @@ main {
   line-height: 22px;
 }
 
+.voice-textarea {
+  position: relative;
+}
+
+.voice-textarea textarea {
+  display: block;
+  padding-right: 54px;
+  padding-bottom: 48px;
+}
+
+.voice-input-actions {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.voice-input-button {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  padding: 0;
+  color: var(--brand-600);
+  background: #fff;
+  border: 1px solid var(--gray-300);
+  border-radius: 9px;
+  box-shadow: var(--shadow-xs);
+  transition: color 150ms ease, background 150ms ease, border-color 150ms ease, transform 150ms ease;
+}
+
+.voice-input-button:hover:not(:disabled) {
+  color: var(--brand-700);
+  background: var(--brand-50);
+  border-color: var(--brand-300);
+}
+
+.voice-input-button:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.voice-input-actions.is-recording .voice-input-button {
+  color: #fff;
+  background: #d92d20;
+  border-color: #d92d20;
+  box-shadow: 0 0 0 4px #fee4e2;
+}
+
+.voice-recording-time,
+.voice-transcribing-label {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 9px;
+  color: var(--gray-600);
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid var(--gray-200);
+  border-radius: 999px;
+  box-shadow: var(--shadow-xs);
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+  line-height: 16px;
+  font-weight: 600;
+}
+
+.voice-recording-time {
+  color: #b42318;
+  border-color: #fecdca;
+}
+
+.voice-recording-time i {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  background: #d92d20;
+  border-radius: 50%;
+  animation: voice-recording-pulse 1.2s ease-in-out infinite;
+}
+
+.voice-transcribing-label {
+  color: var(--brand-700);
+  border-color: var(--brand-200);
+}
+
+.voice-input-error {
+  position: absolute;
+  left: 12px;
+  right: 56px;
+  bottom: 14px;
+  z-index: 1;
+  overflow: hidden;
+  color: #b42318;
+  background: rgba(255, 255, 255, 0.96);
+  font-size: 11px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes voice-recording-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.78); }
+}
+
 .form-field .technical-notes {
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 12px;

@@ -15,6 +15,7 @@ import {
   Layers3,
   Link2,
   LoaderCircle,
+  Mic,
   Paperclip,
   Pencil,
   Play,
@@ -47,6 +48,7 @@ import {
   reorderQueuedTask,
   resumeAgentRun,
   stopAgentRun,
+  transcribeAudio,
   updateTask,
 } from './api'
 import {
@@ -82,6 +84,20 @@ const emptyDraft: TaskDraft = {
 const statusOrder: TaskStatus[] = ['new', 'in_progress', 'review_again', 'ready_for_retest', 'blocked', 'done']
 const priorityOrder: TaskPriority[] = ['critical', 'high', 'medium', 'low']
 const pageSizeOptions = [20, 50, 100]
+const maxVoiceRecordingSeconds = 5 * 60
+const recordingMimeTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']
+
+function appendVoiceText(current: string, transcript: string) {
+  const existingText = current.trimEnd()
+  const nextText = `${existingText}${existingText ? '\n' : ''}${transcript.trim()}`
+  return nextText.slice(0, 3000)
+}
+
+function formatRecordingTime(seconds: number) {
+  const minutes = Math.floor(seconds / 60).toString().padStart(2, '0')
+  const rest = (seconds % 60).toString().padStart(2, '0')
+  return `${minutes}:${rest}`
+}
 
 type DateSortDirection = 'desc' | 'asc'
 
@@ -771,6 +787,160 @@ function UploadZone({
   )
 }
 
+function VoiceInputButton({ onTranscript }: { onTranscript: (text: string) => void }) {
+  const [phase, setPhase] = useState<'idle' | 'recording' | 'transcribing'>('idle')
+  const [elapsed, setElapsed] = useState(0)
+  const [error, setError] = useState('')
+  const recorderRef = useRef<MediaRecorder | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const mountedRef = useRef(true)
+  const recordingFailedRef = useRef(false)
+
+  const stopStream = () => {
+    streamRef.current?.getTracks().forEach((track) => track.stop())
+    streamRef.current = null
+  }
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      const recorder = recorderRef.current
+      if (recorder) {
+        recorder.ondataavailable = null
+        recorder.onstop = null
+        recorder.onerror = null
+        if (recorder.state !== 'inactive') recorder.stop()
+      }
+      stopStream()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (phase !== 'recording') return
+    const timer = window.setInterval(() => setElapsed((current) => current + 1), 1000)
+    return () => window.clearInterval(timer)
+  }, [phase])
+
+  useEffect(() => {
+    if (phase === 'recording' && elapsed >= maxVoiceRecordingSeconds && recorderRef.current?.state !== 'inactive') {
+      recorderRef.current?.stop()
+    }
+  }, [elapsed, phase])
+
+  const startRecording = async () => {
+    setError('')
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      setError('Запис голосу потребує сучасного браузера та HTTPS-з’єднання.')
+      return
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true },
+      })
+      if (!mountedRef.current) {
+        stream.getTracks().forEach((track) => track.stop())
+        return
+      }
+
+      streamRef.current = stream
+      const mimeType = recordingMimeTypes.find((candidate) => MediaRecorder.isTypeSupported(candidate))
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream)
+      const chunks: BlobPart[] = []
+      recordingFailedRef.current = false
+      recorderRef.current = recorder
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) chunks.push(event.data)
+      }
+      recorder.onerror = () => {
+        recordingFailedRef.current = true
+        stopStream()
+        if (mountedRef.current) {
+          setPhase('idle')
+          setError('Запис перервався. Спробуйте ще раз.')
+        }
+      }
+      recorder.onstop = async () => {
+        recorderRef.current = null
+        stopStream()
+        if (!mountedRef.current || recordingFailedRef.current) return
+
+        const audio = new Blob(chunks, { type: recorder.mimeType || mimeType || 'audio/webm' })
+        if (!audio.size) {
+          setPhase('idle')
+          setError('Не вдалося записати звук. Перевірте мікрофон і спробуйте ще раз.')
+          return
+        }
+
+        setPhase('transcribing')
+        try {
+          const result = await transcribeAudio(audio)
+          if (!mountedRef.current) return
+          onTranscript(result.text)
+          setPhase('idle')
+        } catch (caughtError) {
+          if (!mountedRef.current) return
+          setPhase('idle')
+          setError(caughtError instanceof Error ? caughtError.message : 'Не вдалося розпізнати голос.')
+        }
+      }
+
+      setElapsed(0)
+      recorder.start(1000)
+      setPhase('recording')
+    } catch (caughtError) {
+      stopStream()
+      const errorName = caughtError instanceof DOMException ? caughtError.name : ''
+      setError(
+        errorName === 'NotAllowedError'
+          ? 'Дозвольте доступ до мікрофона в налаштуваннях браузера.'
+          : errorName === 'NotFoundError'
+            ? 'Мікрофон не знайдено.'
+            : 'Не вдалося почати запис голосу.',
+      )
+    }
+  }
+
+  const stopRecording = () => {
+    const recorder = recorderRef.current
+    if (recorder && recorder.state !== 'inactive') recorder.stop()
+  }
+
+  const isRecording = phase === 'recording'
+  const isTranscribing = phase === 'transcribing'
+  const label = isRecording
+    ? 'Зупинити запис і перетворити голос у текст'
+    : isTranscribing
+      ? 'Розпізнаю голос'
+      : 'Записати опис голосом'
+
+  return (
+    <>
+      <div className={`voice-input-actions ${isRecording ? 'is-recording' : ''}`}>
+        {isRecording && <span className="voice-recording-time" aria-hidden="true"><i />{formatRecordingTime(elapsed)}</span>}
+        {isTranscribing && <span className="voice-transcribing-label" role="status">Перетворюю в текст…</span>}
+        <button
+          type="button"
+          className="voice-input-button"
+          onClick={isRecording ? stopRecording : startRecording}
+          disabled={isTranscribing}
+          aria-label={label}
+          title={label}
+        >
+          {isTranscribing
+            ? <LoaderCircle className="spin" size={17} />
+            : isRecording
+              ? <Square size={13} fill="currentColor" />
+              : <Mic size={18} />}
+        </button>
+      </div>
+      {error && <small className="voice-input-error" role="alert">{error}</small>}
+    </>
+  )
+}
+
 function CreateTaskDialog({
   open,
   project,
@@ -846,14 +1016,22 @@ function CreateTaskDialog({
           </div>
           <div className="form-field form-field-wide">
             <label htmlFor="new-description">Опис</label>
-            <textarea
-              id="new-description"
-              rows={4}
-              maxLength={3000}
-              value={draft.description}
-              onChange={(event) => setField('description', event.target.value)}
-              placeholder="Коротко опишіть кроки й очікуваний результат…"
-            />
+            <div className="voice-textarea">
+              <textarea
+                id="new-description"
+                rows={4}
+                maxLength={3000}
+                value={draft.description}
+                onChange={(event) => setField('description', event.target.value)}
+                placeholder="Коротко опишіть кроки й очікуваний результат…"
+              />
+              <VoiceInputButton
+                onTranscript={(text) => setDraft((current) => ({
+                  ...current,
+                  description: appendVoiceText(current.description, text),
+                }))}
+              />
+            </div>
           </div>
           <div className="form-grid">
             <div className="form-field">
@@ -1037,7 +1215,15 @@ function EditTaskDialog({
           </div>
           <div className="form-field form-field-wide">
             <label htmlFor="detail-description">Опис</label>
-            <textarea id="detail-description" rows={5} maxLength={3000} value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} />
+            <div className="voice-textarea">
+              <textarea id="detail-description" rows={5} maxLength={3000} value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} />
+              <VoiceInputButton
+                onTranscript={(text) => setDraft((current) => ({
+                  ...current,
+                  description: appendVoiceText(current.description, text),
+                }))}
+              />
+            </div>
           </div>
           <div className="form-grid">
             <div className="form-field">

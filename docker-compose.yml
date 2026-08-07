@@ -10,6 +10,10 @@ services:
       DATA_DIR: /app/data
       UPLOAD_DIR: /app/public/uploads
       BUILD_SOURCE_URL: "${BUILD_SOURCE_URL:-http://host.docker.internal:8083}"
+      VOICE_TRANSCRIBE_MODEL: "${VOICE_TRANSCRIBE_MODEL:-base}"
+      VOICE_TRANSCRIBE_DEVICE: "${VOICE_TRANSCRIBE_DEVICE:-cpu}"
+      VOICE_TRANSCRIBE_COMPUTE_TYPE: "${VOICE_TRANSCRIBE_COMPUTE_TYPE:-int8}"
+      VOICE_TRANSCRIBE_TIMEOUT_MS: "${VOICE_TRANSCRIBE_TIMEOUT_MS:-180000}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     group_add:

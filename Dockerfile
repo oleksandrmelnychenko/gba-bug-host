@@ -36,6 +36,19 @@ USER node
 CMD ["npm", "run", "worker"]
 
 FROM app-runtime AS runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates python3 python3-venv \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m venv /opt/voice \
+    && /opt/voice/bin/pip install --no-cache-dir faster-whisper==1.2.1
+ARG VOICE_TRANSCRIBE_MODEL=base
+ENV VOICE_TRANSCRIBE_PYTHON=/opt/voice/bin/python \
+    VOICE_TRANSCRIBE_MODEL=${VOICE_TRANSCRIBE_MODEL} \
+    VOICE_TRANSCRIBE_DEVICE=cpu \
+    VOICE_TRANSCRIBE_COMPUTE_TYPE=int8 \
+    WHISPER_CACHE_DIR=/opt/whisper-models
+RUN /opt/voice/bin/python -c "from faster_whisper import WhisperModel; WhisperModel('${VOICE_TRANSCRIBE_MODEL}', device='cpu', compute_type='int8', download_root='/opt/whisper-models')" \
+    && chown -R node:node /opt/whisper-models
 USER node
 EXPOSE 4000
 CMD ["npm", "start"]

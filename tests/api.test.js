@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -8,15 +8,16 @@ import test from 'node:test'
 import request from 'supertest'
 import { createApp } from '../server/app.js'
 import { TaskStore, getSeedTasks } from '../server/store.js'
+import { TranscriptionError, transcribeAudioWithShell } from '../server/transcription.js'
 
-async function withTestApp(run) {
+async function withTestApp(run, appOptions = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'gba-bug-host-'))
   const dataDirectory = path.join(root, 'data')
   const uploadsDirectory = path.join(root, 'uploads')
   const store = new TaskStore(dataDirectory)
 
   try {
-    const app = await createApp({ rootDirectory: root, dataDirectory, uploadsDirectory, store })
+    const app = await createApp({ rootDirectory: root, dataDirectory, uploadsDirectory, store, ...appOptions })
     store.transaction(() => {
       for (const task of getSeedTasks()) store.insertTask(task)
     })
@@ -36,6 +37,79 @@ test('API повертає стартові задачі та health status', as
     assert.equal(response.body.length, 5)
     assert.equal(response.body[0].id, 'BUG-1051')
   })
+})
+
+test('API перетворює голосовий запис на текст без збереження аудіо', async () => {
+  let receivedFile
+  await withTestApp(async ({ app, uploadsDirectory }) => {
+    const response = await request(app)
+      .post('/api/transcriptions')
+      .attach('audio', Buffer.from('fake-webm-audio'), {
+        filename: 'voice.webm',
+        contentType: 'audio/webm',
+      })
+      .expect(200)
+
+    assert.deepEqual(response.body, { text: 'Після натискання кнопки продаж не зберігається.' })
+    assert.equal(receivedFile.originalname, 'voice.webm')
+    assert.equal(receivedFile.mimetype, 'audio/webm')
+    assert.equal(receivedFile.buffer.toString(), 'fake-webm-audio')
+    assert.deepEqual(await readdir(uploadsDirectory), [])
+  }, {
+    transcribeAudio: async (file) => {
+      receivedFile = file
+      return 'Після натискання кнопки продаж не зберігається.'
+    },
+  })
+})
+
+test('API перевіряє голосовий файл до транскрипції', async () => {
+  await withTestApp(async ({ app }) => {
+    await request(app)
+      .post('/api/transcriptions')
+      .expect(400)
+      .expect(({ body }) => assert.match(body.message, /запишіть голосове повідомлення/i))
+
+    await request(app)
+      .post('/api/transcriptions')
+      .attach('audio', Buffer.from('not-audio'), { filename: 'voice.txt', contentType: 'text/plain' })
+      .expect(400)
+      .expect(({ body }) => assert.match(body.message, /формат аудіо не підтримується/i))
+  })
+})
+
+test('локальна транскрипція запускає shell worker і видаляє тимчасове аудіо', async () => {
+  let temporaryAudioPath = ''
+  const transcript = await transcribeAudioWithShell({
+    buffer: Buffer.from('audio'),
+    mimetype: 'audio/webm',
+    originalname: 'voice.webm',
+  }, {
+    pythonBinary: '/opt/voice/bin/python',
+    scriptPath: '/app/server/transcribe-local.py',
+    runProcess: async (command, args, options) => {
+      assert.equal(command, '/opt/voice/bin/python')
+      assert.equal(args[0], '/app/server/transcribe-local.py')
+      assert.equal(options.env, process.env)
+      temporaryAudioPath = args[1]
+      assert.equal(path.extname(temporaryAudioPath), '.webm')
+      assert.equal((await readFile(temporaryAudioPath)).toString(), 'audio')
+      return { code: 0, stdout: '{"text":"Розпізнаний опис."}\n', stderr: '', timedOut: false }
+    },
+  })
+
+  assert.equal(transcript, 'Розпізнаний опис.')
+  assert.equal(existsSync(temporaryAudioPath), false)
+  await assert.rejects(
+    () => transcribeAudioWithShell(
+      { buffer: Buffer.from('audio'), mimetype: 'audio/webm', originalname: 'voice.webm' },
+      {
+        logError: () => undefined,
+        runProcess: async () => ({ code: 1, stdout: '', stderr: "ModuleNotFoundError: No module named 'faster_whisper'", timedOut: false }),
+      },
+    ),
+    (error) => error instanceof TranscriptionError && error.status === 503,
+  )
 })
 
 test('API створює задачу зі скріншотом і оновлює її статус', async () => {

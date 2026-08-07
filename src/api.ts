@@ -38,6 +38,20 @@ export function getTaskAgentRuns(id: string) {
   return request<AgentRun[]>(`/api/tasks/${id}/agent-runs`)
 }
 
+export function transcribeAudio(audio: Blob) {
+  const mimeType = audio.type.split(';')[0] || 'audio/webm'
+  const extension = mimeType.includes('mp4')
+    ? 'm4a'
+    : mimeType.includes('mpeg') || mimeType.includes('mp3')
+      ? 'mp3'
+      : mimeType.includes('wav')
+        ? 'wav'
+        : 'webm'
+  const body = new FormData()
+  body.append('audio', audio, `voice-${Date.now()}.${extension}`)
+  return request<{ text: string }>('/api/transcriptions', { method: 'POST', body })
+}
+
 export function createTask(draft: TaskDraft, attachments: File[]) {
   const body = new FormData()
   for (const [key, value] of Object.entries(draft)) body.append(key, value)
