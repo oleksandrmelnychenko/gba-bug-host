@@ -379,6 +379,7 @@ export class ReleaseWorker {
     for (const repo of touchedRepos) {
       const plan = this.repoPlan[repo]
       if (!plan) return { ok: false, kind: 'repository', reason: `Невідомий репозиторій у release-state: ${repo}` }
+      const worktree = path.join(jobDirectory, repo)
 
       const dirty = await this.runProcess('git', ['-C', plan.root, 'status', '--porcelain'], {})
       if (dirty.output.split('\n').some((line) => line && !line.startsWith('??'))) {
@@ -390,23 +391,45 @@ export class ReleaseWorker {
       if (!baselineCommit) return { ok: false, kind: 'repository', reason: `${repo}: не вдалося зафіксувати HEAD перед мерджем` }
 
       const ancestor = await this.runProcess('git', ['-C', plan.root, 'merge-base', '--is-ancestor', branch, plan.branch], {})
-      let mergedNow = false
       if (ancestor.code === 1) {
-        const merge = await this.runProcess('git', ['-C', plan.root, 'merge', '--no-edit', branch], {})
-        if (merge.code !== 0) {
-          await this.runProcess('git', ['-C', plan.root, 'merge', '--abort'], {})
+        if (!(await pathExists(path.join(worktree, '.git')))) {
+          return { ok: false, kind: 'repository', reason: `${repo}: немає worktree для безпечної перевірки ${branch}` }
+        }
+
+        // Спершу вливаємо актуальний mainline у task-worktree та перевіряємо
+        // кандидата там. Mainline не змінюється до зелених тестів, тому crash
+        // або рестарт release-worker не може лишити його на червоному мерджі.
+        const mergeMainline = await this.runProcess('git', ['-C', worktree, 'merge', '--no-edit', plan.branch], {})
+        if (mergeMainline.code !== 0) {
+          await this.runProcess('git', ['-C', worktree, 'merge', '--abort'], {})
           return { ok: false, kind: 'conflict', reason: `${repo}: конфлікт мерджу з ${branch}` }
         }
-        mergedNow = true
+
+        for (const check of plan.checks) {
+          const result = await this.runProcess(check[0], check.slice(1), { cwd: worktree })
+          if (result.code !== 0) {
+            return { ok: false, kind: 'validation', reason: `${repo}: перевірка «${check.join(' ')}» впала; mainline не змінено` }
+          }
+        }
+
+        const currentMainline = await this.runProcess('git', ['-C', plan.root, 'rev-parse', 'HEAD'], {})
+        const currentMainlineCommit = /\b[0-9a-f]{40}\b/.exec(currentMainline.output)?.[0]
+        if (currentMainlineCommit !== baselineCommit) {
+          return { ok: false, kind: 'transient', reason: `${repo}: mainline змінився під час перевірки — кандидат буде перевірено повторно` }
+        }
+
+        const publish = await this.runProcess('git', ['-C', plan.root, 'merge', '--ff-only', branch], {})
+        if (publish.code !== 0) {
+          return { ok: false, kind: 'transient', reason: `${repo}: не вдалося fast-forward перевіреного ${branch}` }
+        }
       } else if (ancestor.code !== 0) {
         return { ok: false, kind: 'repository', reason: `${repo}: не вдалося перевірити стан merge для ${branch}` }
-      }
-
-      for (const check of plan.checks) {
-        const result = await this.runProcess(check[0], check.slice(1), { cwd: plan.root })
-        if (result.code !== 0) {
-          if (mergedNow) await this.runProcess('git', ['-C', plan.root, 'reset', '--hard', baselineCommit], {})
-          return { ok: false, kind: 'validation', reason: `${repo}: перевірка «${check.join(' ')}» впала${mergedNow ? '; мердж відкочено' : ''}` }
+      } else {
+        for (const check of plan.checks) {
+          const result = await this.runProcess(check[0], check.slice(1), { cwd: plan.root })
+          if (result.code !== 0) {
+            return { ok: false, kind: 'validation', reason: `${repo}: перевірка «${check.join(' ')}» впала` }
+          }
         }
       }
 

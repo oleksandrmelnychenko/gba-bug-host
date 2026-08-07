@@ -170,6 +170,114 @@ test('детермінована release-помилка блокується п�
   assert.match(annotations[0], /release-blocked/)
 })
 
+test('перевірка нового мерджу виконується у task-worktree і не змінює mainline при падінні', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-release-main-'))
+  const worktrees = await mkdtemp(path.join(tmpdir(), 'gba-release-worktrees-'))
+  const task = {
+    id: 'BUG-2090',
+    title: 'Crash-safe validation',
+    agentRun: { id: 'RUN-2090', releaseRepositories: [] },
+  }
+  const worktree = path.join(worktrees, 'bug-2090', 'repo')
+  await mkdir(worktree, { recursive: true })
+  await writeFile(path.join(worktree, '.git'), 'gitdir fixture', 'utf8')
+  const calls = []
+  const baseline = 'a'.repeat(40)
+  const worker = new ReleaseWorker({
+    worktreesDirectory: worktrees,
+    repoPlan: {
+      repo: {
+        branch: 'main',
+        root,
+        services: [],
+        checks: [['verify', 'candidate']],
+      },
+    },
+    processRunner: async (command, args, options = {}) => {
+      calls.push({ command, args, cwd: options.cwd })
+      if (command === 'verify') return { code: 1, output: 'red' }
+      if (args.includes('rev-list')) return { code: 0, output: '1' }
+      if (args.includes('rev-parse')) return { code: 0, output: baseline }
+      if (args.includes('merge-base')) return { code: 1, output: '' }
+      return { code: 0, output: '' }
+    },
+  })
+  worker.updateRelease = async () => {}
+
+  try {
+    const outcome = await worker.releaseTask(task)
+
+    assert.equal(outcome.ok, false)
+    assert.equal(outcome.kind, 'validation')
+    assert.equal(
+      calls.find((call) => call.command === 'verify')?.cwd,
+      worktree)
+    assert.equal(
+      calls.some((call) => call.args.includes('--ff-only')),
+      false,
+      'mainline не можна рухати до зелених тестів')
+    assert.equal(
+      calls.some((call) => call.args.includes('reset')),
+      false,
+      'після падіння немає що відкочувати у mainline')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    await rm(worktrees, { recursive: true, force: true })
+  }
+})
+
+test('зелений кандидат fast-forward-иться у mainline лише після перевірки незмінного baseline', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-release-main-'))
+  const worktrees = await mkdtemp(path.join(tmpdir(), 'gba-release-worktrees-'))
+  const task = {
+    id: 'BUG-2091',
+    title: 'Validated publish',
+    agentRun: { id: 'RUN-2091', releaseRepositories: [] },
+  }
+  const worktree = path.join(worktrees, 'bug-2091', 'repo')
+  await mkdir(worktree, { recursive: true })
+  await writeFile(path.join(worktree, '.git'), 'gitdir fixture', 'utf8')
+  const calls = []
+  const baseline = 'b'.repeat(40)
+  const worker = new ReleaseWorker({
+    worktreesDirectory: worktrees,
+    repoPlan: {
+      repo: {
+        branch: 'main',
+        root,
+        services: [],
+        checks: [['verify', 'candidate']],
+      },
+    },
+    processRunner: async (command, args, options = {}) => {
+      calls.push({ command, args, cwd: options.cwd })
+      if (args.includes('rev-list')) return { code: 0, output: '1' }
+      if (args.includes('rev-parse')) return { code: 0, output: baseline }
+      if (args.includes('merge-base')) return { code: 1, output: '' }
+      return { code: 0, output: '' }
+    },
+  })
+  worker.updateRelease = async () => {}
+
+  try {
+    const outcome = await worker.releaseTask(task)
+    const checkIndex = calls.findIndex((call) => call.command === 'verify')
+    const publishIndex = calls.findIndex((call) => call.args.includes('--ff-only'))
+
+    assert.equal(outcome.ok, true)
+    assert.ok(checkIndex >= 0)
+    assert.ok(publishIndex > checkIndex)
+    assert.equal(calls[checkIndex].cwd, worktree)
+    assert.equal(calls[publishIndex].args.at(-1), 'codex/qa-bug-2091')
+    assert.equal(
+      calls.some((call) => call.command === 'git' && call.args.includes('push')),
+      true)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    await rm(worktrees, { recursive: true, force: true })
+  }
+})
+
 test('deploy failure лишає задачу retrying, а наступний успіх завершує release', async () => {
   const task = {
     id: 'BUG-2002',
