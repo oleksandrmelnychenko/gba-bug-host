@@ -11,7 +11,12 @@ class ApiError extends Error {
 }
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(url, options)
+  let response: Response
+  try {
+    response = await fetch(url, { credentials: 'same-origin', ...options })
+  } catch {
+    throw new ApiError('Не вдалося з’єднатися із сервером. Перевірте мережу та спробуйте ще раз.', 0)
+  }
 
   if (!response.ok) {
     const payload = await response.json().catch(() => ({ message: 'Сталася помилка.' })) as { message?: string }
@@ -38,7 +43,7 @@ export function getTaskAgentRuns(id: string) {
   return request<AgentRun[]>(`/api/tasks/${id}/agent-runs`)
 }
 
-export function transcribeAudio(audio: Blob) {
+function createTranscriptionBody(audio: Blob) {
   const mimeType = audio.type.split(';')[0] || 'audio/webm'
   const extension = mimeType.includes('mp4')
     ? 'm4a'
@@ -49,7 +54,21 @@ export function transcribeAudio(audio: Blob) {
         : 'webm'
   const body = new FormData()
   body.append('audio', audio, `voice-${Date.now()}.${extension}`)
-  return request<{ text: string }>('/api/transcriptions', { method: 'POST', body })
+  return body
+}
+
+export async function transcribeAudio(audio: Blob) {
+  const send = () => request<{ text: string }>('/api/transcriptions', {
+    method: 'POST',
+    body: createTranscriptionBody(audio),
+  })
+
+  try {
+    return await send()
+  } catch (error) {
+    if (!(error instanceof ApiError) || error.status !== 0) throw error
+    return send()
+  }
 }
 
 export function createTask(draft: TaskDraft, attachments: File[]) {

@@ -87,10 +87,10 @@ const pageSizeOptions = [20, 50, 100]
 const maxVoiceRecordingSeconds = 5 * 60
 const recordingMimeTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']
 
-function appendVoiceText(current: string, transcript: string) {
+function appendVoiceText(current: string, transcript: string, maxLength = 3000) {
   const existingText = current.trimEnd()
   const nextText = `${existingText}${existingText ? '\n' : ''}${transcript.trim()}`
-  return nextText.slice(0, 3000)
+  return nextText.slice(0, maxLength)
 }
 
 function formatRecordingTime(seconds: number) {
@@ -1502,17 +1502,22 @@ function ReviewAgainDialog({
           </div>
           <div className="form-field form-field-wide">
             <label htmlFor="review-comment">Коментар для AI <span>*</span></label>
-            <textarea
-              id="review-comment"
-              autoFocus
-              required
-              minLength={3}
-              maxLength={5000}
-              rows={6}
-              value={comment}
-              onChange={(event) => setComment(event.target.value)}
-              placeholder="Наприклад: форма вже відкривається, але після натискання «Зберегти» все ще повертається 500. Перевір POST /api/orders…"
-            />
+            <div className="voice-textarea">
+              <textarea
+                id="review-comment"
+                autoFocus
+                required
+                minLength={3}
+                maxLength={5000}
+                rows={6}
+                value={comment}
+                onChange={(event) => setComment(event.target.value)}
+                placeholder="Наприклад: форма вже відкривається, але після натискання «Зберегти» все ще повертається 500. Перевір POST /api/orders…"
+              />
+              <VoiceInputButton
+                onTranscript={(text) => setComment((current) => appendVoiceText(current, text, 5000))}
+              />
+            </div>
             <small className="field-counter">{comment.length} / 5000</small>
           </div>
           {request.task.reviewComment && (
