@@ -14,7 +14,7 @@ export const defaultRepoPlan = {
     root: '/root/projects/gba_console',
     services: ['gba-console'],
     checks: [
-      ['npx', 'vitest', 'run', '--silent'],
+      ['npx', 'vitest', 'run', '--silent', '--maxWorkers=8'],
       ['npm', 'run', 'build'],
     ],
   },
@@ -33,7 +33,7 @@ export const defaultRepoPlan = {
     root: '/root/projects/gba_ecommerce',
     services: ['gba-ecommerce'],
     checks: [
-      ['npx', 'vitest', 'run', '--silent'],
+      ['npx', 'vitest', 'run', '--silent', '--maxWorkers=8'],
       ['npx', 'next', 'build'],
     ],
   },

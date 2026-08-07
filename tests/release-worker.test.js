@@ -392,3 +392,11 @@ test('план покриває всі сервіси, що збираються
     assert.deepEqual(defaultRepoPlan[repo].services, services, repo)
   }
 })
+
+test('release-тести frontend обмежують кількість Vitest workers', () => {
+  for (const repo of ['gba_console', 'gba_ecommerce']) {
+    const vitest = defaultRepoPlan[repo].checks.find((check) => check.includes('vitest'))
+    assert.ok(vitest, repo)
+    assert.equal(vitest.includes('--maxWorkers=8'), true, repo)
+  }
+})
