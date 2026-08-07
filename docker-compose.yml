@@ -12,6 +12,8 @@ services:
       BUILD_SOURCE_URL: "${BUILD_SOURCE_URL:-http://host.docker.internal:8083}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    group_add:
+      - "${DOCKER_GID:-983}"
     ports:
       - "127.0.0.1:${QA_DESK_PORT:-4000}:4000"
     networks:
@@ -21,6 +23,7 @@ services:
     volumes:
       - qa-data:/app/data
       - qa-uploads:/app/public/uploads
+      - /var/run/docker.sock:/var/run/docker.sock:ro
 
   worker:
     build:

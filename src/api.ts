@@ -1,4 +1,4 @@
-import type { AgentRun, BuildInfo, Task, TaskDraft } from './types'
+import type { AgentRun, BuildInfo, Task, TaskDraft, Topology } from './types'
 
 class ApiError extends Error {
   status: number
@@ -28,6 +28,10 @@ export function getTasks() {
 
 export function getCurrentBuild() {
   return request<BuildInfo>('/api/builds/current')
+}
+
+export function getTopology() {
+  return request<Topology>('/api/topology')
 }
 
 export function getTaskAgentRuns(id: string) {

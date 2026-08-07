@@ -246,6 +246,11 @@ export class TaskStore {
         task_status TEXT NOT NULL,
         PRIMARY KEY (build_number, task_id)
       );
+      CREATE TABLE IF NOT EXISTS system_state (
+        key TEXT PRIMARY KEY,
+        payload TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
       CREATE INDEX IF NOT EXISTS idx_attachments_task_id ON attachments(task_id);
       CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_agent_runs_task_id ON agent_runs(task_id, created_at DESC);
@@ -690,6 +695,24 @@ export class TaskStore {
       .prepare("UPDATE agent_runs SET status = 'failed', control = '', error = 'Знято оператором як зависле виконання.', finished_at = ?, updated_at = ? WHERE id = ?")
       .run(now, now, row.id)
     return this.findAgentRun(row.id)
+  }
+
+  saveSystemState(key, payload) {
+    const updatedAt = new Date().toISOString()
+    this.database
+      .prepare('INSERT OR REPLACE INTO system_state (key, payload, updated_at) VALUES (?, ?, ?)')
+      .run(key, JSON.stringify(payload), updatedAt)
+    return { ...payload, updatedAt }
+  }
+
+  readSystemState(key) {
+    const row = this.database.prepare('SELECT payload, updated_at FROM system_state WHERE key = ?').get(key)
+    if (!row) return null
+    try {
+      return { ...JSON.parse(row.payload), updatedAt: row.updated_at }
+    } catch {
+      return null
+    }
   }
 
   ensureBuild(buildNumber) {

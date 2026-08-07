@@ -5,6 +5,7 @@ import express from 'express'
 import multer from 'multer'
 import { BuildNumberSource } from './build-source.js'
 import { TaskStore } from './store.js'
+import { TopologyService } from './topology.js'
 
 const allowedStatuses = new Set(['new', 'in_progress', 'ready_for_retest', 'review_again', 'done', 'blocked'])
 const allowedPriorities = new Set(['low', 'medium', 'high', 'critical'])
@@ -117,10 +118,13 @@ export async function createApp(options = {}) {
   const buildSource = options.buildSource ?? new BuildNumberSource({ fallback: buildNumber })
   const currentBuildNumber = () => buildSource.current()
   const store = options.store ?? new TaskStore(dataDirectory)
+  const topology = options.topology ?? new TopologyService()
+  topology.persist = (heartbeat) => store.saveSystemState('systemd-heartbeat', heartbeat)
 
   await mkdir(uploadsDirectory, { recursive: true })
   await store.ensureReady()
   store.ensureBuild(await currentBuildNumber())
+  topology.restoreHeartbeat(store.readSystemState('systemd-heartbeat'))
 
   const upload = multer({
     storage: multer.diskStorage({
@@ -144,6 +148,27 @@ export async function createApp(options = {}) {
 
   app.get('/api/health', (_request, response) => {
     response.json({ ok: true })
+  })
+
+  app.get('/api/topology', async (_request, response, next) => {
+    try {
+      response.json(await topology.collect())
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  app.get('/api/system/units', (_request, response) => {
+    response.json({ units: topology.units() })
+  })
+
+  app.post('/api/system/heartbeat', (request, response) => {
+    const units = request.body?.units
+    if (!units || typeof units !== 'object' || Array.isArray(units)) {
+      response.status(422).json({ errors: ['Очікується об’єкт units із станами systemd-юнітів.'] })
+      return
+    }
+    response.json(topology.recordHeartbeat({ units, host: cleanText(request.body?.host) }))
   })
 
   app.get('/api/tasks', async (_request, response, next) => {

@@ -64,6 +64,7 @@ import {
   type TaskProject,
   type TaskStatus,
 } from './types'
+import { ArchitectureView } from './ArchitectureView'
 import gbaLogo from './assets/brand/gba-logo.svg'
 
 const emptyDraft: TaskDraft = {
@@ -84,13 +85,14 @@ const pageSizeOptions = [20, 50, 100]
 
 type DateSortDirection = 'desc' | 'asc'
 
-type WorkspaceTab = TaskProject | 'auto' | 'pipeline'
+type WorkspaceTab = TaskProject | 'auto' | 'pipeline' | 'architecture'
 
 const workspaceTabs: Array<{ key: WorkspaceTab; label: string }> = [
   { key: 'console', label: projectMeta.console.label },
   { key: 'ecommerce', label: projectMeta.ecommerce.label },
   { key: 'auto', label: 'Логи (авто)' },
   { key: 'pipeline', label: 'Конвеєр' },
+  { key: 'architecture', label: 'Архітектура' },
 ]
 
 const RELEASED_MARKER = /\[released:([^\]]+)\]/
@@ -2195,6 +2197,18 @@ function App() {
         <section className="workspace">
           <nav className="project-tabs" aria-label="Проєкти">
             {workspaceTabs.map((tab) => {
+              if (tab.key === 'architecture') {
+                return (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    className={`project-tab${activeTab === tab.key ? ' project-tab-active' : ''}`}
+                    onClick={() => setActiveTab(tab.key)}
+                  >
+                    {tab.label}
+                  </button>
+                )
+              }
               const count = tab.key === 'pipeline'
                 ? tasks.filter((task) => task.agentRun?.status === 'queued' || task.agentRun?.status === 'running').length
                 : tab.key === 'auto'
@@ -2213,7 +2227,9 @@ function App() {
               )
             })}
           </nav>
-          {activeTab === 'pipeline' ? (
+          {activeTab === 'architecture' ? (
+            <ArchitectureView />
+          ) : activeTab === 'pipeline' ? (
             loading ? (
               <div className="loading-state"><LoaderCircle className="spin" /><span>Завантажую конвеєр…</span></div>
             ) : (
@@ -2297,7 +2313,7 @@ function App() {
 
       <CreateTaskDialog
         open={createOpen}
-        project={activeTab === 'auto' || activeTab === 'pipeline' ? 'console' : activeTab}
+        project={activeTab === 'console' || activeTab === 'ecommerce' ? activeTab : 'console'}
         onClose={() => setCreateOpen(false)}
         onCreated={handleCreated}
       />

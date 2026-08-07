@@ -93,6 +93,23 @@ export function selectReleasableTasks(tasks) {
     task.status !== 'done')
 }
 
+export function parseUnitStates(output) {
+  const units = {}
+  let currentId = null
+  for (const line of (output ?? '').split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed.startsWith('Id=')) {
+      currentId = trimmed.slice(3)
+      continue
+    }
+    if (trimmed.startsWith('ActiveState=') && currentId) {
+      units[currentId] = trimmed.slice('ActiveState='.length)
+      currentId = null
+    }
+  }
+  return units
+}
+
 function runProcess(command, args, { cwd } = {}) {
   return new Promise((resolve) => {
     const child = spawn(command, args, { cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -121,6 +138,7 @@ export class ReleaseWorker {
     repoPlan = defaultRepoPlan,
     pollIntervalMs = Number.parseInt(process.env.RELEASE_POLL_INTERVAL_MS ?? '30000', 10),
     settleMs = Number.parseInt(process.env.RELEASE_SETTLE_MS ?? '180000', 10),
+    heartbeatIntervalMs = Number.parseInt(process.env.RELEASE_HEARTBEAT_INTERVAL_MS ?? '30000', 10),
   } = {}) {
     this.deskBaseUrl = deskBaseUrl.replace(/\/$/, '')
     this.worktreesDirectory = worktreesDirectory
@@ -128,6 +146,7 @@ export class ReleaseWorker {
     this.repoPlan = repoPlan
     this.pollIntervalMs = pollIntervalMs
     this.settleMs = settleMs
+    this.heartbeatIntervalMs = heartbeatIntervalMs
     this.busy = false
     this.firstSeenAt = new Map()
   }
@@ -135,7 +154,33 @@ export class ReleaseWorker {
   start() {
     setInterval(() => void this.tick(), this.pollIntervalMs)
     void this.tick()
+    setInterval(() => void this.reportHostUnits(), this.heartbeatIntervalMs)
+    void this.reportHostUnits()
     console.log('[release] воркер запущено: completed → merge → тести → push → deploy')
+  }
+
+  async reportHostUnits() {
+    // Список юнітів диктує інвентар дески: systemctl-глоб бачить лише завантажені
+    // юніти, тож вимкнений таймер через глоб просто зникає замість «inactive».
+    const wanted = await fetch(`${this.deskBaseUrl}/api/system/units`)
+      .then((response) => response.json())
+      .then((payload) => payload?.units ?? [])
+      .catch(() => [])
+    if (wanted.length === 0) return
+
+    const shown = await runProcess(
+      'systemctl',
+      ['show', '--no-pager', '--property=Id', '--property=ActiveState', ...wanted],
+      {},
+    )
+    if (shown.code !== 0) return
+    const units = parseUnitStates(shown.output)
+    if (Object.keys(units).length === 0) return
+    await fetch(`${this.deskBaseUrl}/api/system/heartbeat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ units, host: 'gba-host' }),
+    }).catch((error) => console.error(`[release] heartbeat: ${error.message}`))
   }
 
   async tick() {
