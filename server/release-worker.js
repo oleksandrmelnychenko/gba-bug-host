@@ -4,6 +4,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const RELEASE_MARKER = /\[released:([^\]\s]+)/
+const SENTINEL_MARKER = /\[sentinel:[0-9a-f]{12}\]/
 
 export const defaultRepoPlan = {
   gba_console: {
@@ -75,6 +76,14 @@ export function isSandboxLimitedReview(task) {
   if (!run || run.status !== 'needs_review') return false
   const text = `${run.summary ?? ''}\n${run.error ?? ''}`
   return SANDBOX_LIMIT_PATTERNS.some((pattern) => pattern.test(text))
+}
+
+export function isSentinelTask(task) {
+  return SENTINEL_MARKER.test(task.notes ?? '') || /^\[AUTO\]/.test(task.title ?? '')
+}
+
+export function releaseStatusFor(task) {
+  return isSentinelTask(task) ? 'done' : 'ready_for_retest'
 }
 
 export function selectReleasableTasks(tasks) {
@@ -190,11 +199,16 @@ export class ReleaseWorker {
 
     const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ')
     for (const { task, alreadyMerged } of released) {
-      await this.annotate(task, alreadyMerged
-        ? `[released:${stamp}] гілки вже були влиті вручну`
-        : `[released:${stamp}] змерджено і задеплоєно на dev`)
-      if (task.status !== 'done') await this.setStatus(task, 'ready_for_retest')
-      console.log(`[release] ${task.id}: випущено${alreadyMerged ? ' (вже було влито)' : ''}`)
+      const status = releaseStatusFor(task)
+      const closing = status === 'done'
+      await this.annotate(task, [
+        alreadyMerged
+          ? `[released:${stamp}] гілки вже були влиті вручну`
+          : `[released:${stamp}] змерджено і задеплоєно на dev`,
+        closing ? '[auto-closed] лог-задача: фікс у мейнлайні й на dev; якщо помилка повториться — вартовий заведе нову' : '',
+      ].filter(Boolean).join('\n'))
+      if (task.status !== status) await this.setStatus(task, status)
+      console.log(`[release] ${task.id}: випущено${alreadyMerged ? ' (вже було влито)' : ''}${closing ? ' і закрито' : ''}`)
     }
   }
 

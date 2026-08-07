@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { branchName, defaultRepoPlan, isReleased, isSandboxLimitedReview, selectReleasableTasks, taskSlug } from '../server/release-worker.js'
+import { branchName, defaultRepoPlan, isReleased, isSandboxLimitedReview, isSentinelTask, releaseStatusFor, selectReleasableTasks, taskSlug } from '../server/release-worker.js'
 
 test('слаг і назва гілки збігаються з worker-конвенцією', () => {
   assert.equal(taskSlug('BUG-1024'), 'bug-1024')
@@ -48,6 +48,19 @@ test('sandbox-вердикт потрапляє у вибірку релізу',
     { id: 'T', status: 'done', notes: '', agentRun: { status: 'needs_review', summary: 'sandbox блокує dotnet test' } },
   ]
   assert.deepEqual(selectReleasableTasks(tasks).map((task) => task.id), ['S'])
+})
+
+test('лог-задача вартового впізнається за маркером і за заголовком', () => {
+  assert.equal(isSentinelTask({ notes: '[sentinel:abcdef123456] build:x' }), true)
+  assert.equal(isSentinelTask({ title: '[AUTO] gba-ecommerce-api: NullReferenceException' }), true)
+  assert.equal(isSentinelTask({ notes: '[released:2026-08-07 01:00]', title: 'Пошук падає' }), false)
+  assert.equal(isSentinelTask({}), false)
+})
+
+test('після релізу лог-задача закривається, людська йде на ретест', () => {
+  assert.equal(releaseStatusFor({ notes: '[sentinel:abcdef123456]' }), 'done')
+  assert.equal(releaseStatusFor({ title: '[AUTO] console: TypeError' }), 'done')
+  assert.equal(releaseStatusFor({ title: 'Кошик губить позицію', notes: '' }), 'ready_for_retest')
 })
 
 test('план покриває всі сервіси, що збираються з цих репозиторіїв', () => {
