@@ -708,8 +708,23 @@ export class TaskStore {
 
   claimNextCleanupRun() {
     return this.transaction(() => {
+      // Worktree спільний для ВСІХ прогонів задачі, тож відкат старої спроби
+      // зносить теку під ногами свіжого рана (так загинула спроба 5 BUG-1003:
+      // «зовнішній процес видалив робочу директорію»). Чекаємо, поки задача
+      // звільниться, і аж тоді прибираємо.
       const row = this.database
-        .prepare("SELECT * FROM agent_runs WHERE status = 'blocked' AND control = 'stop_revert' ORDER BY updated_at ASC LIMIT 1")
+        .prepare(`
+          SELECT * FROM agent_runs AS candidate
+          WHERE candidate.status = 'blocked'
+            AND candidate.control = 'stop_revert'
+            AND NOT EXISTS (
+              SELECT 1 FROM agent_runs AS active
+              WHERE active.task_id = candidate.task_id
+                AND active.status IN ('queued', 'running')
+            )
+          ORDER BY candidate.updated_at ASC
+          LIMIT 1
+        `)
         .get()
       if (!row) return null
       const updated = this.database

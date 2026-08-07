@@ -613,3 +613,28 @@ test('фінальний release-state відхиляється без узго�
       .expect(422)
   })
 })
+
+test('очищення worktree чекає, поки задача звільниться від активних прогонів', async () => {
+  await withTestApp(async ({ app, store }) => {
+    const created = await request(app).post('/api/tasks').field('title', 'Гонка відкату').expect(201)
+    const first = store.claimNextAgentRun('worker-1')
+    await request(app)
+      .post(`/api/tasks/${created.body.id}/agent-runs/stop`)
+      .send({ revert: true })
+      .expect(200)
+    // Воркер підтвердив зупинку: ран блокований і чекає на відкат worktree.
+    store.updateAgentRun(first.id, { status: 'blocked', finishedAt: new Date().toISOString() })
+    assert.equal(store.findAgentRun(first.id).control, 'stop_revert')
+
+    // Нова спроба вже працює в ТІЙ САМІЙ теці worktree — саме так спроба 5
+    // BUG-1003 лишилась без файлів, коли відкат старої спроби зніс каталог.
+    store.enqueueAgentRun('RUN-RACE-2', created.body.id, 'manual')
+    const second = store.claimNextAgentRun('worker-1')
+    assert.equal(second.status, 'running')
+    assert.equal(store.claimNextCleanupRun(), null, 'поки задача зайнята, прибирання не стартує')
+
+    store.updateAgentRun(second.id, { status: 'completed', finishedAt: new Date().toISOString() })
+    const cleanup = store.claimNextCleanupRun()
+    assert.equal(cleanup?.id, first.id, 'після звільнення задачі прибирання відпрацьовує')
+  })
+})
