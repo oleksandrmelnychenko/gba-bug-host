@@ -428,9 +428,9 @@ export class ReleaseWorker {
         }
 
         for (const check of plan.checks) {
-          const result = await this.runProcess(check[0], check.slice(1), { cwd: worktree })
+          const result = await this.runReleaseCheck(repo, check, worktree)
           if (result.code !== 0) {
-            return { ok: false, kind: 'validation', reason: `${repo}: перевірка «${check.join(' ')}» впала; mainline не змінено` }
+            return { ok: false, kind: 'validation', reason: `${repo}: перевірка «${check.join(' ')}» впала двічі; mainline не змінено` }
           }
         }
 
@@ -448,9 +448,9 @@ export class ReleaseWorker {
         return { ok: false, kind: 'repository', reason: `${repo}: не вдалося перевірити стан merge для ${branch}` }
       } else {
         for (const check of plan.checks) {
-          const result = await this.runProcess(check[0], check.slice(1), { cwd: plan.root })
+          const result = await this.runReleaseCheck(repo, check, plan.root)
           if (result.code !== 0) {
-            return { ok: false, kind: 'validation', reason: `${repo}: перевірка «${check.join(' ')}» впала` }
+            return { ok: false, kind: 'validation', reason: `${repo}: перевірка «${check.join(' ')}» впала двічі` }
           }
         }
       }
@@ -460,6 +460,15 @@ export class ReleaseWorker {
     }
 
     return { ok: true, repos: touchedRepos }
+  }
+
+  async runReleaseCheck(repo, check, cwd) {
+    const run = () => this.runProcess(check[0], check.slice(1), { cwd })
+    const first = await run()
+    if (first.code === 0) return first
+
+    console.warn(`[release] ${repo}: перевірка «${check.join(' ')}» впала, повторюю один раз`)
+    return run()
   }
 
   async updateRelease(task, values) {

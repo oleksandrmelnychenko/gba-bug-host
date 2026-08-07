@@ -310,6 +310,55 @@ test('зелений кандидат fast-forward-иться у mainline лиш
   }
 })
 
+test('одноразовий флейк перевірки повторюється і не блокує release', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-release-main-'))
+  const worktrees = await mkdtemp(path.join(tmpdir(), 'gba-release-worktrees-'))
+  const worktree = path.join(worktrees, 'bug-2092', 'repo')
+  await mkdir(worktree, { recursive: true })
+  await writeFile(path.join(worktree, '.git'), 'gitdir fixture', 'utf8')
+  const task = {
+    id: 'BUG-2092',
+    title: 'Flaky validation',
+    agentRun: { id: 'RUN-2092', releaseRepositories: [] },
+  }
+  const baseline = 'd'.repeat(40)
+  let validationAttempts = 0
+  const worker = new ReleaseWorker({
+    worktreesDirectory: worktrees,
+    repoPlan: {
+      repo: {
+        branch: 'main',
+        root,
+        services: [],
+        checks: [['verify', 'candidate']],
+      },
+    },
+    processRunner: async (command, args) => {
+      if (command === 'verify') {
+        validationAttempts += 1
+        return validationAttempts === 1
+          ? { code: 1, output: 'timing flake' }
+          : { code: 0, output: 'green retry' }
+      }
+      if (args.includes('log')) return { code: 0, output: 'e'.repeat(40) }
+      if (args.includes('rev-parse')) return { code: 0, output: baseline }
+      if (args.includes('merge-base')) return { code: 1, output: '' }
+      return { code: 0, output: '' }
+    },
+  })
+  worker.updateRelease = async () => {}
+
+  try {
+    const outcome = await worker.releaseTask(task)
+
+    assert.equal(outcome.ok, true)
+    assert.equal(validationAttempts, 2)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    await rm(worktrees, { recursive: true, force: true })
+  }
+})
+
 test('deploy failure лишає задачу retrying, а наступний успіх завершує release', async () => {
   const task = {
     id: 'BUG-2002',
