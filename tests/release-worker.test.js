@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { branchName, defaultRepoPlan, isReleased, isSandboxLimitedReview, isSentinelTask, releaseStatusFor, selectReleasableTasks, taskSlug } from '../server/release-worker.js'
+import { branchName, defaultRepoPlan, hasWorkNewerThanGate, isReleased, isSandboxLimitedReview, isSentinelTask, lastGateAt, releaseStatusFor, selectReleasableTasks, taskSlug } from '../server/release-worker.js'
 
 test('слаг і назва гілки збігаються з worker-конвенцією', () => {
   assert.equal(taskSlug('BUG-1024'), 'bug-1024')
@@ -61,6 +61,37 @@ test('після релізу лог-задача закривається, лю
   assert.equal(releaseStatusFor({ notes: '[sentinel:abcdef123456]' }), 'done')
   assert.equal(releaseStatusFor({ title: '[AUTO] console: TypeError' }), 'done')
   assert.equal(releaseStatusFor({ title: 'Кошик губить позицію', notes: '' }), 'ready_for_retest')
+})
+
+test('нова робота після релізу знову потрапляє у вибірку', () => {
+  const released = { id: 'A', status: 'ready_for_retest', notes: '[released:2026-08-07 00:20] змерджено' }
+  const stale = { ...released, agentRun: { status: 'completed', finishedAt: '2026-08-06T23:00:00.000Z' } }
+  const fresh = { ...released, agentRun: { status: 'completed', finishedAt: '2026-08-07T08:24:15.000Z' } }
+
+  assert.equal(selectReleasableTasks([stale]).length, 0, 'старий прогін не перевипускаємо')
+  assert.equal(selectReleasableTasks([fresh]).length, 1, 'друга спроба Codex має доїхати в мейнлайн')
+})
+
+test('заблокована задача чекає нового прогону, а не ретраїться вічно', () => {
+  const blocked = { id: 'B', status: 'blocked', notes: '[release-blocked:2026-08-07 11:54] конфлікт мерджу' }
+
+  assert.equal(hasWorkNewerThanGate({ ...blocked, agentRun: { finishedAt: '2026-08-07T10:00:00.000Z' } }), false)
+  assert.equal(hasWorkNewerThanGate({ ...blocked, agentRun: { finishedAt: '2026-08-07T12:30:00.000Z' } }), true)
+})
+
+test('останній із кількох релізів визначає межу', () => {
+  const task = {
+    notes: '[released:2026-08-05 10:00] перший\n[released:2026-08-07 09:00] другий',
+    agentRun: { status: 'completed', finishedAt: '2026-08-06T12:00:00.000Z' },
+  }
+  assert.equal(lastGateAt(task), Date.parse('2026-08-07T09:00:00Z'))
+  assert.equal(hasWorkNewerThanGate(task), false)
+})
+
+test('задача без жодної мітки випускається як і раніше', () => {
+  const task = { id: 'C', status: 'ready_for_retest', notes: '', agentRun: { status: 'completed', finishedAt: '2026-08-07T08:00:00.000Z' } }
+  assert.equal(isReleased(task), false)
+  assert.deepEqual(selectReleasableTasks([task]).map((item) => item.id), ['C'])
 })
 
 test('план покриває всі сервіси, що збираються з цих репозиторіїв', () => {

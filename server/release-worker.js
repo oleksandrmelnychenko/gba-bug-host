@@ -3,8 +3,10 @@ import { access } from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-const RELEASE_MARKER = /\[released:([^\]\s]+)/
+const RELEASE_MARKER = /\[released:([^\]]+)\]/g
+const BLOCKED_MARKER = /\[release-blocked:([^\]]+)\]/g
 const SENTINEL_MARKER = /\[sentinel:[0-9a-f]{12}\]/
+const MAX_RELEASE_ATTEMPTS = 3
 
 export const defaultRepoPlan = {
   gba_console: {
@@ -54,8 +56,43 @@ export function branchName(taskId) {
   return `codex/qa-${taskSlug(taskId)}`
 }
 
+function latestMarkerAt(notes, marker) {
+  let found = false
+  let newest = null
+  for (const match of (notes ?? '').matchAll(marker)) {
+    found = true
+    // Стамп пишеться як «YYYY-MM-DD HH:MM» у UTC (зріз ISO), тож читаємо його як UTC.
+    const parsed = Date.parse(`${match[1].trim().slice(0, 16).replace(' ', 'T')}:00Z`)
+    if (!Number.isNaN(parsed) && (newest === null || parsed > newest)) newest = parsed
+  }
+  // Мітка без читабельного часу (старий або зіпсований формат) має лишатись
+  // бар'єром назавжди — інакше одна крива нотатка відкриє задачу на перевипуск.
+  if (found && newest === null) return Number.POSITIVE_INFINITY
+  return newest
+}
+
 export function isReleased(task) {
-  return RELEASE_MARKER.test(task.notes ?? '')
+  return latestMarkerAt(task.notes, RELEASE_MARKER) !== null
+}
+
+/**
+ * Коли конвеєр востаннє «закрив» задачу — випуском або через впертий провал.
+ * Друга спроба Codex після релізу раніше лишалась у worktree назавжди: мітка
+ * [released:...] назавжди виключала задачу з вибірки, хоч робота була нова.
+ */
+export function lastGateAt(task) {
+  const released = latestMarkerAt(task.notes, RELEASE_MARKER)
+  const blocked = latestMarkerAt(task.notes, BLOCKED_MARKER)
+  if (released === null) return blocked
+  if (blocked === null) return released
+  return Math.max(released, blocked)
+}
+
+export function hasWorkNewerThanGate(task) {
+  const gate = lastGateAt(task)
+  if (gate === null) return true
+  const finishedAt = Date.parse(task.agentRun?.finishedAt ?? task.agentRun?.updatedAt ?? '')
+  return !Number.isNaN(finishedAt) && finishedAt > gate
 }
 
 const SANDBOX_LIMIT_PATTERNS = [
@@ -89,7 +126,7 @@ export function releaseStatusFor(task) {
 export function selectReleasableTasks(tasks) {
   return tasks.filter((task) =>
     (task.agentRun?.status === 'completed' || isSandboxLimitedReview(task)) &&
-    !isReleased(task) &&
+    hasWorkNewerThanGate(task) &&
     task.status !== 'done')
 }
 
@@ -149,6 +186,7 @@ export class ReleaseWorker {
     this.heartbeatIntervalMs = heartbeatIntervalMs
     this.busy = false
     this.firstSeenAt = new Map()
+    this.failures = new Map()
   }
 
   start() {
@@ -222,8 +260,20 @@ export class ReleaseWorker {
         released.push({ task, alreadyMerged: Boolean(outcome.alreadyMerged) })
         for (const repo of outcome.repos) touchedRepos.add(repo)
       } else {
-        await this.annotate(task, `[release-fail] ${outcome.reason}`.slice(0, 500))
-        console.error(`[release] ${task.id}: ${outcome.reason.slice(0, 200)}`)
+        // Конфлікт мерджу не розсмокчеться сам: без цього лічильника задача
+        // ретраїлась кожні 3.5 хв нескінченно й засипала нотатки [release-fail].
+        const attempts = (this.failures.get(task.id) ?? 0) + 1
+        this.failures.set(task.id, attempts)
+        if (attempts >= MAX_RELEASE_ATTEMPTS) {
+          const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ')
+          await this.annotate(task, `[release-blocked:${stamp}] ${attempts} невдалих спроб: ${outcome.reason}. Потрібна людина або новий прогін Codex.`.slice(0, 500))
+          await this.setStatus(task, 'blocked')
+          this.failures.delete(task.id)
+          console.error(`[release] ${task.id}: заблоковано після ${attempts} спроб — ${outcome.reason.slice(0, 160)}`)
+        } else {
+          await this.annotate(task, `[release-fail] ${outcome.reason}`.slice(0, 500))
+          console.error(`[release] ${task.id}: ${outcome.reason.slice(0, 200)}`)
+        }
       }
     }
 
