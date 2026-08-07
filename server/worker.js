@@ -11,6 +11,7 @@ await store.ensureReady()
 
 const worker = new CodexWorker({ store, rootDirectory, dataDirectory, uploadsDirectory })
 worker.start()
+console.log(`Codex worker: паралельних агентів ${worker.concurrency}.`)
 for (const [project, stack] of Object.entries(worker.projectStacks)) {
   console.log(`Codex worker запущено. Проєкт ${project}: ${stack.length ? stack.map((repository) => repository.repositoryPath).join(', ') : 'не налаштовано'}`)
 }

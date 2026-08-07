@@ -4,12 +4,75 @@ import { chmod, mkdir, mkdtemp, readFile, readlink, rm, symlink, unlink, writeFi
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { CodexWorker } from '../server/codex-worker.js'
+import { CodexWorker, normalizeWorkerConcurrency } from '../server/codex-worker.js'
 import { TaskStore, getSeedTasks } from '../server/store.js'
 
 function git(cwd, ...args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim()
 }
+
+async function waitFor(predicate, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('Очікування умови перевищило таймаут.')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+}
+
+test('Codex worker обмежує конфігурацію трьома паралельними агентами', () => {
+  assert.equal(normalizeWorkerConcurrency(undefined), 3)
+  assert.equal(normalizeWorkerConcurrency('2'), 2)
+  assert.equal(normalizeWorkerConcurrency('3'), 3)
+  assert.equal(normalizeWorkerConcurrency('20'), 3)
+  assert.equal(normalizeWorkerConcurrency('invalid'), 3)
+})
+
+test('Codex worker одночасно обробляє три задачі й добирає наступну після звільнення слота', async () => {
+  const queue = Array.from({ length: 5 }, (_, index) => ({
+    id: `RUN-PARALLEL-${index + 1}`,
+    taskId: `BUG-PARALLEL-${index + 1}`,
+  }))
+  const started = []
+  const releases = new Map()
+  let active = 0
+  let maximumActive = 0
+  const store = {
+    claimNextAgentRun: () => queue.shift() ?? null,
+    updateAgentRun: () => undefined,
+  }
+  const worker = new CodexWorker({
+    store,
+    rootDirectory: '/tmp',
+    dataDirectory: '/tmp',
+    uploadsDirectory: '/tmp',
+    concurrency: 3,
+  })
+  worker.processRun = async (run) => {
+    started.push(run.id)
+    active += 1
+    maximumActive = Math.max(maximumActive, active)
+    await new Promise((resolve) => releases.set(run.id, resolve))
+    active -= 1
+  }
+
+  worker.tick()
+  await waitFor(() => started.length === 3)
+  assert.deepEqual(started, ['RUN-PARALLEL-1', 'RUN-PARALLEL-2', 'RUN-PARALLEL-3'])
+  assert.equal(maximumActive, 3)
+  assert.equal(worker.activeRuns.size, 3)
+
+  releases.get('RUN-PARALLEL-2')()
+  await waitFor(() => started.length === 4)
+  assert.equal(started[3], 'RUN-PARALLEL-4')
+  assert.equal(maximumActive, 3)
+
+  for (const runId of started) releases.get(runId)?.()
+  await waitFor(() => started.length === 5)
+  releases.get('RUN-PARALLEL-5')()
+  await waitFor(() => worker.activeRuns.size === 0)
+  assert.equal(maximumActive, 3)
+  worker.stop()
+})
 
 test('Codex worker працює в окремому worktree та зберігає результат', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'gba-codex-worker-'))

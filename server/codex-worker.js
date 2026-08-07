@@ -112,6 +112,12 @@ function parseRepositoryList(value) {
   return repositories.length > 0 ? repositories : null
 }
 
+export function normalizeWorkerConcurrency(value, fallback = 3) {
+  const parsed = Number.parseInt(String(value ?? ''), 10)
+  if (!Number.isFinite(parsed) || parsed < 1) return fallback
+  return Math.min(parsed, 3)
+}
+
 function buildPrompt(task, run, mediaPaths, worktrees) {
   const media = mediaPaths.length
     ? mediaPaths.map((item) => `- ${item.kind}: ${item.path}`).join('\n')
@@ -183,6 +189,7 @@ export class CodexWorker {
     pollIntervalMs = Number.parseInt(process.env.CODEX_POLL_INTERVAL_MS ?? '1500', 10),
     timeoutMs = Number.parseInt(process.env.CODEX_JOB_TIMEOUT_MS ?? String(45 * 60 * 1000), 10),
     networkAccess = process.env.CODEX_NETWORK_ACCESS === 'true',
+    concurrency = normalizeWorkerConcurrency(process.env.CODEX_CONCURRENCY),
   }) {
     this.store = store
     this.rootDirectory = rootDirectory
@@ -201,11 +208,15 @@ export class CodexWorker {
     this.pollIntervalMs = pollIntervalMs
     this.timeoutMs = timeoutMs
     this.networkAccess = networkAccess
-    this.processing = false
+    this.concurrency = normalizeWorkerConcurrency(concurrency)
+    this.activeRuns = new Map()
+    this.acceptingRuns = true
+    this.worktreeMutationChain = Promise.resolve()
     this.timer = null
   }
 
   start() {
+    this.acceptingRuns = true
     const requeued = this.store.requeueOrphanedRuns()
     if (requeued.length > 0) {
       console.log(`[Codex worker] повернуто в чергу після рестарту: ${requeued.join(', ')}`)
@@ -215,16 +226,31 @@ export class CodexWorker {
   }
 
   stop() {
+    this.acceptingRuns = false
     if (this.timer) clearInterval(this.timer)
     this.timer = null
   }
 
-  async tick() {
-    if (this.processing) return
-    const run = this.store.claimNextAgentRun()
-    if (!run) return
+  tick() {
+    if (!this.acceptingRuns) return
 
-    this.processing = true
+    while (this.activeRuns.size < this.concurrency) {
+      const run = this.store.claimNextAgentRun()
+      if (!run) return
+
+      const execution = this.executeClaimedRun(run)
+        .finally(() => {
+          this.activeRuns.delete(run.id)
+          if (this.acceptingRuns) queueMicrotask(() => this.tick())
+        })
+      this.activeRuns.set(run.id, execution)
+      void execution.catch((error) => {
+        console.error(`[Codex worker] ${run.taskId}: не вдалося завершити обробку:`, error)
+      })
+    }
+  }
+
+  async executeClaimedRun(run) {
     try {
       await this.processRun(run)
     } catch (error) {
@@ -235,10 +261,13 @@ export class CodexWorker {
         finishedAt: new Date().toISOString(),
       })
       console.error(`[Codex worker] ${run.taskId}: ${message}`)
-    } finally {
-      this.processing = false
-      queueMicrotask(() => void this.tick())
     }
+  }
+
+  withWorktreeMutation(operation) {
+    const execution = this.worktreeMutationChain.then(operation, operation)
+    this.worktreeMutationChain = execution.catch(() => undefined)
+    return execution
   }
 
   resolveProjectStack(project) {
@@ -250,6 +279,10 @@ export class CodexWorker {
   }
 
   async ensureWorktrees(taskId, repositories) {
+    return this.withWorktreeMutation(() => this.ensureWorktreesUnlocked(taskId, repositories))
+  }
+
+  async ensureWorktreesUnlocked(taskId, repositories) {
     const slug = safeTaskSlug(taskId)
     const jobDirectory = path.join(this.worktreesDirectory, slug)
     const branch = `codex/qa-${slug}`
@@ -294,6 +327,10 @@ export class CodexWorker {
   }
 
   async revertTaskWork(taskId, worktrees) {
+    return this.withWorktreeMutation(() => this.revertTaskWorkUnlocked(taskId, worktrees))
+  }
+
+  async revertTaskWorkUnlocked(taskId, worktrees) {
     const slug = safeTaskSlug(taskId)
     const branch = `codex/qa-${slug}`
 

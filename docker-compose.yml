@@ -41,6 +41,7 @@ services:
       CODEX_HOME: /app/codex-home
       CODEX_NETWORK_ACCESS: "${CODEX_NETWORK_ACCESS:-false}"
       CODEX_JOB_TIMEOUT_MS: "${CODEX_JOB_TIMEOUT_MS:-2700000}"
+      CODEX_CONCURRENCY: "${CODEX_CONCURRENCY:-3}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:?Set OPENAI_API_KEY in the server environment}"
     command: ["sh", "-lc", "printf '%s' \"$$OPENAI_API_KEY\" | codex login --with-api-key && npm run worker"]
     volumes:

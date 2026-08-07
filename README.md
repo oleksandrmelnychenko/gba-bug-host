@@ -16,7 +16,7 @@
 ## Як працює Codex worker
 
 1. Нова задача автоматично створює `queued` job у таблиці `agent_runs`.
-2. Worker атомарно забирає наступний job і переводить задачу в «У роботі».
+2. Worker атомарно забирає наступні job-и й обробляє до трьох задач паралельно.
 3. Для задачі створюється окрема гілка `codex/qa-bug-*` та git worktree.
 4. Codex отримує опис, URL, нотатки й локальні шляхи вкладень.
 5. Після успішного виправлення задача переходить у «Готовий до ретесту».
@@ -60,6 +60,7 @@ CODEX_TARGET_REPO_HOST_PATH=/srv/gba-console
 CODEX_WORKTREES_HOST_PATH=/srv/gba-worktrees
 CODEX_NETWORK_ACCESS=false
 CODEX_JOB_TIMEOUT_MS=2700000
+CODEX_CONCURRENCY=3
 ```
 
 Потім запустіть:
@@ -74,6 +75,8 @@ docker compose logs -f worker
 `APP_BUILD_NUMBER` має бути однаковим для `web` і `worker` та змінюватися під час кожного нового deployment. Задачі, переведені в ретест або закриті, автоматично записуються в історію цього build.
 
 Щоб Codex міг відкривати URL або завантажувати залежності, встановіть `CODEX_NETWORK_ACCESS=true`. Вмикайте це лише для довірених задач і репозиторію.
+
+`CODEX_CONCURRENCY` задає кількість паралельних Codex-агентів від 1 до 3; типовим значенням є `3`. Кожен агент отримує окремий git worktree, а release-черга лишається послідовною.
 
 ## Production без Docker
 
