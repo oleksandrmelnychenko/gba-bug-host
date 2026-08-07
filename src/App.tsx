@@ -2240,7 +2240,10 @@ function App() {
         .some((value) => value.toLocaleLowerCase('uk-UA').includes(normalizedQuery))
       const matchesStatus = statusFilter === 'all' || task.status === statusFilter
       const matchesPriority = priorityFilter === 'all' || task.priority === priorityFilter
-      return matchesQuery && matchesStatus && matchesPriority
+      // Закриті задачі не захаращують грід: їх видно лише коли їх явно просять
+      // фільтром «Закрито» або шукають за номером/назвою.
+      const hiddenAsDone = task.status === 'done' && statusFilter !== 'done' && !normalizedQuery
+      return matchesQuery && matchesStatus && matchesPriority && !hiddenAsDone
     })
 
     return filtered.sort((firstTask, secondTask) => {
@@ -2411,11 +2414,13 @@ function App() {
                   </button>
                 )
               }
+              // Лічильник має збігатися з тим, що реально видно в гріді, тож закриті не рахуємо.
+              const open = tasks.filter((task) => task.status !== 'done')
               const count = tab.key === 'pipeline'
                 ? tasks.filter((task) => task.agentRun?.status === 'queued' || task.agentRun?.status === 'running').length
                 : tab.key === 'auto'
-                  ? tasks.filter(isSentinelTask).length
-                  : tasks.filter((task) => (task.project ?? 'console') === tab.key && !isSentinelTask(task)).length
+                  ? open.filter(isSentinelTask).length
+                  : open.filter((task) => (task.project ?? 'console') === tab.key && !isSentinelTask(task)).length
               return (
                 <button
                   key={tab.key}
