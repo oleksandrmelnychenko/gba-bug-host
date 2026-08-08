@@ -184,6 +184,106 @@ writeFileSync(outputPath, JSON.stringify({
   }
 })
 
+test('Codex worker зберігає постійний контекст і продовжує окрему сесію задачі', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-codex-context-'))
+  const targetRepository = path.join(root, 'target')
+  const dataDirectory = path.join(root, 'data')
+  const uploadsDirectory = path.join(root, 'uploads')
+  const worktreesDirectory = path.join(root, 'worktrees')
+  const contextFile = path.join(root, 'worker-context.md')
+  const fakeCodex = path.join(root, 'fake-codex.mjs')
+  const sessionId = '019fe123-aabb-7ccd-8eef-0123456789ab'
+  await mkdir(targetRepository, { recursive: true })
+  await mkdir(uploadsDirectory, { recursive: true })
+
+  git(targetRepository, 'init')
+  git(targetRepository, 'config', 'user.email', 'worker-test@example.com')
+  git(targetRepository, 'config', 'user.name', 'Worker Test')
+  await writeFile(path.join(targetRepository, 'app.txt'), 'before\n', 'utf8')
+  git(targetRepository, 'add', 'app.txt')
+  git(targetRepository, 'commit', '-m', 'Initial fixture')
+  await writeFile(contextFile, 'Контекст версії 1: звіряй суми до копійки.', 'utf8')
+
+  await writeFile(fakeCodex, `#!/usr/bin/env node
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
+const args = process.argv.slice(2)
+const outputPath = args[args.indexOf('--output-last-message') + 1]
+const historyPath = 'codex-invocations.jsonl'
+const count = existsSync(historyPath) ? readFileSync(historyPath, 'utf8').trim().split('\\n').filter(Boolean).length + 1 : 1
+let prompt = ''
+for await (const chunk of process.stdin) prompt += chunk
+appendFileSync(historyPath, JSON.stringify(args) + '\\n', 'utf8')
+writeFileSync(\`prompt-\${count}.txt\`, prompt, 'utf8')
+process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: '${sessionId}' }) + '\\n')
+writeFileSync(outputPath, JSON.stringify({
+  outcome: 'fixed',
+  summary: \`Виправлення \${count} готове.\`,
+  tests: ['fixture test'],
+  changedFiles: ['app.txt']
+}), 'utf8')
+`, 'utf8')
+  await chmod(fakeCodex, 0o755)
+
+  const store = new TaskStore(dataDirectory)
+  try {
+    await store.ensureReady()
+    store.transaction(() => {
+      for (const task of getSeedTasks()) store.insertTask(task)
+    })
+    store.enqueueAgentRun('RUN-CONTEXT-1', 'BUG-1051', 'manual')
+
+    const worker = new CodexWorker({
+      store,
+      rootDirectory: root,
+      dataDirectory,
+      uploadsDirectory,
+      targetRepository,
+      worktreesDirectory,
+      contextFile,
+      codexBinary: fakeCodex,
+      timeoutMs: 10_000,
+    })
+    await worker.processRun(store.claimNextAgentRun())
+
+    const firstRun = store.findAgentRun('RUN-CONTEXT-1')
+    assert.equal(firstRun.codexSessionId, sessionId)
+    assert.match(firstRun.contextSnapshot, /Контекст версії 1/)
+    const releasedAt = new Date(Date.now() + 1_000).toISOString()
+    store.updateAgentRunRelease(firstRun.id, {
+      status: 'released',
+      attempts: 1,
+      repositories: ['target'],
+      releasedAt,
+    }, 'done')
+
+    await writeFile(contextFile, 'Контекст версії 2: повторний запуск пам’ятає історію задачі.', 'utf8')
+    store.patch('BUG-1051', { status: 'review_again', reviewComment: 'Перевір виправлення ще раз.' })
+    const queued = store.enqueueAgentRun('RUN-CONTEXT-2', 'BUG-1051', 'review_again')
+    assert.equal(queued.run.codexSessionId, sessionId)
+    await worker.processRun(store.claimNextAgentRun())
+
+    const secondRun = store.findAgentRun('RUN-CONTEXT-2')
+    assert.equal(secondRun.codexSessionId, sessionId)
+    assert.match(secondRun.contextSnapshot, /Контекст версії 2/)
+    assert.match(secondRun.contextSnapshot, /BUG-1051/)
+    assert.match(secondRun.contextSnapshot, /Виправлення 1 готове/)
+
+    const jobDirectory = path.join(worktreesDirectory, 'bug-1051')
+    const invocations = (await readFile(path.join(jobDirectory, 'codex-invocations.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line))
+    assert.equal(invocations.length, 2)
+    assert.equal(invocations[0].includes('resume'), false)
+    assert.equal(invocations[1][invocations[1].indexOf('resume') + 1], '--json')
+    assert.equal(invocations[1].includes(sessionId), true)
+    assert.match(await readFile(path.join(jobDirectory, 'prompt-2.txt'), 'utf8'), /Перевір виправлення ще раз/)
+  } finally {
+    store.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('Codex worker готує фул-стек worktree-и для всіх репозиторіїв проєкту', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'gba-codex-stack-'))
   const frontendRepository = path.join(root, 'frontend')

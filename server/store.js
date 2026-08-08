@@ -90,7 +90,7 @@ function mapBuildTask(row) {
   }
 }
 
-function agentRunFromRow(row) {
+function agentRunFromRow(row, { includeWorkerContext = false } = {}) {
   if (!row) return null
   let inputSnapshot = null
   try {
@@ -130,6 +130,10 @@ function agentRunFromRow(row) {
     releaseRepositories,
     releaseError: row.release_error ?? '',
     releasedAt: row.released_at ?? null,
+    ...(includeWorkerContext ? {
+      contextSnapshot: row.context_snapshot ?? '',
+      codexSessionId: row.codex_session_id ?? '',
+    } : {}),
     createdAt: row.created_at,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
@@ -252,6 +256,8 @@ export class TaskStore {
         release_repositories TEXT NOT NULL DEFAULT '[]',
         release_error TEXT NOT NULL DEFAULT '',
         released_at TEXT,
+        context_snapshot TEXT NOT NULL DEFAULT '',
+        codex_session_id TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL,
         started_at TEXT,
         finished_at TEXT,
@@ -343,6 +349,12 @@ export class TaskStore {
       }
       if (!agentRunColumns.has('released_at')) {
         this.database.exec('ALTER TABLE agent_runs ADD COLUMN released_at TEXT')
+      }
+      if (!agentRunColumns.has('context_snapshot')) {
+        this.database.exec("ALTER TABLE agent_runs ADD COLUMN context_snapshot TEXT NOT NULL DEFAULT ''")
+      }
+      if (!agentRunColumns.has('codex_session_id')) {
+        this.database.exec("ALTER TABLE agent_runs ADD COLUMN codex_session_id TEXT NOT NULL DEFAULT ''")
       }
       this.database.exec('CREATE INDEX IF NOT EXISTS idx_agent_runs_heartbeat ON agent_runs(status, heartbeat_at)')
     })
@@ -583,11 +595,19 @@ export class TaskStore {
       .get(taskId)
     const now = new Date().toISOString()
     const inputSnapshot = agentRunInputFromTask(task)
+    const previousSession = this.database
+      .prepare(`
+        SELECT codex_session_id FROM agent_runs
+        WHERE task_id = ? AND codex_session_id <> ''
+        ORDER BY created_at DESC LIMIT 1
+      `)
+      .get(taskId)
     this.database.prepare(`
       INSERT INTO agent_runs (
         id, task_id, trigger, status, attempt, review_comment, input_snapshot, branch, worktree_path,
-        summary, details, error, release_status, created_at, started_at, finished_at, updated_at
-      ) VALUES (?, ?, ?, 'queued', ?, ?, ?, '', '', '', '', '', 'pending', ?, NULL, NULL, ?)
+        summary, details, error, release_status, context_snapshot, codex_session_id,
+        created_at, started_at, finished_at, updated_at
+      ) VALUES (?, ?, ?, 'queued', ?, ?, ?, '', '', '', '', '', 'pending', '', ?, ?, NULL, NULL, ?)
     `).run(
       id,
       taskId,
@@ -595,6 +615,7 @@ export class TaskStore {
       nextAttempt,
       task.reviewComment ?? '',
       JSON.stringify(inputSnapshot),
+      previousSession?.codex_session_id ?? '',
       now,
       now,
     )
@@ -603,7 +624,10 @@ export class TaskStore {
   }
 
   findAgentRun(id) {
-    return agentRunFromRow(this.database.prepare('SELECT * FROM agent_runs WHERE id = ?').get(id))
+    return agentRunFromRow(
+      this.database.prepare('SELECT * FROM agent_runs WHERE id = ?').get(id),
+      { includeWorkerContext: true },
+    )
   }
 
   agentRunsForTask(taskId) {
@@ -611,6 +635,42 @@ export class TaskStore {
       .prepare('SELECT * FROM agent_runs WHERE task_id = ? ORDER BY created_at DESC')
       .all(taskId)
       .map(agentRunFromRow)
+  }
+
+  releasedContextForProject(project, limit = 20, releasedSince = '') {
+    const normalizedLimit = Number.isInteger(limit) ? Math.min(Math.max(limit, 1), 100) : 20
+    return this.database.prepare(`
+      SELECT
+        r.id AS run_id,
+        r.task_id,
+        r.summary,
+        r.details,
+        r.released_at,
+        t.title,
+        t.area
+      FROM agent_runs AS r
+      JOIN tasks AS t ON t.id = r.task_id
+      WHERE t.project = ?
+        AND r.release_status = 'released'
+        AND (? = '' OR COALESCE(r.released_at, r.finished_at, r.updated_at) >= ?)
+        AND r.id = (
+          SELECT latest.id
+          FROM agent_runs AS latest
+          WHERE latest.task_id = r.task_id AND latest.release_status = 'released'
+          ORDER BY COALESCE(latest.released_at, latest.finished_at, latest.updated_at) DESC
+          LIMIT 1
+        )
+      ORDER BY COALESCE(r.released_at, r.finished_at, r.updated_at) DESC
+      LIMIT ?
+    `).all(project, releasedSince, releasedSince, normalizedLimit).map((row) => ({
+      runId: row.run_id,
+      taskId: row.task_id,
+      title: row.title,
+      area: row.area,
+      summary: row.summary,
+      details: row.details,
+      releasedAt: row.released_at,
+    }))
   }
 
   claimNextAgentRun(workerId = '') {
@@ -812,7 +872,17 @@ export class TaskStore {
   }
 
   updateAgentRun(id, values) {
-    const allowedFields = ['status', 'branch', 'worktreePath', 'summary', 'details', 'error', 'finishedAt']
+    const allowedFields = [
+      'status',
+      'branch',
+      'worktreePath',
+      'summary',
+      'details',
+      'error',
+      'finishedAt',
+      'contextSnapshot',
+      'codexSessionId',
+    ]
     const fields = allowedFields.filter((field) => Object.hasOwn(values, field))
     if (!fields.length) return this.findAgentRun(id)
 
@@ -824,6 +894,8 @@ export class TaskStore {
       details: 'details',
       error: 'error',
       finishedAt: 'finished_at',
+      contextSnapshot: 'context_snapshot',
+      codexSessionId: 'codex_session_id',
     }
     const assignments = fields.map((field) => `${columnNames[field]} = ?`).join(', ')
     this.database

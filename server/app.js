@@ -43,6 +43,12 @@ function cleanText(value, fallback = '') {
   return typeof value === 'string' ? value.trim() : fallback
 }
 
+function publicAgentRun(run) {
+  if (!run) return run
+  const { contextSnapshot: _contextSnapshot, codexSessionId: _codexSessionId, ...publicRun } = run
+  return publicRun
+}
+
 function normalizeSiteUrl(value, errors) {
   const rawUrl = cleanText(value)
   if (!rawUrl) return ''
@@ -422,7 +428,7 @@ export async function createApp(options = {}) {
         return
       }
       const updated = store.updateAgentRunRelease(request.params.id, values, taskStatus)
-      response.json(updated)
+      response.json(publicAgentRun(updated))
     } catch (error) {
       next(error)
     }

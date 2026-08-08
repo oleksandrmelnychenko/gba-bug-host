@@ -222,6 +222,8 @@ test('SQLite автоматично додає поля задачі та snapsh
     assert.equal(task.agentRun.releaseStatus, '')
     assert.equal(task.agentRun.releaseAttempts, 0)
     assert.deepEqual(task.agentRun.releaseRepositories, [])
+    assert.equal(store.findAgentRun('RUN-LEGACY').contextSnapshot, '')
+    assert.equal(store.findAgentRun('RUN-LEGACY').codexSessionId, '')
 
     const updated = store.patch('BUG-1001', {
       siteUrl: 'https://example.com/problem',
