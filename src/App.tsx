@@ -1826,11 +1826,13 @@ function PipelineRunCard({
   onOpenTask,
   onOpenConclusion,
   onStop,
+  variant = 'active',
 }: {
   task: Task
   onOpenTask: (taskId: string) => void
   onOpenConclusion: (task: Task) => void
   onStop?: (taskId: string, revert: boolean) => void
+  variant?: 'active' | 'retry'
 }) {
   const [promptOpen, setPromptOpen] = useState(false)
   const run = task.agentRun
@@ -1839,7 +1841,11 @@ function PipelineRunCard({
   const prompt = (task.reviewComment ?? '').trim()
 
   return (
-    <button type="button" className="pipeline-card" onClick={() => onOpenTask(task.id)}>
+    <button
+      type="button"
+      className={`pipeline-card pipeline-card-${variant}`}
+      onClick={() => onOpenTask(task.id)}
+    >
       <div className="pipeline-card-head">
         <span className="task-id">{task.id}</span>
         <span className={`agent-table-state agent-run-${run.status}`}>
@@ -1948,19 +1954,19 @@ function PipelineView({
   return (
     <div className="pipeline-view">
       <div className="pipeline-stats">
-        <div className="pipeline-stat">
+        <div className="pipeline-stat pipeline-stat-worker">
           <span>Codex-воркер</span>
           <strong>{running.length ? `працює: ${running.map((task) => task.id).join(', ')}` : 'очікує задач'}</strong>
         </div>
-        <div className="pipeline-stat">
+        <div className="pipeline-stat pipeline-stat-queue">
           <span>Черга</span>
           <strong>{queued.length}</strong>
         </div>
-        <div className="pipeline-stat">
+        <div className="pipeline-stat pipeline-stat-sentinel">
           <span>Вартовий логів</span>
           <strong>{autoToday.length} авто-задач сьогодні</strong>
         </div>
-        <div className="pipeline-stat">
+        <div className="pipeline-stat pipeline-stat-release">
           <span>Release-воркер</span>
           <strong>{releasedToday.length} випущено сьогодні</strong>
         </div>
@@ -1978,7 +1984,7 @@ function PipelineView({
         <ChevronRight size={16} />
       </button>
 
-      <section className="pipeline-section">
+      <section className="pipeline-section pipeline-section-running">
         <h3><LoaderCircle className={running.length ? 'spin' : ''} size={16} /> Зараз у роботі</h3>
         {running.length ? (
           <div className="pipeline-cards">
@@ -1995,7 +2001,7 @@ function PipelineView({
         ) : <p className="pipeline-empty">Воркер вільний — черга порожня або обробка завершена.</p>}
       </section>
 
-      <section className="pipeline-section">
+      <section className="pipeline-section pipeline-section-queue">
         <h3><Layers3 size={16} /> Черга ({queued.length})</h3>
         {queued.length ? (
           <div className="pipeline-queue pipeline-scroll">
@@ -2047,16 +2053,24 @@ function PipelineView({
       </section>
 
       {reruns.length > 0 && (
-        <section className="pipeline-section">
+        <section className="pipeline-section pipeline-section-retry">
           <h3><RefreshCw size={16} /> Повторні цикли з промптами</h3>
           <div className="pipeline-cards pipeline-scroll">
-            {reruns.map((task) => <PipelineRunCard key={`rerun-${task.id}`} task={task} onOpenTask={onOpenTask} onOpenConclusion={onOpenConclusion} />)}
+            {reruns.map((task) => (
+              <PipelineRunCard
+                key={`rerun-${task.id}`}
+                task={task}
+                variant="retry"
+                onOpenTask={onOpenTask}
+                onOpenConclusion={onOpenConclusion}
+              />
+            ))}
           </div>
         </section>
       )}
 
       {stopped.length > 0 && (
-        <section className="pipeline-section">
+        <section className="pipeline-section pipeline-section-stopped">
           <h3><Square size={15} /> Зупинені ({stopped.length})</h3>
           <div className="pipeline-queue pipeline-scroll">
             {stopped.map((task) => (
@@ -2080,7 +2094,7 @@ function PipelineView({
       )}
 
       {releasedToday.length > 0 && (
-        <section className="pipeline-section">
+        <section className="pipeline-section pipeline-section-released">
           <h3><Check size={16} /> Випущено на dev сьогодні</h3>
           <div className="pipeline-queue pipeline-scroll">
             {releasedToday.map((task) => (
