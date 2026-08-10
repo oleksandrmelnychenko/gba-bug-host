@@ -70,6 +70,7 @@ export interface Task {
   description: string
   siteUrl: string
   notes: string
+  staffComments: string
   reviewComment: string
   area: string
   project: TaskProject
@@ -86,6 +87,7 @@ export interface TaskDraft {
   description: string
   siteUrl: string
   notes: string
+  staffComments: string
   reviewComment: string
   area: string
   project: TaskProject

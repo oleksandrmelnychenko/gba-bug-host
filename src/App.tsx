@@ -15,6 +15,7 @@ import {
   Layers3,
   Link2,
   LoaderCircle,
+  EyeOff,
   Mic,
   Paperclip,
   Pencil,
@@ -75,6 +76,7 @@ const emptyDraft: TaskDraft = {
   description: '',
   siteUrl: '',
   notes: '',
+  staffComments: '',
   reviewComment: '',
   area: '',
   project: 'console',
@@ -181,6 +183,7 @@ function taskToDraft(task: Task): TaskDraft {
     description: task.description,
     siteUrl: task.siteUrl,
     notes: task.notes,
+    staffComments: task.staffComments,
     reviewComment: task.reviewComment,
     area: task.area,
     project: task.project ?? 'console',
@@ -1067,6 +1070,21 @@ function CreateTaskDialog({
               placeholder={'POST /api/orders\nPayload: { ... }\nResponse: 500 — без паролів і токенів'}
             />
           </div>
+          <div className="form-field form-field-wide staff-comments-field">
+            <div className="staff-comments-heading">
+              <label htmlFor="new-staff-comments">Коментарі співробітників</label>
+              <span><EyeOff size={13} /> AI не читає</span>
+            </div>
+            <textarea
+              id="new-staff-comments"
+              rows={3}
+              maxLength={5000}
+              value={draft.staffComments}
+              onChange={(event) => setField('staffComments', event.target.value)}
+              placeholder="Внутрішні домовленості, відповідальні або контекст для команди…"
+            />
+            <small>Зберігається тільки в задачі та не передається Codex.</small>
+          </div>
           <div className="form-grid">
             <div className="form-field">
               <label htmlFor="new-priority">Пріоритет</label>
@@ -1242,6 +1260,21 @@ function EditTaskDialog({
           <div className="form-field form-field-wide">
             <label htmlFor="detail-notes">Нотатки</label>
             <textarea id="detail-notes" className="technical-notes" rows={5} maxLength={10000} value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} placeholder="HTTP request, payload, response — без паролів і токенів" />
+          </div>
+          <div className="form-field form-field-wide staff-comments-field">
+            <div className="staff-comments-heading">
+              <label htmlFor="detail-staff-comments">Коментарі співробітників</label>
+              <span><EyeOff size={13} /> AI не читає</span>
+            </div>
+            <textarea
+              id="detail-staff-comments"
+              rows={3}
+              maxLength={5000}
+              value={draft.staffComments}
+              onChange={(event) => setDraft({ ...draft, staffComments: event.target.value })}
+              placeholder="Внутрішні домовленості, відповідальні або контекст для команди…"
+            />
+            <small>Зберігається тільки в задачі та не передається Codex.</small>
           </div>
           <div className="form-field form-field-wide ai-comment-field">
             <label htmlFor="detail-review-comment">Останній коментар для AI</label>
@@ -1581,13 +1614,18 @@ function isSameDay(value: string) {
 
 function parseRunDetails(run: AgentRun) {
   try {
-    const parsed = JSON.parse(run.details || '{}') as { tests?: string[]; changedFiles?: string[] }
+    const parsed = JSON.parse(run.details || '{}') as {
+      tests?: string[]
+      changedFiles?: string[]
+      reviewedAttachments?: string[]
+    }
     return {
       tests: Array.isArray(parsed.tests) ? parsed.tests : [],
       changedFiles: Array.isArray(parsed.changedFiles) ? parsed.changedFiles : [],
+      reviewedAttachments: Array.isArray(parsed.reviewedAttachments) ? parsed.reviewedAttachments : [],
     }
   } catch {
-    return { tests: [], changedFiles: [] }
+    return { tests: [], changedFiles: [], reviewedAttachments: [] }
   }
 }
 
@@ -1602,7 +1640,7 @@ function AgentConclusion({
   const error = (run.error ?? '').trim()
   if (!summary && !error) return null
 
-  const { tests, changedFiles } = parseRunDetails(run)
+  const { tests, changedFiles, reviewedAttachments } = parseRunDetails(run)
 
   return (
     <div
@@ -1632,6 +1670,13 @@ function AgentConclusion({
       {tests.length > 0 && (
         <div className="pipeline-conclusion-tests">
           {tests.slice(0, 3).map((test) => <span key={test}>{test}</span>)}
+        </div>
+      )}
+      {reviewedAttachments.length > 0 && (
+        <div className="pipeline-conclusion-attachments">
+          <Paperclip size={11} />
+          <span>Переглянуто: {reviewedAttachments.slice(0, 3).join(', ')}</span>
+          {reviewedAttachments.length > 3 && <span>+{reviewedAttachments.length - 3}</span>}
         </div>
       )}
       {onOpenConclusion && <span className="pipeline-conclusion-more">Показати повністю →</span>}
@@ -1734,7 +1779,7 @@ function AgentConclusionDialog({
   const run = task?.agentRun
   if (!task || !run) return null
 
-  const { tests, changedFiles } = parseRunDetails(run)
+  const { tests, changedFiles, reviewedAttachments } = parseRunDetails(run)
   const summary = (run.summary ?? '').trim()
   const error = (run.error ?? '').trim()
 
@@ -1789,6 +1834,15 @@ function AgentConclusionDialog({
               <h4>Перевірки ({tests.length})</h4>
               <ul className="conclusion-list">
                 {tests.map((test) => <li key={test}>{test}</li>)}
+              </ul>
+            </section>
+          )}
+
+          {reviewedAttachments.length > 0 && (
+            <section>
+              <h4>Переглянуті вкладення ({reviewedAttachments.length})</h4>
+              <ul className="conclusion-list">
+                {reviewedAttachments.map((attachment) => <li key={attachment}>{attachment}</li>)}
               </ul>
             </section>
           )}
@@ -2259,7 +2313,7 @@ function App() {
   const filteredTasks = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase('uk-UA')
     const filtered = tabTasks.filter((task) => {
-      const matchesQuery = !normalizedQuery || [task.id, task.title, task.description, task.siteUrl, task.notes, task.reviewComment, task.area]
+      const matchesQuery = !normalizedQuery || [task.id, task.title, task.description, task.siteUrl, task.notes, task.staffComments, task.reviewComment, task.area]
         .some((value) => value.toLocaleLowerCase('uk-UA').includes(normalizedQuery))
       const matchesStatus = statusFilter === 'all' || task.status === statusFilter
       const matchesPriority = priorityFilter === 'all' || task.priority === priorityFilter

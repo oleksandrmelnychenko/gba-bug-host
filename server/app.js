@@ -98,6 +98,7 @@ function validateTaskInput(body, { partial = false } = {}) {
   const description = cleanText(body.description)
   const siteUrl = normalizeSiteUrl(body.siteUrl, errors)
   const notes = cleanText(body.notes)
+  const staffComments = cleanText(body.staffComments)
   const reviewComment = cleanText(body.reviewComment)
   const area = cleanText(body.area)
   const project = cleanText(body.project)
@@ -111,6 +112,7 @@ function validateTaskInput(body, { partial = false } = {}) {
   if (title.length > 140) errors.push('Назва задачі має бути коротшою за 140 символів.')
   if (description.length > 3000) errors.push('Опис має бути коротшим за 3000 символів.')
   if (notes.length > 10000) errors.push('Нотатки мають бути коротшими за 10000 символів.')
+  if (staffComments.length > 5000) errors.push('Коментарі співробітників мають бути коротшими за 5000 символів.')
   if (reviewComment.length > 5000) errors.push('Коментар для AI має бути коротшим за 5000 символів.')
   if (area.length > 80) errors.push('Назва розділу має бути коротшою за 80 символів.')
   if (assignee.length > 80) errors.push('Ім’я виконавця має бути коротшим за 80 символів.')
@@ -120,7 +122,7 @@ function validateTaskInput(body, { partial = false } = {}) {
 
   return {
     errors,
-    values: { title, description, siteUrl, notes, reviewComment, area, project, status, priority, assignee },
+    values: { title, description, siteUrl, notes, staffComments, reviewComment, area, project, status, priority, assignee },
   }
 }
 
@@ -253,6 +255,7 @@ export async function createApp(options = {}) {
         description: values.description,
         siteUrl: values.siteUrl,
         notes: values.notes,
+        staffComments: values.staffComments,
         reviewComment: values.reviewComment,
         area: values.area || 'Загальне',
         project: values.project || 'console',
@@ -292,7 +295,7 @@ export async function createApp(options = {}) {
       }
 
       const patch = {}
-      for (const key of ['title', 'description', 'siteUrl', 'notes', 'reviewComment', 'area', 'project', 'status', 'priority', 'assignee']) {
+      for (const key of ['title', 'description', 'siteUrl', 'notes', 'staffComments', 'reviewComment', 'area', 'project', 'status', 'priority', 'assignee']) {
         if (Object.hasOwn(request.body, key)) patch[key] = values[key]
       }
       if (Object.hasOwn(patch, 'project') && !patch.project) delete patch.project
@@ -326,7 +329,7 @@ export async function createApp(options = {}) {
       }
 
       const patch = { reviewComment: values.reviewComment }
-      for (const key of ['title', 'description', 'siteUrl', 'notes', 'area', 'project', 'priority', 'assignee']) {
+      for (const key of ['title', 'description', 'siteUrl', 'notes', 'staffComments', 'area', 'project', 'priority', 'assignee']) {
         if (Object.hasOwn(request.body, key)) patch[key] = values[key]
       }
       if (Object.hasOwn(patch, 'project') && !patch.project) delete patch.project

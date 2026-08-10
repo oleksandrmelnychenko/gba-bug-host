@@ -130,7 +130,8 @@ writeFileSync(outputPath, JSON.stringify({
   outcome: 'fixed',
   summary: 'Тестове виправлення готове.',
   tests: ['fixture test'],
-  changedFiles: ['app.txt']
+  changedFiles: ['app.txt'],
+  reviewedAttachments: ['proof.png', 'walkthrough.mp4', 'missing.mov — недоступне']
 }), 'utf8')
 `, 'utf8')
   await chmod(fakeCodex, 0o755)
@@ -141,11 +142,43 @@ writeFileSync(outputPath, JSON.stringify({
     store.transaction(() => {
       for (const task of getSeedTasks()) store.insertTask(task)
     })
-    store.patch('BUG-1051', { reviewComment: 'Після першого виправлення пошук усе ще падає на порожньому рядку.' })
+    store.patch('BUG-1051', {
+      staffComments: 'Внутрішній коментар команди — не показувати Codex.',
+      reviewComment: 'Після першого виправлення пошук усе ще падає на порожньому рядку.',
+    })
+    await writeFile(path.join(uploadsDirectory, 'proof.png'), 'image fixture', 'utf8')
+    await writeFile(path.join(uploadsDirectory, 'walkthrough.mp4'), 'video fixture', 'utf8')
+    store.addAttachments('BUG-1051', [
+      {
+        id: 'ATTACHMENT-IMAGE',
+        name: 'proof.png',
+        url: '/uploads/proof.png',
+        type: 'image/png',
+        size: 13,
+        kind: 'image',
+      },
+      {
+        id: 'ATTACHMENT-VIDEO',
+        name: 'walkthrough.mp4',
+        url: '/uploads/walkthrough.mp4',
+        type: 'video/mp4',
+        size: 13,
+        kind: 'video',
+      },
+      {
+        id: 'ATTACHMENT-MISSING',
+        name: 'missing.mov',
+        url: '/uploads/missing.mov',
+        type: 'video/quicktime',
+        size: 999,
+        kind: 'video',
+      },
+    ])
     const queued = store.enqueueAgentRun('RUN-TEST-1', 'BUG-1051', 'manual')
     assert.equal(queued.created, true)
     assert.equal(queued.run.reviewComment, 'Після першого виправлення пошук усе ще падає на порожньому рядку.')
     assert.equal(queued.run.inputSnapshot.title, 'Пошук падає після очищення поля')
+    assert.equal(Object.hasOwn(queued.run.inputSnapshot, 'staffComments'), false)
     store.patch('BUG-1051', { reviewComment: 'Це новіший коментар, який не належить RUN-TEST-1.' })
     const run = store.claimNextAgentRun()
 
@@ -171,11 +204,24 @@ writeFileSync(outputPath, JSON.stringify({
     assert.deepEqual(store.ensureBuild('worker-test-build').bugs, [])
     const schema = JSON.parse(await readFile(path.join(dataDirectory, 'agent-runs', `${run.id}-schema.json`), 'utf8'))
     assert.equal(schema.properties.outcome.type, 'string')
+    assert.equal(schema.properties.reviewedAttachments.type, 'array')
     await assert.rejects(readFile(path.join(dataDirectory, 'agent-runs', 'result-schema.json'), 'utf8'), /ENOENT/)
     assert.equal(await readFile(path.join(worktreesDirectory, 'bug-1051', 'target', 'app.txt'), 'utf8'), 'after\n')
     const prompt = await readFile(path.join(worktreesDirectory, 'bug-1051', 'prompt.txt'), 'utf8')
     assert.match(prompt, /Після першого виправлення пошук усе ще падає на порожньому рядку/)
+    assert.match(prompt, /Статус задачі на момент запуску: new/)
+    assert.match(prompt, /proof\.png.*image\/png/)
+    assert.match(prompt, /walkthrough\.mp4.*video\/mp4/)
+    assert.match(prompt, /missing\.mov.*ФАЙЛ НЕДОСТУПНИЙ/)
+    assert.match(prompt, /Відкрий кожне доступне вкладення/)
+    assert.match(prompt, /створи НОВУ forward-only міграцію/)
+    assert.match(prompt, /У tests явно вкажи команду застосування міграцій і результат/)
+    assert.doesNotMatch(prompt, /Внутрішній коментар команди/)
     assert.doesNotMatch(prompt, /Це новіший коментар, який не належить RUN-TEST-1/)
+    assert.deepEqual(
+      JSON.parse(result.details).reviewedAttachments,
+      ['proof.png', 'walkthrough.mp4', 'missing.mov — недоступне'],
+    )
     assert.equal(await readFile(path.join(targetRepository, 'app.txt'), 'utf8'), 'before\n')
     assert.equal(git(targetRepository, 'status', '--short'), '')
   } finally {
@@ -219,7 +265,8 @@ writeFileSync(outputPath, JSON.stringify({
   outcome: 'fixed',
   summary: \`Виправлення \${count} готове.\`,
   tests: ['fixture test'],
-  changedFiles: ['app.txt']
+  changedFiles: ['app.txt'],
+  reviewedAttachments: []
 }), 'utf8')
 `, 'utf8')
   await chmod(fakeCodex, 0o755)
@@ -314,7 +361,8 @@ writeFileSync(outputPath, JSON.stringify({
   outcome: 'fixed',
   summary: 'Фул-стек виправлення готове.',
   tests: ['fixture test'],
-  changedFiles: ['frontend/app.txt', 'backend/app.txt']
+  changedFiles: ['frontend/app.txt', 'backend/app.txt'],
+  reviewedAttachments: []
 }), 'utf8')
 `, 'utf8')
   await chmod(fakeCodex, 0o755)
@@ -392,7 +440,8 @@ writeFileSync(outputPath, JSON.stringify({
   outcome: 'fixed',
   summary: 'Перевірки пройдені.',
   tests: ['npx tsc --noEmit'],
-  changedFiles: []
+  changedFiles: [],
+  reviewedAttachments: []
 }), 'utf8')
 `, 'utf8')
   await chmod(fakeCodex, 0o755)

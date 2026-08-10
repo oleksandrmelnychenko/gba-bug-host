@@ -125,6 +125,7 @@ test('API створює задачу зі скріншотом і оновлю�
       .field('description', 'Сценарій для API тесту')
       .field('siteUrl', 'qa.example.com/orders/42')
       .field('notes', 'POST /api/orders\nResponse: 500')
+      .field('staffComments', 'Олена перевірить виправлення після обіду.')
       .field('area', 'Тестування')
       .field('priority', 'high')
       .field('status', 'new')
@@ -137,8 +138,10 @@ test('API створює задачу зі скріншотом і оновлю�
     assert.equal(created.body.attachments[0].kind, 'image')
     assert.equal(created.body.siteUrl, 'https://qa.example.com/orders/42')
     assert.equal(created.body.notes, 'POST /api/orders\nResponse: 500')
+    assert.equal(created.body.staffComments, 'Олена перевірить виправлення після обіду.')
     assert.equal(created.body.agentRun.status, 'queued')
     assert.equal(created.body.agentRun.attempt, 1)
+    assert.equal(Object.hasOwn(created.body.agentRun.inputSnapshot, 'staffComments'), false)
     assert.equal(
       existsSync(path.join(uploadsDirectory, path.basename(created.body.attachments[0].url))),
       true,
@@ -214,6 +217,7 @@ test('SQLite автоматично додає поля задачі та snapsh
     const task = store.find('BUG-1001')
     assert.equal(task.siteUrl, '')
     assert.equal(task.notes, '')
+    assert.equal(task.staffComments, '')
     assert.equal(task.reviewComment, '')
     assert.equal(task.agentRun.reviewComment, '')
     assert.equal(task.agentRun.inputSnapshot, null)
@@ -228,10 +232,12 @@ test('SQLite автоматично додає поля задачі та snapsh
     const updated = store.patch('BUG-1001', {
       siteUrl: 'https://example.com/problem',
       notes: 'GET /api/products → 500',
+      staffComments: 'Перевіряє команда підтримки.',
       reviewComment: 'Кнопка все ще повертає 500.',
     })
     assert.equal(updated.siteUrl, 'https://example.com/problem')
     assert.equal(updated.notes, 'GET /api/products → 500')
+    assert.equal(updated.staffComments, 'Перевіряє команда підтримки.')
     assert.equal(updated.reviewComment, 'Кнопка все ще повертає 500.')
   } finally {
     store.close()

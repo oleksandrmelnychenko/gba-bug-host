@@ -79,6 +79,24 @@ docker compose up -d --build
 docker compose logs -f worker
 ```
 
+### Застосування нових міграцій під час deployment
+
+Схема GBA QA Desk оновлюється автоматично при старті API або worker, але у production міграцію краще застосувати окремим кроком до запуску нових контейнерів. Команда `npm run migrate` використовує той самий `DATA_DIR`, що й застосунок, і безпечно пропускає вже застосовані зміни.
+
+Перед оновленням зупиніть усі процеси, які працюють зі спільною SQLite, зробіть backup, зберіть нові image-и, застосуйте міграції один раз і лише після цього запускайте весь стек:
+
+```bash
+docker compose stop web worker sentinel
+mkdir -p backups
+docker compose run --rm --no-deps -v "$PWD/backups:/backup" web sh -lc 'cp /app/data/gba-qa.sqlite "/backup/gba-qa-$(date +%Y%m%d-%H%M%S).sqlite"'
+docker compose build web worker sentinel
+docker compose run --rm --no-deps web npm run migrate
+docker compose up -d web worker sentinel
+docker compose logs --tail=100 web worker
+```
+
+У логах має з’явитися `SQLite migrations applied`. Якщо міграція завершилася з помилкою, не запускайте нову версію: виправте причину або поверніть попередній image і відновіть SQLite з останнього backup. Не видаляйте named volumes під час deployment і не запускайте міграцію одночасно у кількох контейнерах.
+
 Контейнери `web` і `worker` використовують спільні volumes для SQLite та uploads. Розміщуйте їх на одному сервері з локальним диском; SQLite-файл не слід тримати на NFS.
 
 Docker image для `web` містить `faster-whisper` і multilingual-модель `base`; модель завантажується один раз під час `docker compose build`. Транскрипція працює на CPU в режимі `int8` і не використовує зовнішній API.
@@ -113,7 +131,7 @@ CODEX_TARGET_REPO=/srv/gba-console CODEX_WORKTREES_DIR=/srv/gba-worktrees npm ru
 - результати Codex: `data/agent-runs`;
 - локальні worktrees за замовчуванням: `data/agent-worktrees` або `CODEX_WORKTREES_DIR`.
 
-Схема SQLite оновлюється автоматично при старті API або worker. Перед production-оновленням однаково робіть backup `gba-qa.sqlite`, а `DATA_DIR` монтуйте як постійний volume.
+Схема SQLite оновлюється автоматично при старті API або worker. Для контрольованого production-оновлення використовуйте `npm run migrate` за процедурою вище. Перед оновленням однаково робіть backup `gba-qa.sqlite`, а `DATA_DIR` монтуйте як постійний volume.
 
 ## Перевірка
 
