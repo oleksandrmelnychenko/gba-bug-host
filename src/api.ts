@@ -1,4 +1,4 @@
-import type { AgentRun, BuildInfo, Task, TaskDraft, Topology } from './types'
+import type { AgentRun, AuthUser, BuildInfo, Task, TaskComment, TaskDraft, Topology, UnreadComments } from './types'
 
 class ApiError extends Error {
   status: number
@@ -20,6 +20,9 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const payload = await response.json().catch(() => ({ message: 'Сталася помилка.' })) as { message?: string }
+    if (response.status === 401 && url !== '/api/auth/login') {
+      window.dispatchEvent(new Event('qa-desk-auth-required'))
+    }
     throw new ApiError(payload.message ?? 'Сталася помилка.', response.status)
   }
 
@@ -29,6 +32,22 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 
 export function getTasks() {
   return request<Task[]>('/api/tasks')
+}
+
+export function getCurrentUser() {
+  return request<AuthUser>('/api/auth/me')
+}
+
+export function login(email: string, password: string) {
+  return request<AuthUser>('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  })
+}
+
+export function logout() {
+  return request<void>('/api/auth/logout', { method: 'POST' })
 }
 
 export function getCurrentBuild() {
@@ -41,6 +60,26 @@ export function getTopology() {
 
 export function getTaskAgentRuns(id: string) {
   return request<AgentRun[]>(`/api/tasks/${id}/agent-runs`)
+}
+
+export function getTaskComments(id: string) {
+  return request<TaskComment[]>(`/api/tasks/${id}/comments`)
+}
+
+export function addTaskComment(id: string, comment: { body: string; parentId: string | null }) {
+  return request<TaskComment>(`/api/tasks/${id}/comments`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(comment),
+  })
+}
+
+export function getUnreadComments() {
+  return request<UnreadComments>('/api/comments/unread')
+}
+
+export function markTaskCommentsRead(id: string) {
+  return request<UnreadComments>(`/api/tasks/${id}/comments/read`, { method: 'POST' })
 }
 
 function createTranscriptionBody(audio: Blob) {

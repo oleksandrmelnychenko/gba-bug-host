@@ -195,6 +195,19 @@ function attachmentFromRow(row) {
   }
 }
 
+function commentFromRow(row) {
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    parentId: row.parent_id ?? null,
+    authorUserId: row.author_user_id ?? null,
+    author: row.author,
+    body: row.body,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
 export class TaskStore {
   constructor(dataDirectory) {
     this.dataDirectory = dataDirectory
@@ -227,6 +240,15 @@ export class TaskStore {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        display_name TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS attachments (
         id TEXT PRIMARY KEY,
         task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -235,6 +257,16 @@ export class TaskStore {
         type TEXT NOT NULL,
         size INTEGER NOT NULL,
         kind TEXT NOT NULL CHECK (kind IN ('image', 'video'))
+      );
+      CREATE TABLE IF NOT EXISTS task_comments (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        parent_id TEXT REFERENCES task_comments(id) ON DELETE RESTRICT,
+        author_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+        author TEXT NOT NULL,
+        body TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS agent_runs (
         id TEXT PRIMARY KEY,
@@ -287,7 +319,24 @@ export class TaskStore {
         owner_id TEXT NOT NULL,
         heartbeat_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS auth_sessions (
+        token_hash TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS task_comment_reads (
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        comment_id TEXT NOT NULL REFERENCES task_comments(id) ON DELETE CASCADE,
+        read_at TEXT NOT NULL,
+        PRIMARY KEY (user_id, comment_id)
+      );
       CREATE INDEX IF NOT EXISTS idx_attachments_task_id ON attachments(task_id);
+      CREATE INDEX IF NOT EXISTS idx_task_comments_task_created ON task_comments(task_id, created_at, id);
+      CREATE INDEX IF NOT EXISTS idx_task_comments_parent ON task_comments(parent_id);
+      CREATE INDEX IF NOT EXISTS idx_task_comments_author ON task_comments(author_user_id);
+      CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at);
+      CREATE INDEX IF NOT EXISTS idx_task_comment_reads_comment ON task_comment_reads(comment_id);
       CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_agent_runs_task_id ON agent_runs(task_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_agent_runs_queue ON agent_runs(status, created_at);
@@ -315,6 +364,21 @@ export class TaskStore {
       if (!taskColumns.has('project')) {
         this.database.exec("ALTER TABLE tasks ADD COLUMN project TEXT NOT NULL DEFAULT 'console'")
       }
+
+      const commentColumns = new Set(
+        this.database.prepare('PRAGMA table_info(task_comments)').all().map((column) => column.name),
+      )
+      if (!commentColumns.has('author_user_id')) {
+        this.database.exec('ALTER TABLE task_comments ADD COLUMN author_user_id TEXT')
+      }
+
+      this.database.exec(`
+        INSERT INTO task_comments (id, task_id, parent_id, author_user_id, author, body, created_at, updated_at)
+        SELECT 'legacy-staff:' || id, id, NULL, NULL, 'Команда (імпорт)', TRIM(staff_comments), updated_at, updated_at
+        FROM tasks
+        WHERE TRIM(staff_comments) <> ''
+        ON CONFLICT(id) DO NOTHING
+      `)
 
       const agentRunColumns = new Set(
         this.database.prepare('PRAGMA table_info(agent_runs)').all().map((column) => column.name),
@@ -431,6 +495,20 @@ export class TaskStore {
     for (const attachment of task.attachments ?? []) {
       this.insertAttachment(task.id, attachment)
     }
+
+    const initialComment = (task.staffComments ?? '').trim()
+    if (initialComment) {
+      this.insertComment({
+        id: `legacy-staff:${task.id}`,
+        taskId: task.id,
+        parentId: null,
+        authorUserId: task.staffCommentAuthorUserId ?? null,
+        author: task.staffCommentAuthor ?? 'Команда',
+        body: initialComment,
+        createdAt: task.createdAt,
+        updatedAt: task.updatedAt,
+      })
+    }
   }
 
   insertAttachment(taskId, attachment) {
@@ -445,6 +523,22 @@ export class TaskStore {
       attachment.type,
       attachment.size,
       attachment.kind,
+    )
+  }
+
+  insertComment(comment) {
+    this.database.prepare(`
+      INSERT INTO task_comments (id, task_id, parent_id, author_user_id, author, body, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      comment.id,
+      comment.taskId,
+      comment.parentId ?? null,
+      comment.authorUserId ?? null,
+      comment.author,
+      comment.body,
+      comment.createdAt,
+      comment.updatedAt,
     )
   }
 
@@ -485,6 +579,151 @@ export class TaskStore {
       this.database.prepare('SELECT * FROM agent_runs WHERE task_id = ? ORDER BY created_at DESC LIMIT 1').get(id),
     )
     return taskFromRow(row, attachments, agentRun)
+  }
+
+  commentsForTask(taskId) {
+    return this.database
+      .prepare('SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at, id')
+      .all(taskId)
+      .map(commentFromRow)
+  }
+
+  addTaskComment(id, taskId, values) {
+    if (!this.database.prepare('SELECT 1 FROM tasks WHERE id = ?').get(taskId)) {
+      return { status: 'task_not_found', comment: null }
+    }
+
+    if (values.parentId) {
+      const parent = this.database
+        .prepare('SELECT task_id FROM task_comments WHERE id = ?')
+        .get(values.parentId)
+      if (!parent || parent.task_id !== taskId) {
+        return { status: 'parent_not_found', comment: null }
+      }
+    }
+
+    const now = new Date().toISOString()
+    const comment = {
+      id,
+      taskId,
+      parentId: values.parentId || null,
+      authorUserId: values.authorUserId ?? null,
+      author: values.author,
+      body: values.body,
+      createdAt: now,
+      updatedAt: now,
+    }
+    this.transaction(() => this.insertComment(comment))
+    return { status: 'created', comment }
+  }
+
+  unreadCommentsForUser(userId, limit = 20) {
+    const rows = this.database.prepare(`
+      SELECT task_comments.*, tasks.title AS task_title
+      FROM task_comments
+      JOIN tasks ON tasks.id = task_comments.task_id
+      WHERE (task_comments.author_user_id IS NULL OR task_comments.author_user_id <> ?)
+        AND NOT EXISTS (
+          SELECT 1 FROM task_comment_reads
+          WHERE task_comment_reads.user_id = ?
+            AND task_comment_reads.comment_id = task_comments.id
+        )
+      ORDER BY task_comments.created_at DESC, task_comments.id DESC
+      LIMIT ?
+    `).all(userId, userId, limit)
+    const { total } = this.database.prepare(`
+      SELECT COUNT(*) AS total
+      FROM task_comments
+      WHERE (author_user_id IS NULL OR author_user_id <> ?)
+        AND NOT EXISTS (
+          SELECT 1 FROM task_comment_reads
+          WHERE task_comment_reads.user_id = ?
+            AND task_comment_reads.comment_id = task_comments.id
+        )
+    `).get(userId, userId)
+    return {
+      total,
+      comments: rows.map((row) => ({ ...commentFromRow(row), taskTitle: row.task_title })),
+    }
+  }
+
+  markTaskCommentsRead(userId, taskId) {
+    const now = new Date().toISOString()
+    this.database.prepare(`
+      INSERT OR IGNORE INTO task_comment_reads (user_id, comment_id, read_at)
+      SELECT ?, id, ?
+      FROM task_comments
+      WHERE task_id = ?
+        AND (author_user_id IS NULL OR author_user_id <> ?)
+    `).run(userId, now, taskId, userId)
+    return this.unreadCommentsForUser(userId)
+  }
+
+  markAllCommentsRead(userId) {
+    const now = new Date().toISOString()
+    this.database.prepare(`
+      INSERT OR IGNORE INTO task_comment_reads (user_id, comment_id, read_at)
+      SELECT ?, id, ? FROM task_comments
+      WHERE author_user_id IS NULL OR author_user_id <> ?
+    `).run(userId, now, userId)
+  }
+
+  upsertUser(user) {
+    const now = new Date().toISOString()
+    this.database.prepare(`
+      INSERT INTO users (id, email, display_name, password_hash, active, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 1, ?, ?)
+      ON CONFLICT(email) DO UPDATE SET
+        display_name = excluded.display_name,
+        password_hash = excluded.password_hash,
+        active = 1,
+        updated_at = excluded.updated_at
+    `).run(user.id, user.email.toLowerCase(), user.displayName, user.passwordHash, now, now)
+    return this.findUserByEmail(user.email)
+  }
+
+  findUserByEmail(email) {
+    const row = this.database.prepare('SELECT * FROM users WHERE email = ? COLLATE NOCASE').get(email)
+    if (!row) return null
+    return {
+      id: row.id,
+      email: row.email,
+      displayName: row.display_name,
+      passwordHash: row.password_hash,
+      active: row.active === 1,
+    }
+  }
+
+  createSession(tokenHash, userId, expiresAt) {
+    const now = new Date().toISOString()
+    this.transaction(() => {
+      this.database.prepare('DELETE FROM auth_sessions WHERE expires_at <= ?').run(now)
+      this.database.prepare(`
+        INSERT INTO auth_sessions (token_hash, user_id, created_at, expires_at)
+        VALUES (?, ?, ?, ?)
+      `).run(tokenHash, userId, now, expiresAt)
+    })
+  }
+
+  findSession(tokenHash) {
+    const row = this.database.prepare(`
+      SELECT users.id, users.email, users.display_name
+      FROM auth_sessions
+      JOIN users ON users.id = auth_sessions.user_id
+      WHERE auth_sessions.token_hash = ?
+        AND auth_sessions.expires_at > ?
+        AND users.active = 1
+    `).get(tokenHash, new Date().toISOString())
+    if (!row) return null
+    return { id: row.id, email: row.email, displayName: row.display_name }
+  }
+
+  deleteSession(tokenHash) {
+    this.database.prepare('DELETE FROM auth_sessions WHERE token_hash = ?').run(tokenHash)
+  }
+
+  deleteSessionsForUser(userId) {
+    this.database.prepare('DELETE FROM auth_sessions WHERE user_id = ?').run(userId)
   }
 
   create(values, attachments) {

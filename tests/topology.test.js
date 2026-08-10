@@ -43,7 +43,7 @@ test('разовий контейнер після Exited(0) вважаєтьс�
   assert.equal(statusFromContainer({ state: 'exited', status: 'Exited (2) 1 min ago', exitCode: 2 }, { oneshot: true }).status, 'down')
 })
 
-test('HTTP-проба: 401 від basic_auth не є падінням', () => {
+test('HTTP-проба: 401 від захисту Desk не є падінням', () => {
   assert.equal(statusFromProbe({ code: 200, ms: 12 }).status, 'ok')
   assert.equal(statusFromProbe({ code: 401, ms: 12 }).status, 'ok')
   assert.equal(statusFromProbe({ code: 502, ms: 12 }).status, 'warn')

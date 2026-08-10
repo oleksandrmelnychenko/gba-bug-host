@@ -12,6 +12,32 @@ export interface TaskAttachment {
   kind: 'image' | 'video'
 }
 
+export interface TaskComment {
+  id: string
+  taskId: string
+  parentId: string | null
+  authorUserId: string | null
+  author: string
+  body: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface UnreadTaskComment extends TaskComment {
+  taskTitle: string
+}
+
+export interface UnreadComments {
+  total: number
+  comments: UnreadTaskComment[]
+}
+
+export interface AuthUser {
+  id: string
+  email: string
+  displayName: string
+}
+
 export interface AgentRunInputSnapshot {
   title: string
   description: string

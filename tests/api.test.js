@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 import request from 'supertest'
 import { createApp } from '../server/app.js'
+import { hashPassword } from '../server/auth.js'
 import { TaskStore, getSeedTasks } from '../server/store.js'
 import { TranscriptionError, transcribeAudioWithShell } from '../server/transcription.js'
 
@@ -17,7 +18,7 @@ async function withTestApp(run, appOptions = {}) {
   const store = new TaskStore(dataDirectory)
 
   try {
-    const app = await createApp({ rootDirectory: root, dataDirectory, uploadsDirectory, store, ...appOptions })
+    const app = await createApp({ rootDirectory: root, dataDirectory, uploadsDirectory, store, authRequired: false, ...appOptions })
     store.transaction(() => {
       for (const task of getSeedTasks()) store.insertTask(task)
     })
@@ -37,6 +38,81 @@ test('API повертає стартові задачі та health status', as
     assert.equal(response.body.length, 5)
     assert.equal(response.body[0].id, 'BUG-1051')
   })
+})
+
+test('персональний логін захищає Desk і визначає автора коментаря', async () => {
+  await withTestApp(async ({ app, store }) => {
+    const password = 'Strong-Test-Password-42!'
+    const user = store.upsertUser({
+      id: 'user-oleksandr',
+      email: 'oleksandr@qa-desk.com',
+      displayName: 'Олександр',
+      passwordHash: await hashPassword(password),
+    })
+    const secondUser = store.upsertUser({
+      id: 'user-alona',
+      email: 'alona@qa-desk.com',
+      displayName: 'Альона',
+      passwordHash: await hashPassword(password),
+    })
+    store.markAllCommentsRead(user.id)
+    store.markAllCommentsRead(secondUser.id)
+    const agent = request.agent(app)
+    const secondAgent = request.agent(app)
+
+    await request(app).get('/api/health').expect(200)
+    await request(app).get('/api/builds/current').expect(200)
+    await request(app).get('/api/tasks').expect(401)
+    await request(app).get('/uploads/private.png').expect(401)
+    await request(app).post('/api/system/heartbeat').send({ units: {} }).expect(401)
+    await request(app)
+      .get('/api/tasks')
+      .set('Authorization', 'Bearer test-internal-token')
+      .expect(200)
+    await request(app)
+      .post('/api/system/heartbeat')
+      .set('Authorization', 'Bearer test-internal-token')
+      .send({ units: {}, host: 'test-host' })
+      .expect(200)
+    await agent
+      .post('/api/auth/login')
+      .send({ email: user.email, password: 'wrong-password' })
+      .expect(401)
+    await agent
+      .post('/api/auth/login')
+      .send({ email: user.email, password })
+      .expect(200)
+      .expect(({ body }) => {
+        assert.equal(body.displayName, 'Олександр')
+        assert.equal(Object.hasOwn(body, 'passwordHash'), false)
+      })
+
+    await agent.get('/api/auth/me').expect(200).expect(({ body }) => {
+      assert.equal(body.email, user.email)
+      assert.equal(body.displayName, 'Олександр')
+    })
+    const comment = await agent
+      .post('/api/tasks/BUG-1051/comments')
+      .send({ author: 'Підмінений автор', body: 'Коментар від залогіненого користувача.', parentId: null })
+      .expect(201)
+    assert.equal(comment.body.author, 'Олександр')
+    assert.equal(comment.body.authorUserId, user.id)
+
+    await secondAgent.post('/api/auth/login').send({ email: secondUser.email, password }).expect(200)
+    await agent.get('/api/comments/unread').expect(200).expect(({ body }) => assert.equal(body.total, 0))
+    const unread = await secondAgent.get('/api/comments/unread').expect(200)
+    assert.equal(unread.body.total, 1)
+    assert.equal(unread.body.comments[0].id, comment.body.id)
+    assert.equal(unread.body.comments[0].taskId, 'BUG-1051')
+    assert.equal(unread.body.comments[0].taskTitle, 'Пошук падає після очищення поля')
+    await secondAgent.post('/api/tasks/BUG-1051/comments/read').expect(200).expect(({ body }) => {
+      assert.equal(body.total, 0)
+      assert.deepEqual(body.comments, [])
+    })
+
+    await agent.post('/api/auth/logout').expect(204)
+    await agent.get('/api/auth/me').expect(401)
+  }, { authRequired: true, secureCookies: false, internalApiToken: 'test-internal-token' })
 })
 
 test('API перетворює голосовий запис на текст без збереження аудіо', async () => {
@@ -142,6 +218,11 @@ test('API створює задачу зі скріншотом і оновлю�
     assert.equal(created.body.agentRun.status, 'queued')
     assert.equal(created.body.agentRun.attempt, 1)
     assert.equal(Object.hasOwn(created.body.agentRun.inputSnapshot, 'staffComments'), false)
+    const initialComments = await request(app).get(`/api/tasks/${created.body.id}/comments`).expect(200)
+    assert.equal(initialComments.body.length, 1)
+    assert.equal(initialComments.body[0].author, 'Команда')
+    assert.equal(initialComments.body[0].body, 'Олена перевірить виправлення після обіду.')
+    assert.equal(initialComments.body[0].parentId, null)
     assert.equal(
       existsSync(path.join(uploadsDirectory, path.basename(created.body.attachments[0].url))),
       true,
@@ -153,6 +234,44 @@ test('API створює задачу зі скріншотом і оновлю�
       .expect(200)
 
     assert.equal(updated.body.status, 'ready_for_retest')
+  })
+})
+
+test('API зберігає дерево внутрішніх коментарів окремо від контексту AI', async () => {
+  await withTestApp(async ({ app }) => {
+    const rootComment = await request(app)
+      .post('/api/tasks/BUG-1051/comments')
+      .send({ author: ' Олена ', body: ' Перевірю сценарій на касі. ' })
+      .expect(201)
+
+    assert.equal(rootComment.body.author, 'Олена')
+    assert.equal(rootComment.body.body, 'Перевірю сценарій на касі.')
+    assert.equal(rootComment.body.parentId, null)
+
+    const reply = await request(app)
+      .post('/api/tasks/BUG-1051/comments')
+      .send({ author: 'Ігор', body: 'Додай, будь ласка, відео.', parentId: rootComment.body.id })
+      .expect(201)
+
+    assert.equal(reply.body.parentId, rootComment.body.id)
+    const comments = await request(app).get('/api/tasks/BUG-1051/comments').expect(200)
+    assert.deepEqual(comments.body.map(({ author, parentId }) => ({ author, parentId })), [
+      { author: 'Олена', parentId: null },
+      { author: 'Ігор', parentId: rootComment.body.id },
+    ])
+
+    await request(app)
+      .post('/api/tasks/BUG-1050/comments')
+      .send({ author: 'Ігор', body: 'Не в ту задачу.', parentId: rootComment.body.id })
+      .expect(400)
+    await request(app)
+      .post('/api/tasks/BUG-1051/comments')
+      .send({ author: '', body: '' })
+      .expect(400)
+    await request(app).get('/api/tasks/BUG-9999/comments').expect(404)
+
+    const task = await request(app).get('/api/tasks').expect(200)
+    assert.equal(Object.hasOwn(task.body[0].agentRun?.inputSnapshot ?? {}, 'comments'), false)
   })
 })
 
@@ -239,6 +358,16 @@ test('SQLite автоматично додає поля задачі та snapsh
     assert.equal(updated.notes, 'GET /api/products → 500')
     assert.equal(updated.staffComments, 'Перевіряє команда підтримки.')
     assert.equal(updated.reviewComment, 'Кнопка все ще повертає 500.')
+
+    store.close()
+    const reopenedStore = new TaskStore(dataDirectory)
+    await reopenedStore.ensureReady()
+    assert.deepEqual(reopenedStore.commentsForTask('BUG-1001').map(({ author, body }) => ({ author, body })), [
+      { author: 'Команда (імпорт)', body: 'Перевіряє команда підтримки.' },
+    ])
+    await reopenedStore.ensureReady()
+    assert.equal(reopenedStore.commentsForTask('BUG-1001').length, 1)
+    reopenedStore.close()
   } finally {
     store.close()
     await rm(root, { recursive: true, force: true })
@@ -252,7 +381,7 @@ test('SQLite зберігає задачу та відео після повто
   const firstStore = new TaskStore(dataDirectory)
 
   try {
-    const firstApp = await createApp({ rootDirectory: root, dataDirectory, uploadsDirectory, store: firstStore })
+    const firstApp = await createApp({ rootDirectory: root, dataDirectory, uploadsDirectory, store: firstStore, authRequired: false })
     const created = await request(firstApp)
       .post('/api/tasks')
       .field('title', 'Відео помилки зберігається')
@@ -268,7 +397,7 @@ test('SQLite зберігає задачу та відео після повто
 
     const secondStore = new TaskStore(dataDirectory)
     try {
-      const secondApp = await createApp({ rootDirectory: root, dataDirectory, uploadsDirectory, store: secondStore })
+      const secondApp = await createApp({ rootDirectory: root, dataDirectory, uploadsDirectory, store: secondStore, authRequired: false })
       const tasks = await request(secondApp).get('/api/tasks').expect(200)
       const restoredTask = tasks.body.find((task) => task.id === created.body.id)
 

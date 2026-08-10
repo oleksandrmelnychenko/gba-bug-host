@@ -186,6 +186,7 @@ export class ReleaseWorker {
     settleMs = Number.parseInt(process.env.RELEASE_SETTLE_MS ?? '180000', 10),
     heartbeatIntervalMs = Number.parseInt(process.env.RELEASE_HEARTBEAT_INTERVAL_MS ?? '30000', 10),
     processRunner = runProcess,
+    internalApiToken = process.env.QA_DESK_INTERNAL_API_TOKEN ?? '',
   } = {}) {
     this.deskBaseUrl = deskBaseUrl.replace(/\/$/, '')
     this.worktreesDirectory = worktreesDirectory
@@ -195,8 +196,16 @@ export class ReleaseWorker {
     this.settleMs = settleMs
     this.heartbeatIntervalMs = heartbeatIntervalMs
     this.runProcess = processRunner
+    this.internalApiToken = internalApiToken
     this.busy = false
     this.firstSeenAt = new Map()
+  }
+
+  requestHeaders(additional = {}) {
+    return {
+      ...(this.internalApiToken ? { Authorization: `Bearer ${this.internalApiToken}` } : {}),
+      ...additional,
+    }
   }
 
   start() {
@@ -210,8 +219,8 @@ export class ReleaseWorker {
   async reportHostUnits() {
     // Список юнітів диктує інвентар дески: systemctl-глоб бачить лише завантажені
     // юніти, тож вимкнений таймер через глоб просто зникає замість «inactive».
-    const wanted = await fetch(`${this.deskBaseUrl}/api/system/units`)
-      .then((response) => response.json())
+    const wanted = await fetch(`${this.deskBaseUrl}/api/system/units`, { headers: this.requestHeaders() })
+      .then((response) => response.ok ? response.json() : null)
       .then((payload) => payload?.units ?? [])
       .catch(() => [])
     if (wanted.length === 0) return
@@ -226,7 +235,7 @@ export class ReleaseWorker {
     if (Object.keys(units).length === 0) return
     await fetch(`${this.deskBaseUrl}/api/system/heartbeat`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.requestHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ units, host: 'gba-host' }),
     }).catch((error) => console.error(`[release] heartbeat: ${error.message}`))
   }
@@ -235,7 +244,7 @@ export class ReleaseWorker {
     if (this.busy) return
     this.busy = true
     try {
-      const response = await fetch(`${this.deskBaseUrl}/api/tasks`)
+      const response = await fetch(`${this.deskBaseUrl}/api/tasks`, { headers: this.requestHeaders() })
       if (!response.ok) throw new Error(`desk → ${response.status}`)
       const tasks = await response.json()
       await this.recoverReleasedWorktreeCleanup(tasks)
@@ -474,7 +483,7 @@ export class ReleaseWorker {
   async updateRelease(task, values) {
     const response = await fetch(`${this.deskBaseUrl}/api/agent-runs/${task.agentRun.id}/release`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.requestHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(values),
     })
     if (!response.ok) throw new Error(`release-state ${task.id} → ${response.status}`)
@@ -538,12 +547,14 @@ export class ReleaseWorker {
   }
 
   async annotate(task, line) {
-    const fresh = await fetch(`${this.deskBaseUrl}/api/tasks`).then((r) => r.json()).catch(() => null)
+    const fresh = await fetch(`${this.deskBaseUrl}/api/tasks`, { headers: this.requestHeaders() })
+      .then((response) => response.ok ? response.json() : null)
+      .catch(() => null)
     const current = fresh?.find((item) => item.id === task.id)
     const notes = `${(current ?? task).notes ?? ''}\n${line}`.slice(0, 9900)
     await fetch(`${this.deskBaseUrl}/api/tasks/${task.id}`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.requestHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ notes }),
     }).catch(() => undefined)
   }

@@ -10,11 +10,16 @@ import {
   ChevronRight,
   ChevronUp,
   ChevronsUp,
+  CornerDownRight,
   History,
   Image as ImageIcon,
   Layers3,
   Link2,
+  LockKeyhole,
   LoaderCircle,
+  LogIn,
+  LogOut,
+  MessageSquare,
   EyeOff,
   Mic,
   Paperclip,
@@ -25,12 +30,15 @@ import {
   Undo2,
   RefreshCw,
   Search,
+  Send,
   Trash2,
   UploadCloud,
+  UserRound,
   X,
 } from 'lucide-react'
 import {
   useEffect,
+  useCallback,
   useMemo,
   useRef,
   useState,
@@ -39,13 +47,20 @@ import {
   type FormEvent,
 } from 'react'
 import {
+  addTaskComment,
   addTaskAttachments,
   createTask,
   deleteTask,
   deleteTaskAttachment,
   getCurrentBuild,
+  getCurrentUser,
   getTaskAgentRuns,
+  getTaskComments,
   getTasks,
+  getUnreadComments,
+  login,
+  logout,
+  markTaskCommentsRead,
   reorderQueuedTask,
   reviewTaskAgain,
   resumeAgentRun,
@@ -61,12 +76,16 @@ import {
   type AgentRunStatus,
   type BuildBug,
   type BuildInfo,
+  type AuthUser,
   type Task,
   type TaskAttachment,
+  type TaskComment,
   type TaskDraft,
   type TaskPriority,
   type TaskProject,
   type TaskStatus,
+  type UnreadComments,
+  type UnreadTaskComment,
 } from './types'
 import { ArchitectureView } from './ArchitectureView'
 import gbaLogo from './assets/brand/gba-logo.svg'
@@ -89,6 +108,18 @@ const priorityOrder: TaskPriority[] = ['critical', 'high', 'medium', 'low']
 const pageSizeOptions = [20, 50, 100]
 const maxVoiceRecordingSeconds = 5 * 60
 const recordingMimeTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']
+const dateFormatter = new Intl.DateTimeFormat('uk-UA', {
+  day: '2-digit',
+  month: 'short',
+  year: 'numeric',
+})
+const dateTimeFormatter = new Intl.DateTimeFormat('uk-UA', {
+  day: '2-digit',
+  month: '2-digit',
+  year: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+})
 
 function appendVoiceText(current: string, transcript: string, maxLength = 3000) {
   const existingText = current.trimEnd()
@@ -147,21 +178,11 @@ const agentRunMeta: Record<AgentRunStatus, { label: string; shortLabel: string }
 }
 
 function formatDate(value: string) {
-  return new Intl.DateTimeFormat('uk-UA', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-  }).format(new Date(value))
+  return dateFormatter.format(new Date(value))
 }
 
 function formatDateTime(value: string) {
-  return new Intl.DateTimeFormat('uk-UA', {
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(value))
+  return dateTimeFormatter.format(new Date(value))
 }
 
 function mediaLabel(count: number) {
@@ -1125,8 +1146,212 @@ function CreateTaskDialog({
   )
 }
 
+interface CommentRow {
+  comment: TaskComment
+  depth: number
+}
+
+function flattenCommentTree(comments: TaskComment[]) {
+  const byParent = new Map<string | null, TaskComment[]>()
+  const knownIds = new Set(comments.map((comment) => comment.id))
+
+  for (const comment of comments) {
+    const parentId = comment.parentId && knownIds.has(comment.parentId) ? comment.parentId : null
+    const siblings = byParent.get(parentId) ?? []
+    siblings.push(comment)
+    byParent.set(parentId, siblings)
+  }
+
+  const rows: CommentRow[] = []
+  const append = (parentId: string | null, depth: number) => {
+    for (const comment of byParent.get(parentId) ?? []) {
+      rows.push({ comment, depth })
+      append(comment.id, depth + 1)
+    }
+  }
+  append(null, 0)
+  return rows
+}
+
+function commentInitials(author: string) {
+  return author
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0])
+    .join('')
+    .toLocaleUpperCase('uk-UA')
+}
+
+function TaskComments({ taskId, user, focusCommentId }: { taskId: string; user: AuthUser; focusCommentId: string | null }) {
+  const [comments, setComments] = useState<TaskComment[]>([])
+  const [body, setBody] = useState('')
+  const [replyTo, setReplyTo] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [refreshKey, setRefreshKey] = useState(0)
+  const bodyRef = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError('')
+    void getTaskComments(taskId)
+      .then((nextComments) => {
+        if (!cancelled) {
+          setComments(nextComments)
+          void markTaskCommentsRead(taskId).then(() => {
+            window.dispatchEvent(new Event('qa-desk-comments-changed'))
+          }).catch(() => undefined)
+        }
+      })
+      .catch((caughtError) => {
+        if (!cancelled) setError(caughtError instanceof Error ? caughtError.message : 'Не вдалося завантажити коментарі.')
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => { cancelled = true }
+  }, [taskId, refreshKey])
+
+  useEffect(() => {
+    if (loading || !focusCommentId || !comments.some((comment) => comment.id === focusCommentId)) return
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById(`comment-${focusCommentId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [comments, focusCommentId, loading])
+
+  const rows = useMemo(() => flattenCommentTree(comments), [comments])
+  const replyTarget = replyTo ? comments.find((comment) => comment.id === replyTo) ?? null : null
+
+  const selectReply = (comment: TaskComment) => {
+    setReplyTo(comment.id)
+    setError('')
+    bodyRef.current?.focus()
+  }
+
+  const submit = async () => {
+    const cleanBody = body.trim()
+    if (!cleanBody) {
+      setError('Напишіть текст коментаря.')
+      return
+    }
+
+    setSaving(true)
+    setError('')
+    try {
+      const comment = await addTaskComment(taskId, {
+        body: cleanBody,
+        parentId: replyTo,
+      })
+      setComments((current) => [...current, comment])
+      setBody('')
+      setReplyTo(null)
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : 'Не вдалося додати коментар.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <section className="staff-thread" aria-labelledby={`staff-thread-${taskId}`}>
+      <div className="staff-comments-heading">
+        <div>
+          <span className="eyebrow">Внутрішня дискусія</span>
+          <h3 id={`staff-thread-${taskId}`}>
+            <MessageSquare size={17} /> Коментарі співробітників
+            {comments.length > 0 && <span className="comment-count">{comments.length}</span>}
+          </h3>
+        </div>
+        <span><EyeOff size={13} /> AI не читає</span>
+      </div>
+
+      <div className="comment-list" aria-live="polite">
+        {loading ? (
+          <div className="comments-state"><LoaderCircle className="spin" size={17} /> Завантажую коментарі…</div>
+        ) : rows.length > 0 ? rows.map(({ comment, depth }) => (
+          <article
+            id={`comment-${comment.id}`}
+            className={`comment-card ${depth > 0 ? 'is-reply' : ''}${focusCommentId === comment.id ? ' is-focused' : ''}`}
+            style={{ marginInlineStart: `${Math.min(depth, 4) * 24}px` }}
+            key={comment.id}
+          >
+            <div className="comment-avatar" aria-hidden="true">{commentInitials(comment.author)}</div>
+            <div className="comment-content">
+              <header>
+                <strong>{comment.author}</strong>
+                <time dateTime={comment.createdAt}>{formatDateTime(comment.createdAt)}</time>
+              </header>
+              <p>{comment.body}</p>
+              <button type="button" className="comment-reply-button" onClick={() => selectReply(comment)}>
+                <CornerDownRight size={13} /> Відповісти
+              </button>
+            </div>
+          </article>
+        )) : !error ? (
+          <div className="comments-state is-empty">Ще немає коментарів. Почніть внутрішню дискусію.</div>
+        ) : null}
+      </div>
+
+      {replyTarget && (
+        <div className="comment-reply-target">
+          <CornerDownRight size={14} /> Відповідь для <strong>{replyTarget.author}</strong>
+          <button type="button" onClick={() => setReplyTo(null)} aria-label="Скасувати відповідь"><X size={14} /></button>
+        </div>
+      )}
+      <div className="comment-composer">
+        <div className="comment-composer-user" title={user.email}>
+          <span>{commentInitials(user.displayName)}</span>
+          <div><strong>{user.displayName}</strong><small>Від вашого акаунта</small></div>
+        </div>
+        <label className="comment-body-field" htmlFor={`comment-body-${taskId}`}>
+          Коментар
+          <textarea
+            ref={bodyRef}
+            id={`comment-body-${taskId}`}
+            rows={3}
+            maxLength={5000}
+            value={body}
+            onChange={(event) => setBody(event.target.value)}
+            onKeyDown={(event) => {
+              if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+                event.preventDefault()
+                void submit()
+              }
+            }}
+            placeholder={replyTarget ? `Відповісти ${replyTarget.author}…` : 'Внутрішня домовленість, уточнення або відповідь…'}
+          />
+        </label>
+        <button
+          type="button"
+          className="button button-primary comment-send-button"
+          onClick={() => void submit()}
+          disabled={saving || !body.trim()}
+        >
+          {saving ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}
+          {saving ? 'Надсилаю…' : replyTarget ? 'Відповісти' : 'Додати'}
+        </button>
+      </div>
+      {error && (
+        <div className="comment-error" role="alert">
+          <span>{error}</span>
+          {!loading && comments.length === 0 && (
+            <button type="button" onClick={() => setRefreshKey((value) => value + 1)}>Повторити</button>
+          )}
+        </div>
+      )}
+      <small className="comment-privacy-note">Коментарі доступні команді в Desk і не передаються Codex.</small>
+    </section>
+  )
+}
+
 function EditTaskDialog({
   task,
+  user,
+  focusCommentId,
   onClose,
   onUpdated,
   onReviewAgain,
@@ -1134,6 +1359,8 @@ function EditTaskDialog({
   onOpenAttachment,
 }: {
   task: Task | null
+  user: AuthUser
+  focusCommentId: string | null
   onClose: () => void
   onUpdated: (task: Task) => void
   onReviewAgain: (task: Task, patch: TaskDraft) => void
@@ -1261,21 +1488,7 @@ function EditTaskDialog({
             <label htmlFor="detail-notes">Нотатки</label>
             <textarea id="detail-notes" className="technical-notes" rows={5} maxLength={10000} value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} placeholder="HTTP request, payload, response — без паролів і токенів" />
           </div>
-          <div className="form-field form-field-wide staff-comments-field">
-            <div className="staff-comments-heading">
-              <label htmlFor="detail-staff-comments">Коментарі співробітників</label>
-              <span><EyeOff size={13} /> AI не читає</span>
-            </div>
-            <textarea
-              id="detail-staff-comments"
-              rows={3}
-              maxLength={5000}
-              value={draft.staffComments}
-              onChange={(event) => setDraft({ ...draft, staffComments: event.target.value })}
-              placeholder="Внутрішні домовленості, відповідальні або контекст для команди…"
-            />
-            <small>Зберігається тільки в задачі та не передається Codex.</small>
-          </div>
+          <TaskComments taskId={task.id} user={user} focusCommentId={focusCommentId} />
           <div className="form-field form-field-wide ai-comment-field">
             <label htmlFor="detail-review-comment">Останній коментар для AI</label>
             <textarea
@@ -2165,7 +2378,134 @@ function PipelineView({
   )
 }
 
-function App() {
+function CommentNotifications({
+  onOpenComment,
+}: {
+  onOpenComment: (comment: UnreadTaskComment) => void
+}) {
+  const [summary, setSummary] = useState<UnreadComments>({ total: 0, comments: [] })
+  const [open, setOpen] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [browserNotifications, setBrowserNotifications] = useState(
+    () => 'Notification' in window && Notification.permission === 'granted',
+  )
+  const previousTotalRef = useRef<number | null>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  const refresh = useCallback(() => {
+    void getUnreadComments()
+      .then((nextSummary) => {
+        const previousTotal = previousTotalRef.current
+        if (
+          previousTotal !== null
+          && nextSummary.total > previousTotal
+          && 'Notification' in window
+          && Notification.permission === 'granted'
+          && document.hidden
+        ) {
+          const newest = nextSummary.comments[0]
+          new Notification('Новий коментар у QA Desk', {
+            body: newest ? `${newest.author} · ${newest.taskId}: ${newest.body}` : `${nextSummary.total} непрочитаних`,
+          })
+        }
+        previousTotalRef.current = nextSummary.total
+        setSummary(nextSummary)
+        setError('')
+      })
+      .catch((caughtError) => setError(caughtError instanceof Error ? caughtError.message : 'Не вдалося завантажити коментарі.'))
+      .finally(() => setLoading(false))
+  }, [])
+
+  const enableBrowserNotifications = async () => {
+    const permission = await Notification.requestPermission()
+    setBrowserNotifications(permission === 'granted')
+  }
+
+  useEffect(() => {
+    refresh()
+    const interval = window.setInterval(refresh, 10_000)
+    window.addEventListener('qa-desk-comments-changed', refresh)
+    return () => {
+      window.clearInterval(interval)
+      window.removeEventListener('qa-desk-comments-changed', refresh)
+    }
+  }, [refresh])
+
+  useEffect(() => {
+    if (!open) return
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (!containerRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', closeOnOutsideClick)
+    return () => document.removeEventListener('mousedown', closeOnOutsideClick)
+  }, [open])
+
+  return (
+    <div className="comment-notifications" ref={containerRef}>
+      <button
+        type="button"
+        className={`notification-lamp${summary.total > 0 ? ' has-unread' : ''}`}
+        onClick={() => {
+          setOpen((current) => !current)
+          refresh()
+        }}
+        aria-label={summary.total > 0 ? `Непрочитані коментарі: ${summary.total}` : 'Нових коментарів немає'}
+        aria-expanded={open}
+        title="Коментарі співробітників"
+      >
+        <Bell size={16} />
+        {summary.total > 0 && <span>{summary.total > 99 ? '99+' : summary.total}</span>}
+      </button>
+      {open && (
+        <section className="notification-popover" aria-label="Нові коментарі">
+          <header>
+            <div><span className="eyebrow">Команда</span><h3>Нові коментарі</h3></div>
+            <span>{summary.total}</span>
+          </header>
+          <div className="notification-list">
+            {loading ? (
+              <div className="notification-state"><LoaderCircle className="spin" size={16} /> Завантажую…</div>
+            ) : error ? (
+              <button type="button" className="notification-state notification-retry" onClick={refresh}>{error}<strong>Повторити</strong></button>
+            ) : summary.comments.length > 0 ? summary.comments.map((comment) => (
+              <button
+                type="button"
+                className="notification-item"
+                key={comment.id}
+                onClick={() => {
+                  setOpen(false)
+                  onOpenComment(comment)
+                }}
+              >
+                <span className="notification-avatar">{commentInitials(comment.author)}</span>
+                <span className="notification-copy">
+                  <span><strong>{comment.author}</strong><time dateTime={comment.createdAt}>{formatDateTime(comment.createdAt)}</time></span>
+                  <b>{comment.taskId} · {comment.taskTitle}</b>
+                  <small>{comment.body}</small>
+                </span>
+                <ChevronRight size={15} />
+              </button>
+            )) : (
+              <div className="notification-state is-empty"><Check size={17} /> Нових коментарів немає</div>
+            )}
+          </div>
+          {'Notification' in window && !browserNotifications && (
+            <button
+              type="button"
+              className="enable-browser-notifications"
+              onClick={() => void enableBrowserNotifications()}
+            >
+              <BellOff size={14} /> Увімкнути системні сповіщення
+            </button>
+          )}
+        </section>
+      )}
+    </div>
+  )
+}
+
+function DeskApp({ user, onLogout }: { user: AuthUser; onLogout: () => void }) {
   const [tasks, setTasks] = useState<Task[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
@@ -2177,6 +2517,7 @@ function App() {
   const [pageSize, setPageSize] = useState(pageSizeOptions[0])
   const [createOpen, setCreateOpen] = useState(false)
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [commentFocus, setCommentFocus] = useState<{ taskId: string; commentId: string } | null>(null)
   const [lightboxAttachment, setLightboxAttachment] = useState<TaskAttachment | null>(null)
   const [updatingId, setUpdatingId] = useState<string | null>(null)
   const [reviewAgainRequest, setReviewAgainRequest] = useState<ReviewAgainRequest | null>(null)
@@ -2188,9 +2529,6 @@ function App() {
   const [connectionLost, setConnectionLost] = useState(false)
   const [conclusionListOpen, setConclusionListOpen] = useState(false)
   const [queueingId, setQueueingId] = useState<string | null>(null)
-  const [notificationsReady, setNotificationsReady] = useState(
-    () => 'Notification' in window && Notification.permission === 'granted',
-  )
 
   const loadTasks = async () => {
     setLoading(true)
@@ -2442,18 +2780,12 @@ function App() {
           <strong>GBA QA Desk</strong>
         </a>
         <div className="topbar-meta">
-          {'Notification' in window && (
-            <button
-              type="button"
-              className={`notify-toggle${notificationsReady ? ' notify-toggle-on' : ''}`}
-              title={notificationsReady ? 'Браузерні сповіщення увімкнено' : 'Увімкнути браузерні сповіщення про зміни статусів'}
-              onClick={() => {
-                void Notification.requestPermission().then((permission) => setNotificationsReady(permission === 'granted'))
-              }}
-            >
-              {notificationsReady ? <Bell size={15} /> : <BellOff size={15} />}
-            </button>
-          )}
+          <CommentNotifications
+            onOpenComment={(comment) => {
+              setCommentFocus({ taskId: comment.taskId, commentId: comment.id })
+              setSelectedId(comment.taskId)
+            }}
+          />
           <span className={`live-indicator${connectionLost ? ' live-indicator-offline' : ''}`}>
             <i /> {connectionLost ? 'Немає зв’язку — перепідключення…' : 'Система онлайн'}
           </span>
@@ -2468,6 +2800,13 @@ function App() {
               }
             }}
           />
+          <div className="topbar-user" title={user.email}>
+            <span className="topbar-user-avatar">{commentInitials(user.displayName)}</span>
+            <span><strong>{user.displayName}</strong><small>{user.email}</small></span>
+          </div>
+          <button type="button" className="logout-button" onClick={onLogout} aria-label="Вийти з акаунта" title="Вийти з акаунта">
+            <LogOut size={16} />
+          </button>
         </div>
       </header>
 
@@ -2599,7 +2938,12 @@ function App() {
       />
       <EditTaskDialog
         task={selectedTask}
-        onClose={() => setSelectedId(null)}
+        user={user}
+        focusCommentId={commentFocus && commentFocus.taskId === selectedTask?.id ? commentFocus.commentId : null}
+        onClose={() => {
+          setSelectedId(null)
+          setCommentFocus(null)
+        }}
         onUpdated={(task) => {
           replaceTask(task)
           setToast(`${task.id} збережено`)
@@ -2633,6 +2977,113 @@ function App() {
       <Lightbox attachment={lightboxAttachment} onClose={() => setLightboxAttachment(null)} />
       {toast && <div className="toast"><Check size={15} /> {toast}</div>}
     </div>
+  )
+}
+
+function LoginPage({ onAuthenticated }: { onAuthenticated: (user: AuthUser) => void }) {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault()
+    setSaving(true)
+    setError('')
+    try {
+      onAuthenticated(await login(email, password))
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : 'Не вдалося увійти.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <main className="login-page">
+      <section className="login-card" aria-labelledby="login-title">
+        <div className="login-brand">
+          <img src={gbaLogo} alt="GBA Assistant" />
+          <div><strong>GBA QA Desk</strong><span>Внутрішній простір команди</span></div>
+        </div>
+        <div className="login-heading">
+          <span className="login-lock"><LockKeyhole size={20} /></span>
+          <div>
+            <h1 id="login-title">Вхід для співробітників</h1>
+            <p>Увійдіть у свій персональний акаунт.</p>
+          </div>
+        </div>
+        <form onSubmit={submit}>
+          <label htmlFor="login-email">Email</label>
+          <div className="login-input-wrap">
+            <UserRound size={17} aria-hidden="true" />
+            <input
+              id="login-email"
+              type="email"
+              autoComplete="username"
+              required
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              placeholder="name@qa-desk.com"
+            />
+          </div>
+          <label htmlFor="login-password">Пароль</label>
+          <div className="login-input-wrap">
+            <LockKeyhole size={17} aria-hidden="true" />
+            <input
+              id="login-password"
+              type="password"
+              autoComplete="current-password"
+              required
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder="Ваш пароль"
+            />
+          </div>
+          {error && <div className="login-error" role="alert">{error}</div>}
+          <button className="button button-primary login-submit" type="submit" disabled={saving || !email || !password}>
+            {saving ? <LoaderCircle className="spin" size={17} /> : <LogIn size={17} />}
+            {saving ? 'Входжу…' : 'Увійти'}
+          </button>
+        </form>
+        <small className="login-security-note">Сесія захищена HttpOnly cookie. Коментарі підписуються вашим акаунтом.</small>
+      </section>
+    </main>
+  )
+}
+
+function App() {
+  const [user, setUser] = useState<AuthUser | null>()
+
+  useEffect(() => {
+    let cancelled = false
+    void getCurrentUser()
+      .then((currentUser) => {
+        if (!cancelled) setUser(currentUser)
+      })
+      .catch(() => {
+        if (!cancelled) setUser(null)
+      })
+    const requireAuthentication = () => setUser(null)
+    window.addEventListener('qa-desk-auth-required', requireAuthentication)
+    return () => {
+      cancelled = true
+      window.removeEventListener('qa-desk-auth-required', requireAuthentication)
+    }
+  }, [])
+
+  if (user === undefined) {
+    return <main className="auth-loading"><LoaderCircle className="spin" size={24} /><span>Перевіряю сесію…</span></main>
+  }
+  if (!user) return <LoginPage onAuthenticated={setUser} />
+
+  return (
+    <DeskApp
+      user={user}
+      onLogout={() => {
+        void logout().finally(() => setUser(null))
+      }}
+    />
   )
 }
 

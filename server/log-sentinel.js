@@ -176,6 +176,7 @@ export class LogSentinel {
     recurCooldownMs = Number.parseInt(process.env.SENTINEL_RECUR_COOLDOWN_MS ?? String(6 * 60 * 60 * 1000), 10),
     suppressBackoffMs = Number.parseInt(process.env.SENTINEL_SUPPRESS_BACKOFF_MS ?? String(15 * 60 * 1000), 10),
     buildTag = process.env.APP_BUILD_NUMBER ?? 'local',
+    internalApiToken = process.env.QA_DESK_INTERNAL_API_TOKEN ?? '',
   } = {}) {
     this.dockerSocket = dockerSocket
     this.deskBaseUrl = deskBaseUrl.replace(/\/$/, '')
@@ -187,8 +188,13 @@ export class LogSentinel {
     this.recurCooldownMs = recurCooldownMs
     this.suppressBackoffMs = suppressBackoffMs
     this.buildTag = buildTag
+    this.internalApiToken = internalApiToken
     this.state = { fingerprints: {}, created: [] }
     this.queue = Promise.resolve()
+  }
+
+  requestHeaders() {
+    return this.internalApiToken ? { Authorization: `Bearer ${this.internalApiToken}` } : {}
   }
 
   async start() {
@@ -344,14 +350,14 @@ export class LogSentinel {
   }
 
   async findTaskById(taskId) {
-    const response = await fetch(`${this.deskBaseUrl}/api/tasks`)
+    const response = await fetch(`${this.deskBaseUrl}/api/tasks`, { headers: this.requestHeaders() })
     if (!response.ok) return null
     const tasks = await response.json()
     return tasks.find((task) => task.id === taskId) ?? null
   }
 
   async findTaskByMarker(fingerprint) {
-    const response = await fetch(`${this.deskBaseUrl}/api/tasks`)
+    const response = await fetch(`${this.deskBaseUrl}/api/tasks`, { headers: this.requestHeaders() })
     if (!response.ok) throw new Error(`desk /api/tasks → ${response.status}`)
     const tasks = await response.json()
     return tasks.find((task) => {
@@ -363,7 +369,7 @@ export class LogSentinel {
   async createDeskTask(draft) {
     const body = new FormData()
     for (const [key, value] of Object.entries(draft)) body.set(key, value)
-    const response = await fetch(`${this.deskBaseUrl}/api/tasks`, { method: 'POST', body })
+    const response = await fetch(`${this.deskBaseUrl}/api/tasks`, { method: 'POST', headers: this.requestHeaders(), body })
     if (!response.ok) {
       const payload = await response.text()
       throw new Error(`desk create → ${response.status}: ${payload.slice(0, 200)}`)

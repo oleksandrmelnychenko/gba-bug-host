@@ -9,6 +9,7 @@
     "dev:web": "vite",
     "worker": "node server/worker.js",
     "migrate": "node server/migrate.js",
+    "provision:user": "node server/provision-users.js",
     "build": "tsc -b && vite build",
     "start": "NODE_ENV=production node server/index.js",
     "test": "node --test tests/*.test.js",

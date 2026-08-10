@@ -34,7 +34,7 @@ export const PUBLIC_VHOSTS = [
   vhost('vh-api', 'gba-api-dev', 'Вхід: data-concord', 'concord', { path: '/health' }),
   vhost('vh-analytics', 'gba-analytics-dev', 'Вхід: data-analytics', 'analytics', { path: '/health' }),
   vhost('vh-ecom-api', 'ecom-api-dev', 'Вхід: ecommerce-api', 'ecom-api', { path: '/health' }),
-  vhost('vh-desk', 'gba-qa-desk', 'Вхід: QA Desk', 'desk-web', { note: 'за basic_auth: 401 = периметр живий' }),
+  vhost('vh-desk', 'gba-qa-desk', 'Вхід: QA Desk', 'desk-web', { note: 'персональний логін у Desk: 401 = периметр живий' }),
 ]
 
 export const TOPOLOGY_GROUPS = [
@@ -72,7 +72,7 @@ export const TOPOLOGY_NODES = [
   {
     id: 'caddy', label: 'Caddy', group: 'edge', kind: 'edge',
     subtitle: 'reverse proxy · 80/443', container: 'gba-prod-caddy-1',
-    note: 'єдиний вхід ззовні: TLS від Let’s Encrypt, basic_auth для деска, vhost-и на dev-сервіси. Ім’я контейнера лишилось із назви compose-проєкту gba-prod — це не продакшен.',
+    note: 'єдиний вхід ззовні: TLS від Let’s Encrypt, персональні сесії для Desk, vhost-и на dev-сервіси. Ім’я контейнера лишилось із назви compose-проєкту gba-prod — це не продакшен.',
   },
   {
     id: 'console-proxy', label: 'nginx у консолі', group: 'edge', kind: 'edge',
@@ -202,7 +202,7 @@ export const TOPOLOGY_EDGES = [
   { from: 'net-docker', to: 'caddy', label: 'мережі проксі' },
   ...PUBLIC_VHOSTS.map((item) => ({ from: item.id, to: 'caddy', label: 'vhost' })),
   ...PUBLIC_VHOSTS.map((item) => ({ from: 'caddy', to: item.target, label: 'reverse_proxy' })),
-  { from: 'caddy', to: 'desk-web', label: 'basic_auth' },
+  { from: 'caddy', to: 'desk-web', label: 'HTTPS + session auth' },
   { from: 'console', to: 'console-proxy', label: 'усі виклики' },
   { from: 'console-proxy', to: 'concord', label: '/api /hubs' },
   { from: 'console-proxy', to: 'analytics', label: '/history /report' },

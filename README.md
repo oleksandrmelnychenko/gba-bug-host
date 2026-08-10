@@ -12,6 +12,7 @@
 - автоматичний запуск Codex після створення задачі;
 - автоматичний повторний запуск через статус «Передивись ще раз»;
 - історія AI-запусків зі станом, результатом і git-гілкою;
+- персональні акаунти співробітників, внутрішні дерева коментарів і лічильник непрочитаного;
 - окремий Codex worker для локального або серверного запуску.
 
 ## Як працює Codex worker
@@ -70,6 +71,7 @@ CODEX_CONCURRENCY=3
 CODEX_WORKER_LEASE_TTL_MS=20000
 CODEX_WORKER_HEARTBEAT_MS=5000
 CODEX_RUN_STALE_MS=30000
+QA_DESK_INTERNAL_API_TOKEN=replace_with_at_least_32_random_bytes
 ```
 
 Потім запустіть:
@@ -78,6 +80,14 @@ CODEX_RUN_STALE_MS=30000
 docker compose up -d --build
 docker compose logs -f worker
 ```
+
+Після першої міграції створіть персональні акаунти. Пароль передається лише в одноразову команду, а в SQLite зберігається `scrypt`-хеш:
+
+```bash
+docker compose exec web npm run provision:user -- user@qa-desk.com "Ім’я" "довгий-унікальний-пароль"
+```
+
+Повторний запуск для того самого email змінює пароль і відкликає всі активні сесії. `QA_DESK_INTERNAL_API_TOKEN` використовують тільки sentinel/release worker; людські коментарі завжди підписуються персональним акаунтом і не передаються Codex.
 
 ### Застосування нових міграцій під час deployment
 

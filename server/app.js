@@ -3,6 +3,17 @@ import { mkdir, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import express from 'express'
 import multer from 'multer'
+import {
+  clearSessionCookie,
+  createSessionToken,
+  hashSessionToken,
+  isMatchingInternalToken,
+  readCookie,
+  sessionCookie,
+  sessionCookieName,
+  sessionLifetimeMs,
+  verifyPassword,
+} from './auth.js'
 import { BuildNumberSource } from './build-source.js'
 import { TaskStore } from './store.js'
 import { TopologyService } from './topology.js'
@@ -126,6 +137,29 @@ function validateTaskInput(body, { partial = false } = {}) {
   }
 }
 
+function validateCommentInput(body, authenticatedUser = null) {
+  const errors = []
+  const author = authenticatedUser?.displayName ?? cleanText(body?.author)
+  const commentBody = cleanText(body?.body)
+  const parentId = cleanText(body?.parentId) || null
+
+  if (author.length < 2) errors.push('Вкажіть ім’я співробітника.')
+  if (author.length > 80) errors.push('Ім’я співробітника має бути коротшим за 80 символів.')
+  if (!commentBody) errors.push('Напишіть текст коментаря.')
+  if (commentBody.length > 5000) errors.push('Коментар має бути коротшим за 5000 символів.')
+  if (parentId && parentId.length > 100) errors.push('Некоректний коментар для відповіді.')
+
+  return {
+    errors,
+    values: {
+      author,
+      authorUserId: authenticatedUser?.internal ? null : authenticatedUser?.id ?? null,
+      body: commentBody,
+      parentId,
+    },
+  }
+}
+
 async function removeUploadedFiles(files) {
   await Promise.all(
     (files ?? []).map((file) => unlink(file.path).catch(() => undefined)),
@@ -148,6 +182,10 @@ export async function createApp(options = {}) {
   const topology = options.topology ?? new TopologyService()
   topology.persist = (heartbeat) => store.saveSystemState('systemd-heartbeat', heartbeat)
   const transcribeAudio = options.transcribeAudio ?? transcribeAudioWithShell
+  const authRequired = options.authRequired ?? process.env.QA_DESK_AUTH_REQUIRED !== 'false'
+  const internalApiToken = options.internalApiToken ?? process.env.QA_DESK_INTERNAL_API_TOKEN ?? ''
+  const secureCookies = options.secureCookies ?? process.env.NODE_ENV === 'production'
+  const loginAttempts = new Map()
 
   await mkdir(uploadsDirectory, { recursive: true })
   await store.ensureReady()
@@ -183,10 +221,95 @@ export async function createApp(options = {}) {
   const app = express()
   app.disable('x-powered-by')
   app.use(express.json({ limit: '1mb' }))
-  app.use('/uploads', express.static(uploadsDirectory, { maxAge: '7d', immutable: true }))
+
+  const authenticateRequest = (request, response, next) => {
+    const publicRequest = request.baseUrl === '/api' && (
+      request.path === '/health'
+      || request.path === '/auth/login'
+      || (request.path === '/builds/current' && request.method === 'GET')
+    )
+    if (publicRequest) {
+      next()
+      return
+    }
+    if (!authRequired) {
+      request.user = null
+      next()
+      return
+    }
+
+    const authorization = request.get('authorization') ?? ''
+    const internalToken = authorization.startsWith('Bearer ') ? authorization.slice(7) : ''
+    if (isMatchingInternalToken(internalToken, internalApiToken)) {
+      request.user = { id: null, email: 'system@qa-desk.local', displayName: 'Система', internal: true }
+      next()
+      return
+    }
+
+    const token = readCookie(request.get('cookie'), sessionCookieName)
+    const user = token ? store.findSession(hashSessionToken(token)) : null
+    if (!user) {
+      response.status(401).json({ message: 'Увійдіть у свій акаунт.' })
+      return
+    }
+    request.user = { ...user, internal: false }
+    next()
+  }
+  app.use('/api', authenticateRequest)
+  app.use('/uploads', authenticateRequest, express.static(uploadsDirectory, { maxAge: '7d', immutable: true }))
 
   app.get('/api/health', (_request, response) => {
     response.json({ ok: true })
+  })
+
+  app.post('/api/auth/login', async (request, response, next) => {
+    try {
+      const email = cleanText(request.body?.email).toLowerCase()
+      const password = typeof request.body?.password === 'string' ? request.body.password : ''
+      const attemptKey = `${request.ip}:${email}`
+      const now = Date.now()
+      const attempts = loginAttempts.get(attemptKey)
+      if (attempts?.resetAt > now && attempts.count >= 5) {
+        response.status(429).json({ message: 'Забагато невдалих спроб. Спробуйте через 15 хвилин.' })
+        return
+      }
+      if (!email || email.length > 254 || !password || password.length > 256) {
+        response.status(401).json({ message: 'Неправильний email або пароль.' })
+        return
+      }
+
+      const user = store.findUserByEmail(email)
+      if (!user?.active || !await verifyPassword(password, user.passwordHash)) {
+        const current = attempts?.resetAt > now ? attempts : { count: 0, resetAt: now + 15 * 60 * 1000 }
+        loginAttempts.set(attemptKey, { ...current, count: current.count + 1 })
+        response.status(401).json({ message: 'Неправильний email або пароль.' })
+        return
+      }
+
+      loginAttempts.delete(attemptKey)
+      const token = createSessionToken()
+      const expiresAt = new Date(now + sessionLifetimeMs).toISOString()
+      store.createSession(hashSessionToken(token), user.id, expiresAt)
+      response.setHeader('Set-Cookie', sessionCookie(token, { secure: secureCookies }))
+      response.json({ id: user.id, email: user.email, displayName: user.displayName })
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  app.get('/api/auth/me', (request, response) => {
+    response.json({
+      id: request.user.id,
+      email: request.user.email,
+      displayName: request.user.displayName,
+    })
+  })
+
+  app.post('/api/auth/logout', (request, response) => {
+    const token = readCookie(request.get('cookie'), sessionCookieName)
+    if (token) store.deleteSession(hashSessionToken(token))
+    response.setHeader('Set-Cookie', clearSessionCookie({ secure: secureCookies }))
+    response.status(204).end()
   })
 
   app.get('/api/topology', async (_request, response, next) => {
@@ -216,6 +339,12 @@ export async function createApp(options = {}) {
     } catch (error) {
       next(error)
     }
+  })
+
+  app.get('/api/comments/unread', (request, response) => {
+    response.json(request.user?.id
+      ? store.unreadCommentsForUser(request.user.id)
+      : { total: 0, comments: [] })
   })
 
   app.get('/api/builds/current', async (_request, response, next) => {
@@ -256,6 +385,8 @@ export async function createApp(options = {}) {
         siteUrl: values.siteUrl,
         notes: values.notes,
         staffComments: values.staffComments,
+        staffCommentAuthor: request.user?.displayName ?? 'Команда',
+        staffCommentAuthorUserId: request.user?.internal ? null : request.user?.id ?? null,
         reviewComment: values.reviewComment,
         area: values.area || 'Загальне',
         project: values.project || 'console',
@@ -309,6 +440,55 @@ export async function createApp(options = {}) {
         store.enqueueAgentRun(randomUUID(), request.params.id, 'review_again')
       }
       response.json(await store.find(request.params.id))
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  app.get('/api/tasks/:id/comments', async (request, response, next) => {
+    try {
+      if (!await store.find(request.params.id)) {
+        response.status(404).json({ message: 'Задачу не знайдено.' })
+        return
+      }
+      response.json(await store.commentsForTask(request.params.id))
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  app.post('/api/tasks/:id/comments', async (request, response, next) => {
+    try {
+      const { errors, values } = validateCommentInput(request.body, request.user)
+      if (errors.length > 0) {
+        response.status(400).json({ message: errors[0], errors })
+        return
+      }
+
+      const result = await store.addTaskComment(randomUUID(), request.params.id, values)
+      if (result.status === 'task_not_found') {
+        response.status(404).json({ message: 'Задачу не знайдено.' })
+        return
+      }
+      if (result.status === 'parent_not_found') {
+        response.status(400).json({ message: 'Коментар, на який ви відповідаєте, не знайдено в цій задачі.' })
+        return
+      }
+      response.status(201).json(result.comment)
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  app.post('/api/tasks/:id/comments/read', async (request, response, next) => {
+    try {
+      if (!await store.find(request.params.id)) {
+        response.status(404).json({ message: 'Задачу не знайдено.' })
+        return
+      }
+      response.json(request.user?.id
+        ? store.markTaskCommentsRead(request.user.id, request.params.id)
+        : { total: 0, comments: [] })
     } catch (error) {
       next(error)
     }
