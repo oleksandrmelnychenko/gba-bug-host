@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { access, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { materializeInstalledDependencies } from './worktree-dependencies.js'
 
 const RELEASE_MARKER = /\[released:([^\]]+)\]/g
 const BLOCKED_MARKER = /\[release-blocked:([^\]]+)\]/g
@@ -425,6 +426,12 @@ export class ReleaseWorker {
       if (ancestor.code === 1) {
         if (!(await pathExists(path.join(worktree, '.git')))) {
           return { ok: false, kind: 'repository', reason: `${repo}: немає worktree для безпечної перевірки ${branch}` }
+        }
+
+        try {
+          await materializeInstalledDependencies(plan.root, worktree)
+        } catch (error) {
+          return { ok: false, kind: 'repository', reason: `${repo}: ${error.message}` }
         }
 
         // Спершу вливаємо актуальний mainline у task-worktree та перевіряємо

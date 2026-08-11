@@ -1,9 +1,10 @@
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { access, lstat, mkdir, readFile, readlink, symlink, unlink, writeFile } from 'node:fs/promises'
+import { access, mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { composePersistentContext, createCodexSessionTracker } from './codex-context.js'
 import { defaultRepoPlan } from './release-worker.js'
+import { materializeInstalledDependencies } from './worktree-dependencies.js'
 
 const outputSchema = {
   type: 'object',
@@ -29,27 +30,6 @@ function safeTaskSlug(taskId) {
 async function pathExists(filePath) {
   try {
     await access(filePath)
-    return true
-  } catch {
-    return false
-  }
-}
-
-async function linkInstalledDependencies(repositoryPath, worktreePath) {
-  const source = path.join(repositoryPath, 'node_modules')
-  const target = path.join(worktreePath, 'node_modules')
-  if (!(await pathExists(source))) return false
-
-  const existing = await lstat(target).catch(() => null)
-  if (existing) {
-    if (!existing.isSymbolicLink()) return false
-    const current = await readlink(target).catch(() => '')
-    if (path.resolve(current) === path.resolve(source)) return false
-    await unlink(target).catch(() => undefined)
-  }
-
-  try {
-    await symlink(source, target, 'dir')
     return true
   } catch {
     return false
@@ -190,7 +170,7 @@ ${persistentContext}
 4. У reviewedAttachments поверни оригінальні назви всіх переглянутих файлів. Якщо вкладень немає, поверни порожній масив.
 
 Середовище перевірок (мережі немає — нічого не встановлюй і не оновлюй):
-- node_modules у JS-worktree-ах уже підлінковані з основного репозиторію, тож npx-команди працюють одразу.
+- node_modules у JS-worktree-ах уже локально підготовлені з основного репозиторію, тож npx-команди працюють одразу.
 - .NET SDK 10 стоїть у /usr/share/dotnet і доступний як dotnet; кеш NuGet прогрітий, тож dotnet build працює офлайн (якщо restore лізе в мережу, додай --no-restore).
 - Пісочниця не дає відкривати сокети, тому dotnet test (VSTest/testhost) тут падає ще до старту тестів — це обмеження середовища, а не твоя помилка.
 - Кожну команду запускай усередині відповідного worktree, наприклад: cd ./gba_console && npx tsc --noEmit
@@ -497,7 +477,7 @@ export class CodexWorker {
         if (added.code !== 0) throw new Error(`Не вдалося створити worktree для ${repository.name}: ${added.stderr || added.stdout}`)
       }
 
-      await linkInstalledDependencies(repository.repositoryPath, worktreePath)
+      await materializeInstalledDependencies(repository.repositoryPath, worktreePath)
       worktrees.push({ ...repository, worktreePath })
     }
 

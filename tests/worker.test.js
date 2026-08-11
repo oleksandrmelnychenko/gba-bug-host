@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { chmod, mkdir, mkdtemp, readFile, readlink, rm, symlink, unlink, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -409,7 +409,7 @@ writeFileSync(outputPath, JSON.stringify({
   }
 })
 
-test('Codex worker лінкує залежності у worktree і диктує перевірки репозиторію', async () => {
+test('Codex worker локально hardlink-клонує залежності у worktree і диктує перевірки репозиторію', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'gba-codex-checks-'))
   const repository = path.join(root, 'gba_console')
   const dataDirectory = path.join(root, 'data')
@@ -482,12 +482,22 @@ writeFileSync(outputPath, JSON.stringify({
     assert.match(prompt, /мережі немає/)
 
     const linkPath = path.join(jobDirectory, 'gba_console', 'node_modules')
+    assert.equal((await lstat(linkPath)).isSymbolicLink(), false)
+    assert.equal(
+      (await stat(path.join(linkPath, 'marker.txt'))).ino,
+      (await stat(path.join(repository, 'node_modules', 'marker.txt'))).ino,
+    )
+
     const decoy = path.join(root, 'decoy-node-modules')
     await mkdir(decoy, { recursive: true })
-    await unlink(linkPath)
+    await rm(linkPath, { recursive: true, force: true })
     await symlink(decoy, linkPath, 'dir')
     await worker.ensureWorktrees('BUG-1049', worker.resolveProjectStack('console'))
-    assert.equal(await readlink(linkPath), path.join(repository, 'node_modules'))
+    assert.equal((await lstat(linkPath)).isSymbolicLink(), false)
+    assert.equal(
+      (await stat(path.join(linkPath, 'marker.txt'))).ino,
+      (await stat(path.join(repository, 'node_modules', 'marker.txt'))).ino,
+    )
   } finally {
     if (previousStack === undefined) delete process.env.CODEX_REPOS_CONSOLE
     else process.env.CODEX_REPOS_CONSOLE = previousStack
