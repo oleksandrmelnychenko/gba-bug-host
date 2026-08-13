@@ -190,8 +190,8 @@ export const TOPOLOGY_NODES = [
   },
   {
     id: 'desk-release', label: 'Реліз-воркер', group: 'qa', kind: 'unit',
-    subtitle: 'merge → тести → push → deploy', unit: 'gba-qa-release.service',
-    note: 'єдиний, хто мерджить і деплоїть; він же шле сюди стан systemd-юнітів хоста',
+    subtitle: 'validation → push → migrations → deploy → health', unit: 'gba-qa-release.service',
+    note: 'singleton-воркер; ready_for_retest ставить лише після живого доказу DEV',
   },
 
 ]

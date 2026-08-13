@@ -131,7 +131,8 @@ writeFileSync(outputPath, JSON.stringify({
   summary: 'Тестове виправлення готове.',
   tests: ['fixture test'],
   changedFiles: ['app.txt'],
-  reviewedAttachments: ['proof.png', 'walkthrough.mp4', 'missing.mov — недоступне']
+  reviewedAttachments: ['proof.png', 'walkthrough.mp4', 'missing.mov — недоступне'],
+  releasePlan: { repositories: ['target'], migrationFiles: [], services: [], postDeployChecks: [{ label: 'fixture', url: 'http://127.0.0.1/health', expectedStatus: 200, contains: '' }] }
 }), 'utf8')
 `, 'utf8')
   await chmod(fakeCodex, 0o755)
@@ -198,7 +199,7 @@ writeFileSync(outputPath, JSON.stringify({
     const result = store.findAgentRun(run.id)
     assert.equal(result.status, 'completed')
     assert.equal(result.summary, 'Тестове виправлення готове.')
-    assert.equal(store.find('BUG-1051').status, 'ready_for_retest')
+    assert.equal(store.find('BUG-1051').status, 'in_progress')
     // Вердикт Codex НЕ кладе задачу в бакет білда: код ще не в мейнлайні.
     // Мітку ставить реліз-воркер після успішного мерджу й деплою.
     assert.deepEqual(store.ensureBuild('worker-test-build').bugs, [])
@@ -215,7 +216,7 @@ writeFileSync(outputPath, JSON.stringify({
     assert.match(prompt, /missing\.mov.*ФАЙЛ НЕДОСТУПНИЙ/)
     assert.match(prompt, /Відкрий кожне доступне вкладення/)
     assert.match(prompt, /створи НОВУ forward-only міграцію/)
-    assert.match(prompt, /У tests явно вкажи команду застосування міграцій і результат/)
+    assert.match(prompt, /release-worker сам застосує штатний migrator/)
     assert.doesNotMatch(prompt, /Внутрішній коментар команди/)
     assert.doesNotMatch(prompt, /Це новіший коментар, який не належить RUN-TEST-1/)
     assert.deepEqual(
@@ -266,7 +267,8 @@ writeFileSync(outputPath, JSON.stringify({
   summary: \`Виправлення \${count} готове.\`,
   tests: ['fixture test'],
   changedFiles: ['app.txt'],
-  reviewedAttachments: []
+  reviewedAttachments: [],
+  releasePlan: { repositories: ['target'], migrationFiles: [], services: [], postDeployChecks: [{ label: 'fixture', url: 'http://127.0.0.1/health', expectedStatus: 200, contains: '' }] }
 }), 'utf8')
 `, 'utf8')
   await chmod(fakeCodex, 0o755)
@@ -362,7 +364,8 @@ writeFileSync(outputPath, JSON.stringify({
   summary: 'Фул-стек виправлення готове.',
   tests: ['fixture test'],
   changedFiles: ['frontend/app.txt', 'backend/app.txt'],
-  reviewedAttachments: []
+  reviewedAttachments: [],
+  releasePlan: { repositories: ['frontend', 'backend'], migrationFiles: [], services: [], postDeployChecks: [{ label: 'fixture', url: 'http://127.0.0.1/health', expectedStatus: 200, contains: '' }] }
 }), 'utf8')
 `, 'utf8')
   await chmod(fakeCodex, 0o755)
@@ -409,7 +412,7 @@ writeFileSync(outputPath, JSON.stringify({
   }
 })
 
-test('Codex worker локально hardlink-клонує залежності у worktree і диктує перевірки репозиторію', async () => {
+test('Codex worker ізолює залежності у worktree і диктує перевірки репозиторію', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'gba-codex-checks-'))
   const repository = path.join(root, 'gba_console')
   const dataDirectory = path.join(root, 'data')
@@ -441,7 +444,8 @@ writeFileSync(outputPath, JSON.stringify({
   summary: 'Перевірки пройдені.',
   tests: ['npx tsc --noEmit'],
   changedFiles: [],
-  reviewedAttachments: []
+  reviewedAttachments: [],
+  releasePlan: { repositories: [], migrationFiles: [], services: [], postDeployChecks: [{ label: 'fixture', url: 'http://127.0.0.1/health', expectedStatus: 200, contains: '' }] }
 }), 'utf8')
 `, 'utf8')
   await chmod(fakeCodex, 0o755)
@@ -483,9 +487,25 @@ writeFileSync(outputPath, JSON.stringify({
 
     const linkPath = path.join(jobDirectory, 'gba_console', 'node_modules')
     assert.equal((await lstat(linkPath)).isSymbolicLink(), false)
+    assert.notEqual(
+      (await stat(path.join(linkPath, 'marker.txt'))).ino,
+      (await stat(path.join(repository, 'node_modules', 'marker.txt'))).ino,
+    )
+    assert.equal(store.findAgentRun(run.id).status, 'needs_review')
+    assert.match(store.findAgentRun(run.id).summary, /автоматичний released заборонено/)
+
+    await rm(linkPath, { recursive: true, force: true })
+    execFileSync('cp', ['-al', '--', path.join(repository, 'node_modules'), linkPath])
     assert.equal(
       (await stat(path.join(linkPath, 'marker.txt'))).ino,
       (await stat(path.join(repository, 'node_modules', 'marker.txt'))).ino,
+      'fixture справді відтворює старий небезпечний hardlink clone',
+    )
+    await worker.ensureWorktrees('BUG-1049', worker.resolveProjectStack('console'))
+    assert.notEqual(
+      (await stat(path.join(linkPath, 'marker.txt'))).ino,
+      (await stat(path.join(repository, 'node_modules', 'marker.txt'))).ino,
+      'старий hardlink clone має бути rematerialized ізольовано',
     )
 
     const decoy = path.join(root, 'decoy-node-modules')
@@ -494,7 +514,7 @@ writeFileSync(outputPath, JSON.stringify({
     await symlink(decoy, linkPath, 'dir')
     await worker.ensureWorktrees('BUG-1049', worker.resolveProjectStack('console'))
     assert.equal((await lstat(linkPath)).isSymbolicLink(), false)
-    assert.equal(
+    assert.notEqual(
       (await stat(path.join(linkPath, 'marker.txt'))).ino,
       (await stat(path.join(repository, 'node_modules', 'marker.txt'))).ino,
     )

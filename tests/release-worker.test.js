@@ -1,9 +1,46 @@
 import assert from 'node:assert/strict'
-import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { ReleaseWorker, branchName, defaultRepoPlan, hasWorkNewerThanGate, isReleased, isSandboxLimitedReview, isSentinelTask, lastGateAt, releaseStatusFor, selectReleasableTasks, taskSlug } from '../server/release-worker.js'
+import { ReleaseWorker, branchName, defaultRepoPlan, hasWorkNewerThanGate, isMigrationFile, isReleased, isRetryableValidation, isSandboxLimitedReview, isSentinelTask, lastGateAt, parseComposePs, releaseStatusFor, selectReleasableTasks, selectRepositoryChecks, taskSlug, validateReleaseHandoff, validationGateFingerprint } from '../server/release-worker.js'
+import { materializeInstalledDependencies } from '../server/worktree-dependencies.js'
+
+function releasePlanDetails(repositories = ['repo'], services = []) {
+  return JSON.stringify({
+    releasePlan: {
+      repositories,
+      services,
+      migrationFiles: [],
+      postDeployChecks: [{
+        label: 'task scenario',
+        url: 'http://127.0.0.1/task-scenario',
+        expectedStatus: 200,
+        contains: '',
+      }],
+    },
+  })
+}
+
+test('release gate перевідтворює agent-writable dependencies із trusted main', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-release-deps-'))
+  const repository = path.join(root, 'main')
+  const worktree = path.join(root, 'worktree')
+  const trustedRunner = path.join(repository, 'node_modules', '.bin', 'verify')
+  const targetRunner = path.join(worktree, 'node_modules', '.bin', 'verify')
+  await mkdir(path.dirname(trustedRunner), { recursive: true })
+  await mkdir(path.dirname(targetRunner), { recursive: true })
+  await writeFile(trustedRunner, 'trusted\n', 'utf8')
+  await writeFile(targetRunner, 'agent-tampered\n', 'utf8')
+  await writeFile(path.join(worktree, 'node_modules', '.gba-isolated-dependencies-v2'), 'isolated-v2\n', 'utf8')
+
+  try {
+    await materializeInstalledDependencies(repository, worktree, { forceRefresh: true })
+    assert.equal(await readFile(targetRunner, 'utf8'), 'trusted\n')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 test('слаг і назва гілки збігаються з worker-конвенцією', () => {
   assert.equal(taskSlug('BUG-1024'), 'bug-1024')
@@ -118,7 +155,7 @@ test('структурований release-state відновлює pending/retr
     task('blocked', 'blocked'),
   ]
 
-  assert.deepEqual(selectReleasableTasks(tasks).map((item) => item.id), ['pending', 'processing', 'retrying'])
+  assert.deepEqual(selectReleasableTasks(tasks).map((item) => item.id), ['processing', 'retrying', 'pending'])
 })
 
 test('settle одного нового кандидата не блокує вже готові задачі', async () => {
@@ -170,7 +207,7 @@ test('детермінована release-помилка блокується п�
   assert.match(annotations[0], /release-blocked/)
 })
 
-test('застарілий full-stack repo без унікальних патчів не потрапляє у release', async () => {
+test('застарілий full-stack repo без доказаного коміту не отримує false release', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'gba-release-main-'))
   const worktrees = await mkdtemp(path.join(tmpdir(), 'gba-release-worktrees-'))
   const worktree = path.join(worktrees, 'bug-2089', 'repo')
@@ -195,7 +232,9 @@ test('застарілий full-stack repo без унікальних патч�
       agentRun: { releaseRepositories: ['repo'] },
     })
 
-    assert.deepEqual(outcome, { ok: true, repos: [], alreadyMerged: true })
+    assert.equal(outcome.ok, false)
+    assert.equal(outcome.kind, 'repository')
+    assert.match(outcome.reason, /жодного реального коміту/)
   } finally {
     await rm(root, { recursive: true, force: true })
     await rm(worktrees, { recursive: true, force: true })
@@ -208,7 +247,7 @@ test('перевірка нового мерджу виконується у tas
   const task = {
     id: 'BUG-2090',
     title: 'Crash-safe validation',
-    agentRun: { id: 'RUN-2090', releaseRepositories: [] },
+    agentRun: { id: 'RUN-2090', releaseRepositories: [], details: releasePlanDetails() },
   }
   const worktree = path.join(worktrees, 'bug-2090', 'repo')
   await mkdir(worktree, { recursive: true })
@@ -227,6 +266,7 @@ test('перевірка нового мерджу виконується у tas
     },
     processRunner: async (command, args, options = {}) => {
       calls.push({ command, args, cwd: options.cwd })
+      if (args.includes('symbolic-ref')) return { code: 0, output: 'main' }
       if (command === 'verify') return { code: 1, output: 'red' }
       if (args.includes('log')) return { code: 0, output: 'c'.repeat(40) }
       if (args.includes('rev-parse')) return { code: 0, output: baseline }
@@ -264,7 +304,7 @@ test('зелений кандидат fast-forward-иться у mainline лиш
   const task = {
     id: 'BUG-2091',
     title: 'Validated publish',
-    agentRun: { id: 'RUN-2091', releaseRepositories: [] },
+    agentRun: { id: 'RUN-2091', releaseRepositories: [], details: releasePlanDetails() },
   }
   const worktree = path.join(worktrees, 'bug-2091', 'repo')
   await mkdir(worktree, { recursive: true })
@@ -283,6 +323,7 @@ test('зелений кандидат fast-forward-иться у mainline лиш
     },
     processRunner: async (command, args, options = {}) => {
       calls.push({ command, args, cwd: options.cwd })
+      if (args.includes('symbolic-ref')) return { code: 0, output: 'main' }
       if (args.includes('log')) return { code: 0, output: 'c'.repeat(40) }
       if (args.includes('rev-parse')) return { code: 0, output: baseline }
       if (args.includes('merge-base')) return { code: 1, output: '' }
@@ -300,10 +341,103 @@ test('зелений кандидат fast-forward-иться у mainline лиш
     assert.ok(checkIndex >= 0)
     assert.ok(publishIndex > checkIndex)
     assert.equal(calls[checkIndex].cwd, worktree)
-    assert.equal(calls[publishIndex].args.at(-1), 'codex/qa-bug-2091')
+    assert.equal(calls[publishIndex].args.at(-1), baseline)
     assert.equal(
-      calls.some((call) => call.command === 'git' && call.args.includes('push')),
+      calls.some((call) => call.command === 'git'
+        && call.args.includes('push')
+        && call.args.includes(`${baseline}:refs/heads/main`)),
       true)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    await rm(worktrees, { recursive: true, force: true })
+  }
+})
+
+test('змінений після validation task ref не може підмінити перевірений commit', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-release-main-'))
+  const worktrees = await mkdtemp(path.join(tmpdir(), 'gba-release-worktrees-'))
+  const worktree = path.join(worktrees, 'bug-2096', 'repo')
+  await mkdir(worktree, { recursive: true })
+  await writeFile(path.join(worktree, '.git'), 'gitdir fixture', 'utf8')
+  const branch = 'codex/qa-bug-2096'
+  const baseline = 'b'.repeat(40)
+  const validated = 'c'.repeat(40)
+  const changed = 'd'.repeat(40)
+  const calls = []
+  const worker = new ReleaseWorker({
+    worktreesDirectory: worktrees,
+    repoPlan: { repo: { branch: 'main', root, services: [], checks: [['verify']] } },
+    processRunner: async (command, args) => {
+      calls.push([command, ...args].join(' '))
+      if (args.includes('symbolic-ref')) return { code: 0, output: 'main' }
+      if (args.includes('log')) return { code: 0, output: validated }
+      if (args.includes('merge-base')) return { code: 1, output: '' }
+      if (args.includes('rev-parse') && args.at(-1) === branch) return { code: 0, output: changed }
+      if (args.includes('rev-parse') && args.includes(worktree)) return { code: 0, output: validated }
+      if (args.includes('rev-parse')) return { code: 0, output: baseline }
+      return { code: 0, output: '' }
+    },
+  })
+  worker.updateRelease = async () => {}
+
+  try {
+    const outcome = await worker.releaseTask({
+      id: 'BUG-2096',
+      title: 'Mutable task ref',
+      agentRun: { id: 'RUN-2096', details: releasePlanDetails() },
+    })
+    assert.equal(outcome.ok, false)
+    assert.equal(outcome.kind, 'transient')
+    assert.match(outcome.reason, /task-гілка змінилася/)
+    assert.equal(calls.some((call) => call.includes('merge --ff-only')), false)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    await rm(worktrees, { recursive: true, force: true })
+  }
+})
+
+test('already-merged mainline теж pin-иться на перевірений baseline', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-release-main-'))
+  const worktrees = await mkdtemp(path.join(tmpdir(), 'gba-release-worktrees-'))
+  const worktree = path.join(worktrees, 'bug-2097', 'repo')
+  await mkdir(worktree, { recursive: true })
+  await writeFile(path.join(worktree, '.git'), 'gitdir fixture', 'utf8')
+  const baseline = 'e'.repeat(40)
+  const changed = 'f'.repeat(40)
+  let headReads = 0
+  const calls = []
+  const worker = new ReleaseWorker({
+    worktreesDirectory: worktrees,
+    repoPlan: { repo: { branch: 'main', root, services: [], checks: [['verify']] } },
+    processRunner: async (command, args) => {
+      calls.push([command, ...args].join(' '))
+      if (args.includes('symbolic-ref')) return { code: 0, output: 'main' }
+      if (args.includes('log')) return { code: 0, output: '' }
+      if (args.includes('--is-ancestor')) return { code: 0, output: '' }
+      if (args.includes('rev-parse')) {
+        headReads += 1
+        return { code: 0, output: headReads === 1 ? baseline : changed }
+      }
+      return { code: 0, output: '' }
+    },
+  })
+  worker.updateRelease = async () => {}
+
+  try {
+    const outcome = await worker.releaseTask({
+      id: 'BUG-2097',
+      title: 'Already merged baseline race',
+      agentRun: {
+        id: 'RUN-2097',
+        releaseRepositories: ['repo'],
+        details: releasePlanDetails(),
+        releaseEvidence: { repositories: { repo: { files: [] } } },
+      },
+    })
+    assert.equal(outcome.ok, false)
+    assert.equal(outcome.kind, 'transient')
+    assert.match(outcome.reason, /mainline змінився/)
+    assert.equal(calls.some((call) => call.includes('push origin')), false)
   } finally {
     await rm(root, { recursive: true, force: true })
     await rm(worktrees, { recursive: true, force: true })
@@ -319,7 +453,7 @@ test('одноразовий флейк перевірки повторюєть�
   const task = {
     id: 'BUG-2092',
     title: 'Flaky validation',
-    agentRun: { id: 'RUN-2092', releaseRepositories: [] },
+    agentRun: { id: 'RUN-2092', releaseRepositories: [], details: releasePlanDetails() },
   }
   const baseline = 'd'.repeat(40)
   let validationAttempts = 0
@@ -330,11 +464,12 @@ test('одноразовий флейк перевірки повторюєть�
         branch: 'main',
         root,
         services: [],
-        checks: [['verify', 'candidate']],
+        checks: [['dotnet', 'test', 'suite.csproj']],
       },
     },
     processRunner: async (command, args) => {
-      if (command === 'verify') {
+      if (args.includes('symbolic-ref')) return { code: 0, output: 'main' }
+      if (command === 'dotnet') {
         validationAttempts += 1
         return validationAttempts === 1
           ? { code: 1, output: 'timing flake' }
@@ -359,6 +494,197 @@ test('одноразовий флейк перевірки повторюєть�
   }
 })
 
+test('build-помилка не запускає повну команду вдруге, retry дозволений лише відомим test-flake', () => {
+  assert.equal(isRetryableValidation(['npm', 'run', 'build'], { output: 'timing flake' }), false)
+  assert.equal(isRetryableValidation(['dotnet', 'test', 'suite.csproj'], { output: 'compile error' }), false)
+  assert.equal(isRetryableValidation(['dotnet', 'test', 'suite.csproj'], { output: 'ConsumerTimeout_ReleasesLease failed' }), true)
+})
+
+test('server release запускає тільки тести відомого зміненого контуру, невідомий source fail-closed бере всі', () => {
+  const plan = defaultRepoPlan['gba-server']
+  const names = (files) => selectRepositoryChecks(plan, files).map((check) => check.join(' '))
+  const api = names(['src/Global.Business.Assistant.Api/Controllers/SalesController.cs'])
+  assert.equal(api.some((name) => name.includes('Api.Tests')), true)
+  assert.equal(api.some((name) => name.includes('Platform.Actors.Tests')), false)
+  assert.equal(api.some((name) => name.includes('Domain.Tests')), false)
+
+  const application = names(['src/Global.Business.Assistant.Application/Sales/SaleService.cs'])
+  assert.equal(application.some((name) => name.includes('Api.Tests')), true)
+  assert.equal(application.some((name) => name.includes('Platform.Actors.Tests')), false)
+
+  const actor = names(['src/Global.Business.Assistant.Supply.Actors/SupplyActor.cs'])
+  assert.equal(actor.some((name) => name.includes('Platform.Actors.Tests')), true)
+  assert.equal(actor.some((name) => name.includes('Domain.Tests')), false)
+
+  const unknown = names(['src/Global.Business.Assistant.SharedKernel/Money.cs'])
+  assert.equal(unknown.filter((name) => name.includes(' test ')).length, 3)
+})
+
+test('release handoff звіряє repo/services/migrations і дозволяє лише безпечний DEV GET', () => {
+  const migration = 'src/Global.Business.Assistant.Database/Migrations/20260813_AddProof.cs'
+  assert.equal(isMigrationFile('gba-server', migration), true)
+  const evidence = { 'gba-server': { files: [migration] } }
+  const valid = validateReleaseHandoff({
+    repositories: ['gba-server'],
+    services: ['data-concord', 'data-analytics'],
+    migrationFiles: [`gba-server:${migration}`],
+    postDeployChecks: [{
+      label: 'sales page',
+      url: 'https://gba-console-dev.85.17.167.167.nip.io/sales/ukraine/all',
+      expectedStatus: 200,
+      contains: '',
+    }],
+  }, ['gba-server'], ['data-concord', 'data-analytics'], evidence, defaultRepoPlan)
+  assert.equal(valid.ok, true)
+  assert.equal(valid.legacy, false)
+
+  const missing = validateReleaseHandoff({}, ['gba-server'], ['data-concord'], evidence, defaultRepoPlan)
+  assert.equal(missing.ok, false)
+  assert.match(missing.reason, /releasePlan/)
+
+  const missingMigration = validateReleaseHandoff({
+    repositories: ['gba-server'],
+    services: ['data-concord', 'data-analytics'],
+    migrationFiles: [],
+    postDeployChecks: valid.checks,
+  }, ['gba-server'], ['data-concord', 'data-analytics'], evidence, defaultRepoPlan)
+  assert.equal(missingMigration.ok, false)
+  assert.match(missingMigration.reason, /migrationFiles/)
+
+  const external = validateReleaseHandoff({
+    repositories: ['gba-server'],
+    services: ['data-concord', 'data-analytics'],
+    migrationFiles: [`gba-server:${migration}`],
+    postDeployChecks: [{ label: 'bad', url: 'https://example.com', expectedStatus: 200, contains: '' }],
+  }, ['gba-server'], ['data-concord', 'data-analytics'], evidence, defaultRepoPlan)
+  assert.equal(external.ok, false)
+  assert.match(external.reason, /allowlist/)
+})
+
+test('невалідний release handoff зупиняє задачу до тестів і merge', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-release-main-'))
+  const worktrees = await mkdtemp(path.join(tmpdir(), 'gba-release-worktrees-'))
+  const worktree = path.join(worktrees, 'bug-2095', 'repo')
+  await mkdir(worktree, { recursive: true })
+  await writeFile(path.join(worktree, '.git'), 'gitdir fixture', 'utf8')
+  const calls = []
+  const worker = new ReleaseWorker({
+    worktreesDirectory: worktrees,
+    repoPlan: { repo: { branch: 'main', root, services: [], checks: [['verify']] } },
+    processRunner: async (command, args) => {
+      calls.push([command, ...args].join(' '))
+      if (args.includes('log')) return { code: 0, output: 'a'.repeat(40) }
+      if (args.includes('merge-base')) return { code: 1, output: '' }
+      return { code: 0, output: '' }
+    },
+  })
+  worker.updateRelease = async () => {}
+  const task = {
+    id: 'BUG-2095',
+    title: 'Bad handoff',
+    agentRun: {
+      id: 'RUN-2095',
+      details: JSON.stringify({
+        releasePlan: {
+          repositories: ['wrong-repo'],
+          services: [],
+          migrationFiles: [],
+          postDeployChecks: [{
+            label: 'health', url: 'http://127.0.0.1/health', expectedStatus: 200, contains: '',
+          }],
+        },
+      }),
+    },
+  }
+
+  try {
+    const outcome = await worker.releaseTask(task)
+    assert.equal(outcome.ok, false)
+    assert.equal(outcome.phase, 'preflight')
+    assert.match(outcome.reason, /repositories/)
+    assert.equal(calls.some((call) => call.startsWith('verify ')), false)
+    assert.equal(calls.some((call) => call.includes('--ff-only')), false)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    await rm(worktrees, { recursive: true, force: true })
+  }
+})
+
+test('healthy старий image без published git SHA не проходить deployment proof', async () => {
+  const imageId = `sha256:${'1'.repeat(64)}`
+  const worker = new ReleaseWorker({
+    probes: { service: 'http://127.0.0.1/health' },
+    processRunner: async (command, args) => {
+      if (command === 'docker' && args[0] === 'inspect') return { code: 0, output: imageId }
+      if (command === 'docker' && args[0] === 'image') return { code: 0, output: JSON.stringify({ 'gba.git.sha': 'old-commit' }) }
+      return { code: 0, output: '' }
+    },
+  })
+  worker.captureDeployment = async () => ({
+    service: {
+      Service: 'service', ID: 'container', State: 'running', Health: 'healthy', Image: 'service:latest',
+      Labels: 'com.docker.compose.image=sha256:old,gba.git.sha=old-commit',
+    },
+  })
+  const result = await worker.verifyDeployment(['service'], {}, { service: 'new-commit' })
+  assert.equal(result.ok, false)
+  assert.match(result.reason, /не збігається/)
+})
+
+test('успішна validation того самого commit повторно не запускає батарею після deploy-retry', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-release-main-'))
+  const worktrees = await mkdtemp(path.join(tmpdir(), 'gba-release-worktrees-'))
+  const worktree = path.join(worktrees, 'bug-2094', 'repo')
+  await mkdir(worktree, { recursive: true })
+  await writeFile(path.join(worktree, '.git'), 'gitdir fixture', 'utf8')
+  const commit = 'f'.repeat(40)
+  let validations = 0
+  const task = {
+    id: 'BUG-2094',
+    title: 'Resume after deploy',
+    agentRun: {
+      id: 'RUN-2094',
+      releaseRepositories: ['repo'],
+      details: releasePlanDetails(['repo'], ['service']),
+      releaseEvidence: {
+        repositories: {
+          repo: {
+            validatedCommit: commit,
+            validation: 'passed',
+            files: [],
+            gateFingerprint: validationGateFingerprint('repo', commit, [], [['verify']]),
+          },
+        },
+      },
+    },
+  }
+  const worker = new ReleaseWorker({
+    worktreesDirectory: worktrees,
+    repoPlan: { repo: { branch: 'main', root, services: ['service'], checks: [['verify']] } },
+    processRunner: async (command, args) => {
+      if (args.includes('symbolic-ref')) return { code: 0, output: 'main' }
+      if (command === 'verify') {
+        validations += 1
+        return { code: 0, output: '' }
+      }
+      if (args.includes('log')) return { code: 0, output: '' }
+      if (args.includes('--is-ancestor')) return { code: 0, output: '' }
+      if (args.includes('rev-parse')) return { code: 0, output: commit }
+      return { code: 0, output: '' }
+    },
+  })
+  worker.updateRelease = async () => {}
+
+  try {
+    const outcome = await worker.releaseTask(task)
+    assert.equal(outcome.ok, true)
+    assert.equal(validations, 0)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    await rm(worktrees, { recursive: true, force: true })
+  }
+})
+
 test('deploy failure лишає задачу retrying, а наступний успіх завершує release', async () => {
   const task = {
     id: 'BUG-2002',
@@ -369,6 +695,7 @@ test('deploy failure лишає задачу retrying, а наступний у�
       id: 'RUN-2002',
       releaseAttempts: 0,
       releaseRepositories: ['repo'],
+      details: releasePlanDetails(['repo'], ['service']),
     },
   }
   const repoPlan = { repo: { branch: 'main', root: '/repo', services: ['service'], checks: [] } }
@@ -376,6 +703,8 @@ test('deploy failure лишає задачу retrying, а наступний у�
   const updateRelease = async (item, values) => {
     item.agentRun.releaseStatus = values.status
     if (values.attempts !== undefined) item.agentRun.releaseAttempts = values.attempts
+    if (values.phase !== undefined) item.agentRun.releasePhase = values.phase
+    if (values.evidence !== undefined) item.agentRun.releaseEvidence = values.evidence
     if (values.taskStatus) item.status = values.taskStatus
   }
   const failed = new ReleaseWorker({
@@ -383,26 +712,70 @@ test('deploy failure лишає задачу retrying, а наступний у�
     processRunner: async () => ({ code: 1, output: 'compose failed' }),
   })
   failed.releaseTask = async () => ({ ok: true, repos: ['repo'] })
+  failed.verifyPublishedWorktrees = async () => ({ ok: true })
   failed.updateRelease = updateRelease
   failed.annotate = async (_item, line) => annotations.push(line)
 
   await failed.releaseBatch([task])
   assert.equal(task.agentRun.releaseStatus, 'retrying')
   assert.equal(task.agentRun.releaseAttempts, 1)
-  assert.match(annotations.at(-1), /автоматична повторна спроба/)
+  assert.match(annotations.at(-1), /release-retry.*deploying/)
 
+  let deployed = false
+  const calls = []
+  const successfulPlan = {
+    repo: {
+      ...repoPlan.repo,
+      migration: { command: 'migrate', args: ['apply'], timeoutMs: 60_000 },
+    },
+  }
   const succeeded = new ReleaseWorker({
-    repoPlan,
-    processRunner: async () => ({ code: 0, output: '' }),
+    repoPlan: successfulPlan,
+    probes: { service: 'http://service/health' },
+    processRunner: async (command, args) => {
+      calls.push([command, ...args].join(' '))
+      if (command === 'docker' && args.includes('ps')) {
+        return {
+          code: 0,
+          output: JSON.stringify({
+            Service: 'service',
+            ID: deployed ? 'new-container' : 'old-container',
+            State: 'running',
+            Health: 'healthy',
+            Image: 'service:latest',
+            Labels: 'com.docker.compose.image=sha256:new-image,gba.git.sha=abc',
+          }),
+        }
+      }
+      if (command === 'docker' && args[0] === 'inspect') return { code: 0, output: `sha256:${'2'.repeat(64)}` }
+      if (command === 'docker' && args[0] === 'image') return { code: 0, output: JSON.stringify({ 'gba.git.sha': 'abc' }) }
+      if (command === 'docker' && args.includes('up')) deployed = true
+      if (command === 'curl' && args.includes('-w')) return { code: 0, output: 'ok\n200' }
+      return { code: 0, output: 'ok' }
+    },
   })
-  succeeded.releaseTask = async () => ({ ok: true, repos: ['repo'] })
+  succeeded.releaseTask = async () => ({
+    ok: true,
+    repos: ['repo'],
+    alreadyMerged: false,
+    repositoryEvidence: { repo: { commit: 'abc', pushed: true } },
+  })
+  succeeded.verifyPublishedWorktrees = async () => ({ ok: true })
   succeeded.updateRelease = updateRelease
   succeeded.annotate = async (_item, line) => annotations.push(line)
   succeeded.cleanupReleasedWorktrees = async () => []
 
   await succeeded.releaseBatch([task])
   assert.equal(task.agentRun.releaseStatus, 'released')
+  assert.equal(task.agentRun.releasePhase, 'released')
   assert.equal(task.status, 'ready_for_retest')
+  assert.ok(calls.findIndex((call) => call.startsWith('migrate apply')) < calls.findIndex((call) => call.includes(' up ')))
+  assert.ok(calls.findIndex((call) => call.includes(' up ')) < calls.findIndex((call) => call.startsWith('curl ')))
+})
+
+test('compose ps parser підтримує JSON array та JSON-lines', () => {
+  assert.equal(parseComposePs('[{"Service":"a"}]')[0].Service, 'a')
+  assert.deepEqual(parseComposePs('{"Service":"a"}\n{"Service":"b"}').map((item) => item.Service), ['a', 'b'])
 })
 
 test('після release прибираються worktree і вже влита локальна гілка', async () => {

@@ -18,7 +18,15 @@ async function withTestApp(run, appOptions = {}) {
   const store = new TaskStore(dataDirectory)
 
   try {
-    const app = await createApp({ rootDirectory: root, dataDirectory, uploadsDirectory, store, authRequired: false, ...appOptions })
+    const app = await createApp({
+      rootDirectory: root,
+      dataDirectory,
+      uploadsDirectory,
+      store,
+      authRequired: false,
+      internalApiToken: 'test-internal-token',
+      ...appOptions,
+    })
     store.transaction(() => {
       for (const task of getSeedTasks()) store.insertTask(task)
     })
@@ -345,6 +353,8 @@ test('SQLite автоматично додає поля задачі та snapsh
     assert.equal(task.agentRun.releaseStatus, '')
     assert.equal(task.agentRun.releaseAttempts, 0)
     assert.deepEqual(task.agentRun.releaseRepositories, [])
+    assert.equal(task.agentRun.releasePhase, '')
+    assert.deepEqual(task.agentRun.releaseEvidence, {})
     assert.equal(store.findAgentRun('RUN-LEGACY').contextSnapshot, '')
     assert.equal(store.findAgentRun('RUN-LEGACY').codexSessionId, '')
 
@@ -437,6 +447,7 @@ test('API ставить Codex job у чергу та повторно реаг�
       summary: 'Перша спроба завершена.',
       finishedAt: new Date().toISOString(),
     })
+    store.updateAgentRunRelease(firstRun.body.agentRun.id, { status: 'blocked' })
 
     const missingComment = await request(app)
       .patch('/api/tasks/BUG-1051')
@@ -486,6 +497,7 @@ test('повторний AI-запуск атомарно додає новий 
       summary: 'Перша спроба завершена.',
       finishedAt: new Date().toISOString(),
     })
+    store.updateAgentRunRelease(firstRun.body.agentRun.id, { status: 'blocked' })
 
     await request(app)
       .post('/api/tasks/BUG-1051/review-again')
@@ -745,6 +757,29 @@ test('lease допускає лише один живий Codex worker і доз
   })
 })
 
+test('release-worker lease доступний лише внутрішньому процесу і серіалізує release queue', async () => {
+  await withTestApp(async ({ app }) => {
+    await request(app)
+      .post('/api/system/worker-leases/release-worker/acquire')
+      .send({ ownerId: 'worker-a', ttlMs: 20_000 })
+      .expect(401)
+
+    const internal = (requestBuilder) => requestBuilder.set('Authorization', 'Bearer test-internal-token')
+    await internal(request(app).post('/api/system/worker-leases/release-worker/acquire'))
+      .send({ ownerId: 'worker-a', ttlMs: 20_000 })
+      .expect(200)
+    await internal(request(app).post('/api/system/worker-leases/release-worker/acquire'))
+      .send({ ownerId: 'worker-b', ttlMs: 20_000 })
+      .expect(409)
+    await internal(request(app).post('/api/system/worker-leases/release-worker/heartbeat'))
+      .send({ ownerId: 'worker-a' })
+      .expect(200)
+    await internal(request(app).delete('/api/system/worker-leases/release-worker'))
+      .send({ ownerId: 'worker-a' })
+      .expect(200)
+  }, { authRequired: true, secureCookies: false, internalApiToken: 'test-internal-token' })
+})
+
 test('release-state зберігається на run і лише released атомарно потрапляє у build', async () => {
   await withTestApp(async ({ app, store }) => {
     const created = await request(app).post('/api/tasks').field('title', 'Release state').expect(201)
@@ -753,19 +788,43 @@ test('release-state зберігається на run і лише released ат�
       status: 'completed',
       finishedAt: new Date().toISOString(),
     })
+    const releaseOwner = 'release-test-worker'
+    assert.equal(store.acquireWorkerLease('release-worker', releaseOwner, new Date(0).toISOString()), true)
 
     const processing = await request(app)
       .patch(`/api/agent-runs/${runId}/release`)
-      .send({ status: 'processing', attempts: 1, repositories: ['gba_console', 'gba_console'] })
+      .set('Authorization', 'Bearer test-internal-token')
+      .send({
+        status: 'processing',
+        phase: 'verifying',
+        leaseOwnerId: releaseOwner,
+        attempts: 1,
+        repositories: ['gba_console', 'gba_console'],
+        evidence: {
+          repositories: { gba_console: { commit: 'abc' } },
+          deployment: { verifiedAt: new Date().toISOString(), services: { 'gba-console': { health: 'healthy' } } },
+        },
+      })
       .expect(200)
     assert.equal(processing.body.releaseStatus, 'processing')
     assert.equal(processing.body.releaseAttempts, 1)
     assert.deepEqual(processing.body.releaseRepositories, ['gba_console'])
+    assert.equal(processing.body.releasePhase, 'verifying')
+    assert.equal(processing.body.releaseEvidence.repositories.gba_console.commit, 'abc')
     assert.equal(store.currentBuild('__pending__'), null)
 
     await request(app)
+      .post(`/api/tasks/${created.body.id}/agent-runs`)
+      .expect(409)
+    await request(app)
+      .post(`/api/tasks/${created.body.id}/review-again`)
+      .field('reviewComment', 'ще одна правка під час release')
+      .expect(409)
+
+    await request(app)
       .patch(`/api/agent-runs/${runId}/release`)
-      .send({ status: 'released', taskStatus: 'ready_for_retest', releasedAt: new Date().toISOString() })
+      .set('Authorization', 'Bearer test-internal-token')
+      .send({ status: 'released', phase: 'released', leaseOwnerId: releaseOwner, taskStatus: 'ready_for_retest', releasedAt: new Date().toISOString() })
       .expect(200)
 
     assert.equal(store.find(created.body.id).status, 'ready_for_retest')
@@ -777,15 +836,19 @@ test('release-state зберігається на run і лише released ат�
 })
 
 test('фінальний release-state відхиляється без узгодженого taskStatus', async () => {
-  await withTestApp(async ({ app }) => {
+  await withTestApp(async ({ app, store }) => {
     const created = await request(app).post('/api/tasks').field('title', 'Release validation').expect(201)
+    const releaseOwner = 'release-validation-worker'
+    assert.equal(store.acquireWorkerLease('release-worker', releaseOwner, new Date(0).toISOString()), true)
     await request(app)
       .patch(`/api/agent-runs/${created.body.agentRun.id}/release`)
-      .send({ status: 'released' })
+      .set('Authorization', 'Bearer test-internal-token')
+      .send({ status: 'released', leaseOwnerId: releaseOwner })
       .expect(422)
     await request(app)
       .patch(`/api/agent-runs/${created.body.agentRun.id}/release`)
-      .send({ status: 'blocked', taskStatus: 'done' })
+      .set('Authorization', 'Bearer test-internal-token')
+      .send({ status: 'blocked', leaseOwnerId: releaseOwner, taskStatus: 'done' })
       .expect(422)
   })
 })

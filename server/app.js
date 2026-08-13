@@ -24,6 +24,18 @@ const allowedPriorities = new Set(['low', 'medium', 'high', 'critical'])
 const allowedProjects = new Set(['console', 'ecommerce'])
 const allowedReleaseStatuses = new Set(['pending', 'processing', 'retrying', 'released', 'blocked'])
 const allowedReleaseTaskStatuses = new Set(['ready_for_retest', 'done', 'blocked'])
+const allowedReleasePhases = new Set([
+  '',
+  'queued',
+  'preflight',
+  'validating',
+  'publishing',
+  'migrating',
+  'deploying',
+  'verifying',
+  'released',
+  'failed',
+])
 const allowedMediaTypes = new Map([
   ['image/jpeg', { extension: '.jpg', kind: 'image', maxSize: 10 * 1024 * 1024 }],
   ['image/png', { extension: '.png', kind: 'image', maxSize: 10 * 1024 * 1024 }],
@@ -232,16 +244,15 @@ export async function createApp(options = {}) {
       next()
       return
     }
-    if (!authRequired) {
-      request.user = null
-      next()
-      return
-    }
-
     const authorization = request.get('authorization') ?? ''
     const internalToken = authorization.startsWith('Bearer ') ? authorization.slice(7) : ''
     if (isMatchingInternalToken(internalToken, internalApiToken)) {
       request.user = { id: null, email: 'system@qa-desk.local', displayName: 'Система', internal: true }
+      next()
+      return
+    }
+    if (!authRequired) {
+      request.user = null
       next()
       return
     }
@@ -333,6 +344,46 @@ export async function createApp(options = {}) {
     response.json(topology.recordHeartbeat({ units, host: cleanText(request.body?.host) }))
   })
 
+  const requireInternalWorker = (request, response) => {
+    if (request.user?.internal) return true
+    response.status(403).json({ message: 'Ця операція доступна лише внутрішньому worker.' })
+    return false
+  }
+
+  app.post('/api/system/worker-leases/:name/acquire', (request, response) => {
+    if (!requireInternalWorker(request, response)) return
+    const name = cleanText(request.params.name).slice(0, 100)
+    const ownerId = cleanText(request.body?.ownerId).slice(0, 100)
+    const ttlMs = Number(request.body?.ttlMs)
+    if (!name || !ownerId || !Number.isInteger(ttlMs) || ttlMs < 5_000 || ttlMs > 10 * 60_000) {
+      response.status(422).json({ message: 'Потрібні name, ownerId і ttlMs від 5000 до 600000.' })
+      return
+    }
+    const staleBefore = new Date(Date.now() - ttlMs).toISOString()
+    const acquired = store.acquireWorkerLease(name, ownerId, staleBefore)
+    response.status(acquired ? 200 : 409).json({ acquired })
+  })
+
+  app.post('/api/system/worker-leases/:name/heartbeat', (request, response) => {
+    if (!requireInternalWorker(request, response)) return
+    const ownerId = cleanText(request.body?.ownerId).slice(0, 100)
+    if (!ownerId) {
+      response.status(422).json({ message: 'Потрібен ownerId.' })
+      return
+    }
+    const alive = store.heartbeatWorkerLease(cleanText(request.params.name).slice(0, 100), ownerId)
+    response.status(alive ? 200 : 409).json({ alive })
+  })
+
+  app.delete('/api/system/worker-leases/:name', (request, response) => {
+    if (!requireInternalWorker(request, response)) return
+    const ownerId = cleanText(request.body?.ownerId).slice(0, 100)
+    const released = ownerId
+      ? store.releaseWorkerLease(cleanText(request.params.name).slice(0, 100), ownerId)
+      : false
+    response.status(released ? 200 : 409).json({ released })
+  })
+
   app.get('/api/tasks', async (_request, response, next) => {
     try {
       response.json(await store.all())
@@ -420,6 +471,10 @@ export async function createApp(options = {}) {
         return
       }
       const startsReviewRun = values.status === 'review_again' && existingTask.status !== 'review_again'
+      if (startsReviewRun && store.hasActiveRelease(request.params.id)) {
+        response.status(409).json({ message: 'Задача вже проходить release. Дочекайтеся ретесту або помилки release.' })
+        return
+      }
       if (startsReviewRun && (!Object.hasOwn(request.body, 'reviewComment') || values.reviewComment.length < 3)) {
         response.status(400).json({ message: 'Опишіть для AI, що саме залишилося невиправленим.' })
         return
@@ -525,6 +580,11 @@ export async function createApp(options = {}) {
         response.status(404).json({ message: 'Задачу не знайдено.' })
         return
       }
+      if (result.status === 'release_active') {
+        await removeUploadedFiles(request.files)
+        response.status(409).json({ message: 'Задача вже проходить release. Дочекайтеся ретесту або помилки release.' })
+        return
+      }
       if (result.status === 'active' || result.status === 'already_reviewing') {
         await removeUploadedFiles(request.files)
         response.status(409).json({ message: 'Для цієї задачі AI уже запущено або стоїть у черзі.' })
@@ -552,7 +612,14 @@ export async function createApp(options = {}) {
 
   app.patch('/api/agent-runs/:id/release', (request, response, next) => {
     try {
-      if (!store.findAgentRun(request.params.id)) {
+      if (!requireInternalWorker(request, response)) return
+      const leaseOwnerId = cleanText(request.body?.leaseOwnerId).slice(0, 100)
+      if (!store.ownsWorkerLease('release-worker', leaseOwnerId)) {
+        response.status(409).json({ message: 'Release-worker не володіє активним singleton lease.' })
+        return
+      }
+      const existingRun = store.findAgentRun(request.params.id)
+      if (!existingRun) {
         response.status(404).json({ message: 'AI-запуск не знайдено.' })
         return
       }
@@ -581,6 +648,27 @@ export async function createApp(options = {}) {
         values.repositories = request.body.repositories
       }
       if (Object.hasOwn(request.body, 'error')) values.error = cleanText(request.body.error).slice(0, 3000)
+      if (Object.hasOwn(request.body, 'phase')) {
+        const phase = cleanText(request.body.phase)
+        if (!allowedReleasePhases.has(phase)) {
+          response.status(422).json({ message: 'Невідома фаза release.' })
+          return
+        }
+        values.phase = phase
+      }
+      if (Object.hasOwn(request.body, 'evidence')) {
+        const evidence = request.body.evidence
+        if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) {
+          response.status(422).json({ message: 'evidence має бути JSON-об’єктом.' })
+          return
+        }
+        const serializedEvidence = JSON.stringify(evidence)
+        if (serializedEvidence.length > 100_000) {
+          response.status(422).json({ message: 'evidence завеликий.' })
+          return
+        }
+        values.evidence = evidence
+      }
       if (Object.hasOwn(request.body, 'releasedAt')) {
         const releasedAt = request.body.releasedAt
         if (releasedAt !== null && Number.isNaN(Date.parse(releasedAt))) {
@@ -610,6 +698,21 @@ export async function createApp(options = {}) {
         response.status(422).json({ message: 'Успішний release не може блокувати задачу.' })
         return
       }
+      if (['released', 'blocked'].includes(existingRun.releaseStatus)) {
+        response.status(409).json({ message: 'Фінальний release-state є незмінним.' })
+        return
+      }
+      if (values.status === 'released') {
+        const evidence = values.evidence ?? existingRun.releaseEvidence
+        if (existingRun.releasePhase !== 'verifying' || values.phase !== 'released') {
+          response.status(409).json({ message: 'released дозволений лише після фази verifying.' })
+          return
+        }
+        if (!evidence?.deployment?.verifiedAt || !evidence?.deployment?.services) {
+          response.status(409).json({ message: 'released вимагає збережений deployment evidence.' })
+          return
+        }
+      }
       const updated = store.updateAgentRunRelease(request.params.id, values, taskStatus)
       response.json(publicAgentRun(updated))
     } catch (error) {
@@ -622,6 +725,10 @@ export async function createApp(options = {}) {
       const result = await store.enqueueAgentRun(randomUUID(), request.params.id, 'manual')
       if (result.status === 'task_not_found') {
         response.status(404).json({ message: 'Задачу не знайдено.' })
+        return
+      }
+      if (result.status === 'release_active') {
+        response.status(409).json({ message: 'Задача вже проходить release. Дочекайтеся ретесту або помилки release.' })
         return
       }
       response.status(result.created ? 202 : 200).json(await store.find(request.params.id))
@@ -695,6 +802,10 @@ export async function createApp(options = {}) {
       const result = await store.enqueueAgentRun(randomUUID(), request.params.id, 'manual')
       if (result.status === 'task_not_found') {
         response.status(404).json({ message: 'Задачу не знайдено.' })
+        return
+      }
+      if (result.status === 'release_active') {
+        response.status(409).json({ message: 'Задача вже проходить release. Дочекайтеся ретесту або помилки release.' })
         return
       }
 

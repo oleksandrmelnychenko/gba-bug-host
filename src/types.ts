@@ -2,6 +2,8 @@ export type TaskStatus = 'new' | 'in_progress' | 'ready_for_retest' | 'review_ag
 export type TaskPriority = 'low' | 'medium' | 'high' | 'critical'
 export type TaskProject = 'console' | 'ecommerce'
 export type AgentRunStatus = 'queued' | 'running' | 'completed' | 'needs_review' | 'blocked' | 'failed'
+export type ReleaseStatus = 'pending' | 'processing' | 'retrying' | 'released' | 'blocked' | ''
+export type ReleasePhase = 'queued' | 'preflight' | 'validating' | 'publishing' | 'migrating' | 'deploying' | 'verifying' | 'released' | 'failed' | ''
 
 export interface TaskAttachment {
   id: string
@@ -66,6 +68,13 @@ export interface AgentRun {
   summary: string
   details: string
   error: string
+  releaseStatus: ReleaseStatus
+  releaseAttempts: number
+  releaseRepositories: string[]
+  releaseError: string
+  releasePhase: ReleasePhase
+  releaseEvidence: Record<string, unknown>
+  releasedAt: string | null
   createdAt: string
   startedAt: string | null
   finishedAt: string | null

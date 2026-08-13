@@ -108,6 +108,13 @@ function agentRunFromRow(row, { includeWorkerContext = false } = {}) {
   } catch {
     releaseRepositories = []
   }
+  let releaseEvidence = {}
+  try {
+    const parsed = JSON.parse(row.release_evidence ?? '{}')
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) releaseEvidence = parsed
+  } catch {
+    releaseEvidence = {}
+  }
   return {
     id: row.id,
     taskId: row.task_id,
@@ -129,6 +136,8 @@ function agentRunFromRow(row, { includeWorkerContext = false } = {}) {
     releaseAttempts: row.release_attempts ?? 0,
     releaseRepositories,
     releaseError: row.release_error ?? '',
+    releasePhase: row.release_phase ?? '',
+    releaseEvidence,
     releasedAt: row.released_at ?? null,
     ...(includeWorkerContext ? {
       contextSnapshot: row.context_snapshot ?? '',
@@ -289,6 +298,8 @@ export class TaskStore {
         release_attempts INTEGER NOT NULL DEFAULT 0,
         release_repositories TEXT NOT NULL DEFAULT '[]',
         release_error TEXT NOT NULL DEFAULT '',
+        release_phase TEXT NOT NULL DEFAULT '',
+        release_evidence TEXT NOT NULL DEFAULT '{}',
         released_at TEXT,
         context_snapshot TEXT NOT NULL DEFAULT '',
         codex_session_id TEXT NOT NULL DEFAULT '',
@@ -415,6 +426,12 @@ export class TaskStore {
       }
       if (!agentRunColumns.has('release_error')) {
         this.database.exec("ALTER TABLE agent_runs ADD COLUMN release_error TEXT NOT NULL DEFAULT ''")
+      }
+      if (!agentRunColumns.has('release_phase')) {
+        this.database.exec("ALTER TABLE agent_runs ADD COLUMN release_phase TEXT NOT NULL DEFAULT ''")
+      }
+      if (!agentRunColumns.has('release_evidence')) {
+        this.database.exec("ALTER TABLE agent_runs ADD COLUMN release_evidence TEXT NOT NULL DEFAULT '{}'")
       }
       if (!agentRunColumns.has('released_at')) {
         this.database.exec('ALTER TABLE agent_runs ADD COLUMN released_at TEXT')
@@ -787,6 +804,9 @@ export class TaskStore {
     return this.transaction(() => {
       const existingTask = this.find(taskId)
       if (!existingTask) return { status: 'task_not_found', task: null, run: null }
+      if (this.hasActiveRelease(taskId)) {
+        return { status: 'release_active', task: existingTask, run: existingTask.agentRun }
+      }
       if (existingTask.status === 'review_again') {
         return { status: 'already_reviewing', task: existingTask, run: existingTask.agentRun }
       }
@@ -831,6 +851,9 @@ export class TaskStore {
   enqueueAgentRun(id, taskId, trigger = 'manual') {
     const task = this.find(taskId)
     if (!task) return { status: 'task_not_found', run: null, created: false }
+    if (this.hasActiveRelease(taskId)) {
+      return { status: 'release_active', run: task.agentRun, created: false }
+    }
 
     const activeRow = this.database
       .prepare("SELECT * FROM agent_runs WHERE task_id = ? AND status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1")
@@ -958,6 +981,28 @@ export class TaskStore {
     return this.database
       .prepare('DELETE FROM worker_leases WHERE name = ? AND owner_id = ?')
       .run(name, ownerId).changes === 1
+  }
+
+  ownsWorkerLease(name, ownerId) {
+    if (!name || !ownerId) return false
+    return Boolean(this.database
+      .prepare('SELECT 1 FROM worker_leases WHERE name = ? AND owner_id = ?')
+      .get(name, ownerId))
+  }
+
+  hasActiveRelease(taskId) {
+    return Boolean(this.database.prepare(`
+      SELECT 1
+      FROM (
+        SELECT status, release_status
+        FROM agent_runs
+        WHERE task_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+      ) AS latest
+      WHERE latest.status IN ('completed', 'needs_review')
+        AND latest.release_status IN ('pending', 'processing', 'retrying')
+    `).get(taskId))
   }
 
   heartbeatAgentRuns(workerId, runIds) {
@@ -1152,7 +1197,7 @@ export class TaskStore {
   }
 
   updateAgentRunRelease(id, values, taskStatus = '') {
-    const allowedFields = ['status', 'attempts', 'repositories', 'error', 'releasedAt']
+    const allowedFields = ['status', 'attempts', 'repositories', 'error', 'phase', 'evidence', 'releasedAt']
     const fields = allowedFields.filter((field) => Object.hasOwn(values, field))
     if (!fields.length && !taskStatus) return this.findAgentRun(id)
     const columns = {
@@ -1160,11 +1205,15 @@ export class TaskStore {
       attempts: 'release_attempts',
       repositories: 'release_repositories',
       error: 'release_error',
+      phase: 'release_phase',
+      evidence: 'release_evidence',
       releasedAt: 'released_at',
     }
-    const serialized = fields.map((field) => field === 'repositories'
-      ? JSON.stringify([...new Set(values[field] ?? [])])
-      : values[field])
+    const serialized = fields.map((field) => {
+      if (field === 'repositories') return JSON.stringify([...new Set(values[field] ?? [])])
+      if (field === 'evidence') return JSON.stringify(values[field] ?? {})
+      return values[field]
+    })
     const apply = () => {
       const now = new Date().toISOString()
       if (fields.length > 0) {
