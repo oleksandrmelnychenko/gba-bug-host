@@ -771,6 +771,7 @@ test('deploy failure лишає задачу retrying, а наступний у�
   assert.equal(task.status, 'ready_for_retest')
   assert.ok(calls.findIndex((call) => call.startsWith('migrate apply')) < calls.findIndex((call) => call.includes(' up ')))
   assert.ok(calls.findIndex((call) => call.includes(' up ')) < calls.findIndex((call) => call.startsWith('curl ')))
+  assert.ok(calls.find((call) => call.includes(' up ')).includes(' --no-deps '))
 })
 
 test('compose ps parser підтримує JSON array та JSON-lines', () => {

@@ -727,7 +727,7 @@ export class ReleaseWorker {
     const deploymentEnvironment = this.deploymentEnvironment(outcome.repositoryEvidence)
     const deploy = await this.runMutation(
       'docker',
-      [...COMPOSE_ARGS, 'up', '-d', '--build', '--wait', '--wait-timeout', '420', ...services],
+      [...COMPOSE_ARGS, 'up', '-d', '--build', '--no-deps', '--wait', '--wait-timeout', '420', ...services],
       { cwd: this.infraDirectory, timeoutMs: 60 * 60 * 1000, env: deploymentEnvironment },
     )
     if (deploy.code !== 0) {
