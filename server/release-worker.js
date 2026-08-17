@@ -341,9 +341,15 @@ export function validateReleaseHandoff(handoff, repos, services, repositoryEvide
   if (!sameStringSet(handoff.repositories, repos)) {
     return { ok: false, reason: `releasePlan.repositories не збігається з git: declared=${handoff.repositories.join(',')} actual=${repos.join(',')}` }
   }
-  if (!sameStringSet(handoff.services, services)) {
-    return { ok: false, reason: `releasePlan.services не збігається з repo plan: declared=${handoff.services.join(',')} actual=${services.join(',')}` }
+  const declaredServices = [...new Set(handoff.services)]
+  const unexpectedServices = declaredServices.filter((service) => !services.includes(service))
+  if (unexpectedServices.length > 0) {
+    return {
+      ok: false,
+      reason: `releasePlan.services містить сервіси поза repo plan: declared=${handoff.services.join(',')} actual=${services.join(',')} unexpected=${unexpectedServices.join(',')}`,
+    }
   }
+  const autoAddedServices = services.filter((service) => !declaredServices.includes(service))
   const actualMigrations = repos.flatMap((repo) =>
     (repositoryEvidence?.[repo]?.files ?? [])
       .filter((file) => isMigrationFile(repo, file))
@@ -360,7 +366,15 @@ export function validateReleaseHandoff(handoff, repos, services, repositoryEvide
     const error = validateSmokeCheck(check)
     if (error) return { ok: false, reason: error }
   }
-  return { ok: true, legacy: false, checks: handoff.postDeployChecks, migrations: actualMigrations }
+  return {
+    ok: true,
+    legacy: false,
+    checks: handoff.postDeployChecks,
+    migrations: actualMigrations,
+    declaredServices,
+    effectiveServices: [...services],
+    autoAddedServices,
+  }
 }
 
 function terminateProcessTree(child, signal) {
@@ -672,6 +686,9 @@ export class ReleaseWorker {
         legacy: handoffValidation.legacy,
         matches: true,
         migrations: handoffValidation.migrations,
+        declaredServices: handoffValidation.declaredServices,
+        effectiveServices: handoffValidation.effectiveServices,
+        autoAddedServices: handoffValidation.autoAddedServices,
       },
     })
 
@@ -1142,6 +1159,9 @@ export class ReleaseWorker {
         legacy: handoffValidation.legacy,
         matches: true,
         migrations: handoffValidation.migrations,
+        declaredServices: handoffValidation.declaredServices,
+        effectiveServices: handoffValidation.effectiveServices,
+        autoAddedServices: handoffValidation.autoAddedServices,
       },
     })
     await this.updateRelease(task, {

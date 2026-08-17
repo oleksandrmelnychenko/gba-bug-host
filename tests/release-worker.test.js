@@ -537,6 +537,38 @@ test('release handoff звіряє repo/services/migrations і дозволяє 
   }, ['gba-server'], ['data-concord', 'data-analytics'], evidence, defaultRepoPlan)
   assert.equal(valid.ok, true)
   assert.equal(valid.legacy, false)
+  assert.deepEqual(valid.declaredServices, ['data-concord', 'data-analytics'])
+  assert.deepEqual(valid.effectiveServices, ['data-concord', 'data-analytics'])
+  assert.deepEqual(valid.autoAddedServices, [])
+
+  const incompleteServices = validateReleaseHandoff({
+    repositories: ['gba-server'],
+    services: ['data-concord'],
+    migrationFiles: [`gba-server:${migration}`],
+    postDeployChecks: valid.checks,
+  }, ['gba-server'], ['data-concord', 'data-analytics'], evidence, defaultRepoPlan)
+  assert.equal(incompleteServices.ok, true)
+  assert.deepEqual(incompleteServices.declaredServices, ['data-concord'])
+  assert.deepEqual(incompleteServices.effectiveServices, ['data-concord', 'data-analytics'])
+  assert.deepEqual(incompleteServices.autoAddedServices, ['data-analytics'])
+
+  const emptyServices = validateReleaseHandoff({
+    repositories: ['gba-server'],
+    services: [],
+    migrationFiles: [`gba-server:${migration}`],
+    postDeployChecks: valid.checks,
+  }, ['gba-server'], ['data-concord', 'data-analytics'], evidence, defaultRepoPlan)
+  assert.equal(emptyServices.ok, true)
+  assert.deepEqual(emptyServices.autoAddedServices, ['data-concord', 'data-analytics'])
+
+  const unexpectedService = validateReleaseHandoff({
+    repositories: ['gba-server'],
+    services: ['data-concord', 'gba-console'],
+    migrationFiles: [`gba-server:${migration}`],
+    postDeployChecks: valid.checks,
+  }, ['gba-server'], ['data-concord', 'data-analytics'], evidence, defaultRepoPlan)
+  assert.equal(unexpectedService.ok, false)
+  assert.match(unexpectedService.reason, /поза repo plan/)
 
   const missing = validateReleaseHandoff({}, ['gba-server'], ['data-concord'], evidence, defaultRepoPlan)
   assert.equal(missing.ok, false)
