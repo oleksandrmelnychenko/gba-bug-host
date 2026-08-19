@@ -23,7 +23,7 @@ const allowedStatuses = new Set(['new', 'in_progress', 'ready_for_retest', 'revi
 const allowedPriorities = new Set(['low', 'medium', 'high', 'critical'])
 const allowedProjects = new Set(['console', 'ecommerce'])
 const allowedReleaseStatuses = new Set(['pending', 'processing', 'retrying', 'released', 'blocked'])
-const allowedReleaseTaskStatuses = new Set(['ready_for_retest', 'done', 'blocked'])
+const allowedReleaseTaskStatuses = allowedStatuses
 const allowedReleasePhases = new Set([
   '',
   'queued',
@@ -690,8 +690,8 @@ export async function createApp(options = {}) {
         response.status(422).json({ message: 'taskStatus дозволений лише для фінального release-статусу.' })
         return
       }
-      if (values.status === 'blocked' && taskStatus !== 'blocked') {
-        response.status(422).json({ message: 'Заблокований release вимагає taskStatus=blocked.' })
+      if (values.status === 'blocked' && taskStatus === 'done') {
+        response.status(422).json({ message: 'Заблокований release не може закривати задачу.' })
         return
       }
       if (values.status === 'released' && taskStatus === 'blocked') {

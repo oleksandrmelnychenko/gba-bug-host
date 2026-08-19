@@ -183,7 +183,7 @@ export function isSentinelTask(task) {
 }
 
 export function releaseStatusFor(task) {
-  return isSentinelTask(task) ? 'done' : 'ready_for_retest'
+  return isSentinelTask(task) ? 'done' : undefined
 }
 
 export function selectReleasableTasks(tasks) {
@@ -734,27 +734,37 @@ export class ReleaseWorker {
       return
     }
 
+    const expectedCommits = Object.fromEntries(repos.flatMap((repo) =>
+      (this.repoPlan[repo]?.services ?? []).map((service) => [service, outcome.repositoryEvidence?.[repo]?.commit ?? ''])))
     const before = await this.captureDeployment(services)
-    await this.updateRelease(task, {
-      status: 'processing',
-      phase: 'deploying',
-      evidence,
-    })
-    await this.assertLease()
-    const deploymentEnvironment = this.deploymentEnvironment(outcome.repositoryEvidence)
-    const deploy = await this.runMutation(
-      'docker',
-      [...COMPOSE_ARGS, 'up', '-d', '--build', '--no-deps', '--wait', '--wait-timeout', '420', ...services],
-      { cwd: this.infraDirectory, timeoutMs: 60 * 60 * 1000, env: deploymentEnvironment },
-    )
-    if (deploy.code !== 0) {
-      await this.handleReleaseFailure(task, {
-        kind: 'transient',
-        reason: `Деплой не пройшов${deploy.timedOut ? ' (timeout)' : ''}: ${deploy.output.slice(-1000)}`,
+    let verification = await this.verifyDeployment(services, before, expectedCommits)
+    let composeOutput = 'Exact immutable deployment was already healthy; rebuild/recreate skipped.'
+
+    if (!verification.ok) {
+      await this.updateRelease(task, {
+        status: 'processing',
         phase: 'deploying',
         evidence,
       })
-      return
+      await this.assertLease()
+      const deploymentEnvironment = this.deploymentEnvironment(outcome.repositoryEvidence)
+      const deploy = await this.runMutation(
+        'docker',
+        [...COMPOSE_ARGS, 'up', '-d', '--build', '--no-deps', '--wait', '--wait-timeout', '420', ...services],
+        { cwd: this.infraDirectory, timeoutMs: 60 * 60 * 1000, env: deploymentEnvironment },
+      )
+      if (deploy.code !== 0) {
+        await this.handleReleaseFailure(task, {
+          kind: 'transient',
+          reason: `Деплой не пройшов${deploy.timedOut ? ' (timeout)' : ''}: ${deploy.output.slice(-1000)}`,
+          phase: 'deploying',
+          evidence,
+        })
+        return
+      }
+
+      composeOutput = deploy.output.slice(-2000)
+      verification = await this.verifyDeployment(services, before, expectedCommits)
     }
 
     await this.updateRelease(task, {
@@ -763,9 +773,6 @@ export class ReleaseWorker {
       evidence,
     })
     await this.assertLease()
-    const expectedCommits = Object.fromEntries(repos.flatMap((repo) =>
-      (this.repoPlan[repo]?.services ?? []).map((service) => [service, outcome.repositoryEvidence?.[repo]?.commit ?? ''])))
-    const verification = await this.verifyDeployment(services, before, expectedCommits)
     const repositoryCommits = Object.fromEntries(
       repos.map((repo) => [repo, outcome.repositoryEvidence?.[repo]?.commit ?? '']),
     )
@@ -774,7 +781,7 @@ export class ReleaseWorker {
         services: verification.services ?? {},
         repositoryCommits,
         verifiedAt: new Date().toISOString(),
-        composeOutput: deploy.output.slice(-2000),
+        composeOutput,
       },
     })
     if (!verification.ok) {
@@ -806,8 +813,9 @@ export class ReleaseWorker {
     })
 
     const stamp = new Date().toISOString()
-    const status = releaseStatusFor(task)
-    const closing = status === 'done'
+    const releaseTaskStatus = releaseStatusFor(task)
+    const taskStatus = releaseTaskStatus ?? task.status
+    const closing = releaseTaskStatus === 'done'
     const cleanupErrors = await this.cleanupReleasedWorktrees(task)
     await this.annotate(task, [
       `[released:${stamp}] merge/push, міграції, rebuild і live health підтверджені`,
@@ -820,7 +828,7 @@ export class ReleaseWorker {
       error: '',
       evidence,
       releasedAt: stamp,
-      taskStatus: status,
+      taskStatus,
     })
     console.log(`[release] ${task.id}: випущено з міграційним і live доказом${closing ? ' та закрито' : ''}`)
   }
@@ -843,7 +851,7 @@ export class ReleaseWorker {
         attempts,
         error: outcome.reason,
         evidence,
-        taskStatus: 'blocked',
+        taskStatus: isSentinelTask(task) ? 'blocked' : task.status,
       })
       await this.annotate(task, `[release-blocked:${stamp}] ${attempts} невдалих спроб на фазі ${outcome.phase ?? 'release'}: ${outcome.reason}.`.slice(0, 700))
       console.error(`[release] ${task.id}: заблоковано після ${attempts} спроб — ${outcome.reason.slice(0, 160)}`)
@@ -1015,9 +1023,10 @@ export class ReleaseWorker {
       const split = result.output.lastIndexOf('\n')
       const body = split >= 0 ? result.output.slice(0, split) : ''
       const status = Number.parseInt(split >= 0 ? result.output.slice(split + 1).trim() : '', 10)
+      const expectedContent = check.contains?.toLocaleLowerCase() ?? ''
       const passed = result.code === 0
         && status === check.expectedStatus
-        && (!check.contains || body.includes(check.contains))
+        && (!expectedContent || body.toLocaleLowerCase().includes(expectedContent))
       evidence.push({
         label: check.label,
         url: check.url,

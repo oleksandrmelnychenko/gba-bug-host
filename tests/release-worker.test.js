@@ -97,10 +97,10 @@ test('лог-задача вартового впізнається за мар�
   assert.equal(isSentinelTask({}), false)
 })
 
-test('після релізу лог-задача закривається, людська йде на ретест', () => {
+test('після релізу закривається лише лог-задача, людський статус лишається людям', () => {
   assert.equal(releaseStatusFor({ notes: '[sentinel:abcdef123456]' }), 'done')
   assert.equal(releaseStatusFor({ title: '[AUTO] console: TypeError' }), 'done')
-  assert.equal(releaseStatusFor({ title: 'Кошик губить позицію', notes: '' }), 'ready_for_retest')
+  assert.equal(releaseStatusFor({ title: 'Кошик губить позицію', notes: '' }), undefined)
 })
 
 test('нова робота після релізу знову потрапляє у вибірку', () => {
@@ -181,7 +181,7 @@ test('settle одного нового кандидата не блокує вж
   }
 })
 
-test('детермінована release-помилка блокується після третьої збереженої спроби', async () => {
+test('детермінована release-помилка блокує pipeline, але не змінює людський статус задачі', async () => {
   const task = {
     id: 'BUG-2001',
     title: 'Конфлікт',
@@ -203,7 +203,7 @@ test('детермінована release-помилка блокується п�
 
   assert.equal(task.agentRun.releaseStatus, 'blocked')
   assert.equal(task.agentRun.releaseAttempts, 3)
-  assert.equal(task.status, 'blocked')
+  assert.equal(task.status, 'ready_for_retest')
   assert.match(annotations[0], /release-blocked/)
 })
 
@@ -663,6 +663,26 @@ test('healthy старий image без published git SHA не проходит�
   assert.match(result.reason, /не збігається/)
 })
 
+test('HTML live-check звіряє текст без хибного падіння через регістр', async () => {
+  const worker = new ReleaseWorker({
+    processRunner: async (command, args) => {
+      assert.equal(command, 'curl')
+      assert.equal(args.includes('-w'), true)
+      return { code: 0, output: '<title>GBA CONSOLE</title>\n200' }
+    },
+  })
+
+  const result = await worker.verifyPostDeployChecks([{
+    label: 'console products',
+    url: 'https://gba-console-dev.85.17.167.167.nip.io/products',
+    expectedStatus: 200,
+    contains: 'GBA Console',
+  }])
+
+  assert.equal(result.ok, true)
+  assert.equal(result.evidence[0].passed, true)
+})
+
 test('успішна validation того самого commit повторно не запускає батарею після deploy-retry', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'gba-release-main-'))
   const worktrees = await mkdtemp(path.join(tmpdir(), 'gba-release-worktrees-'))
@@ -780,7 +800,9 @@ test('deploy failure лишає задачу retrying, а наступний у�
         }
       }
       if (command === 'docker' && args[0] === 'inspect') return { code: 0, output: `sha256:${'2'.repeat(64)}` }
-      if (command === 'docker' && args[0] === 'image') return { code: 0, output: JSON.stringify({ 'gba.git.sha': 'abc' }) }
+      if (command === 'docker' && args[0] === 'image') {
+        return { code: 0, output: JSON.stringify({ 'gba.git.sha': deployed ? 'abc' : 'old' }) }
+      }
       if (command === 'docker' && args.includes('up')) deployed = true
       if (command === 'curl' && args.includes('-w')) return { code: 0, output: 'ok\n200' }
       return { code: 0, output: 'ok' }
@@ -801,9 +823,70 @@ test('deploy failure лишає задачу retrying, а наступний у�
   assert.equal(task.agentRun.releaseStatus, 'released')
   assert.equal(task.agentRun.releasePhase, 'released')
   assert.equal(task.status, 'ready_for_retest')
-  assert.ok(calls.findIndex((call) => call.startsWith('migrate apply')) < calls.findIndex((call) => call.includes(' up ')))
-  assert.ok(calls.findIndex((call) => call.includes(' up ')) < calls.findIndex((call) => call.startsWith('curl ')))
-  assert.ok(calls.find((call) => call.includes(' up ')).includes(' --no-deps '))
+  const deployCallIndex = calls.findIndex((call) => call.includes(' up '))
+  assert.ok(calls.findIndex((call) => call.startsWith('migrate apply')) < deployCallIndex)
+  assert.ok(calls.findIndex((call, index) => index > deployCallIndex && call.startsWith('curl ')) > deployCallIndex)
+  assert.ok(calls[deployCallIndex].includes(' --no-deps '))
+})
+
+test('retry з уже точним healthy image не пересоздає контейнер повторно', async () => {
+  const task = {
+    id: 'BUG-2098',
+    title: 'Scenario retry without downtime',
+    status: 'in_progress',
+    notes: '',
+    agentRun: {
+      id: 'RUN-2098',
+      releaseAttempts: 9,
+      releaseRepositories: ['repo'],
+      releaseStatus: 'retrying',
+      details: releasePlanDetails(['repo'], ['service']),
+    },
+  }
+  const calls = []
+  const worker = new ReleaseWorker({
+    repoPlan: { repo: { branch: 'main', root: '/repo', services: ['service'], checks: [] } },
+    processRunner: async (command, args) => {
+      calls.push([command, ...args].join(' '))
+      return { code: 0, output: '' }
+    },
+  })
+  worker.releaseTask = async () => ({
+    ok: true,
+    repos: ['repo'],
+    alreadyMerged: true,
+    repositoryEvidence: { repo: { commit: 'abc', pushed: true } },
+  })
+  worker.verifyPublishedWorktrees = async () => ({ ok: true })
+  worker.captureDeployment = async () => ({
+    service: { ID: 'current-container', State: 'running', Health: 'healthy' },
+  })
+  worker.verifyDeployment = async () => ({
+    ok: true,
+    services: {
+      service: {
+        containerId: 'current-container',
+        imageCommit: 'abc',
+        replaced: false,
+        state: 'running',
+        health: 'healthy',
+      },
+    },
+  })
+  worker.verifyPostDeployChecks = async () => ({ ok: true, evidence: [] })
+  worker.cleanupReleasedWorktrees = async () => []
+  worker.annotate = async () => {}
+  worker.updateRelease = async (item, values) => {
+    item.agentRun.releaseStatus = values.status
+    if (values.phase !== undefined) item.agentRun.releasePhase = values.phase
+    if (values.taskStatus) item.status = values.taskStatus
+  }
+
+  await worker.releaseBatch([task])
+
+  assert.equal(task.agentRun.releaseStatus, 'released')
+  assert.equal(task.status, 'in_progress')
+  assert.equal(calls.some((call) => call.includes(' compose ') && call.includes(' up ')), false)
 })
 
 test('compose ps parser підтримує JSON array та JSON-lines', () => {

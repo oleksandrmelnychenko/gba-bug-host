@@ -853,6 +853,22 @@ test('фінальний release-state відхиляється без узго�
   })
 })
 
+test('release pipeline може заблокуватися без автозміни людського статусу задачі', async () => {
+  await withTestApp(async ({ app, store }) => {
+    const created = await request(app).post('/api/tasks').field('title', 'Human retest').expect(201)
+    const releaseOwner = 'release-human-status-worker'
+    assert.equal(store.acquireWorkerLease('release-worker', releaseOwner, new Date(0).toISOString()), true)
+
+    await request(app)
+      .patch(`/api/agent-runs/${created.body.agentRun.id}/release`)
+      .set('Authorization', 'Bearer test-internal-token')
+      .send({ status: 'blocked', leaseOwnerId: releaseOwner, taskStatus: created.body.status })
+      .expect(200)
+
+    assert.equal(store.find(created.body.id).status, created.body.status)
+  })
+})
+
 test('очищення worktree чекає, поки задача звільниться від активних прогонів', async () => {
   await withTestApp(async ({ app, store }) => {
     const created = await request(app).post('/api/tasks').field('title', 'Гонка відкату').expect(201)
