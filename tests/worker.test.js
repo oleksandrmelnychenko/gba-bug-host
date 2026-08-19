@@ -4,7 +4,12 @@ import { chmod, lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } 
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { CodexWorker, normalizeWorkerConcurrency, terminateProcessTree } from '../server/codex-worker.js'
+import {
+  CodexWorker,
+  codexExecutionFailureReason,
+  normalizeWorkerConcurrency,
+  terminateProcessTree,
+} from '../server/codex-worker.js'
 import { TaskStore, getSeedTasks } from '../server/store.js'
 
 function git(cwd, ...args) {
@@ -36,6 +41,17 @@ test('Codex worker відхиляє heartbeat, який не встигає он
     leaseTtlMs: 5_000,
     heartbeatIntervalMs: 5_000,
   }), /має бути меншим/)
+})
+
+test('Codex worker не маскує timeout успішним exit code без result-файлу', () => {
+  assert.equal(
+    codexExecutionFailureReason({ code: 0, timedOut: true, stdout: '', stderr: '' }, 90 * 60_000),
+    'Codex перевищив таймаут 90 хв.',
+  )
+  assert.equal(
+    codexExecutionFailureReason({ code: 0, timedOut: false, stdout: '', stderr: '' }, 90 * 60_000),
+    null,
+  )
 })
 
 test('зупинка detached Codex надсилає сигнал усій process group', () => {

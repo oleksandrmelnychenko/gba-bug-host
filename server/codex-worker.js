@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { access, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { composePersistentContext, createCodexSessionTracker } from './codex-context.js'
 import { checkCommand, defaultRepoPlan } from './release-worker.js'
@@ -46,6 +46,15 @@ const outputSchema = {
 
 function tail(value, maximum = 100_000) {
   return value.length > maximum ? value.slice(-maximum) : value
+}
+
+export function codexExecutionFailureReason(execution, timeoutMs) {
+  if (!execution?.timedOut && execution?.code === 0) return null
+  if (execution?.timedOut) {
+    return `Codex перевищив таймаут ${Math.round(timeoutMs / 60_000)} хв.`
+  }
+  return execution?.stderr || execution?.stdout ||
+    `Codex завершився з кодом ${execution?.code ?? 'невідомо'}.`
 }
 
 function safeTaskSlug(taskId) {
@@ -606,6 +615,9 @@ export class CodexWorker {
     await mkdir(runDirectory, { recursive: true })
     const schemaPath = path.join(runDirectory, `${run.id}-schema.json`)
     const resultPath = path.join(runDirectory, `${run.id}.json`)
+    // Повторний claim/resume не має права прийняти structured output від
+    // попереднього процесу як результат нової спроби.
+    await rm(resultPath, { force: true })
     await writeFile(schemaPath, JSON.stringify(outputSchema, null, 2), 'utf8')
 
     const mediaPaths = await this.mediaPaths(task)
@@ -702,10 +714,24 @@ export class CodexWorker {
       return
     }
 
-    if (execution.code !== 0) {
-      const reason = execution.timedOut
-        ? `Codex перевищив таймаут ${Math.round(this.timeoutMs / 60_000)} хв.`
-        : execution.stderr || execution.stdout || `Codex завершився з кодом ${execution.code}.`
+    const executionFailure = codexExecutionFailureReason(execution, this.timeoutMs)
+    if (executionFailure) {
+      this.store.failAgentRun(
+        run.id,
+        task.id,
+        tail(executionFailure),
+        JSON.stringify({ stdout: execution.stdout, stderr: execution.stderr }),
+      )
+      return
+    }
+
+    let result
+    try {
+      result = JSON.parse(await readFile(resultPath, 'utf8'))
+    } catch (error) {
+      const reason = error?.code === 'ENOENT'
+        ? 'Codex завершився без structured result.'
+        : `Codex повернув невалідний structured result: ${error?.message ?? error}`
       this.store.failAgentRun(
         run.id,
         task.id,
@@ -714,9 +740,6 @@ export class CodexWorker {
       )
       return
     }
-
-    const rawResult = await readFile(resultPath, 'utf8')
-    const result = JSON.parse(rawResult)
     const emptyFixedResult = result.outcome === 'fixed'
       && (result.changedFiles?.length ?? 0) === 0
       && (result.releasePlan?.repositories?.length ?? 0) === 0
