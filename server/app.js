@@ -89,6 +89,12 @@ function getAttachmentRules(file) {
   return null
 }
 
+function normalizeMultipartFileName(value) {
+  const decoded = Buffer.from(value, 'latin1').toString('utf8')
+  const roundTrip = Buffer.from(decoded, 'utf8').toString('latin1')
+  return !decoded.includes('\uFFFD') && roundTrip === value ? decoded : value
+}
+
 function cleanText(value, fallback = '') {
   return typeof value === 'string' ? value.trim() : fallback
 }
@@ -240,6 +246,7 @@ export async function createApp(options = {}) {
     }),
     limits: { fileSize: 200 * 1024 * 1024, files: 6 },
     fileFilter: (_request, file, callback) => {
+      file.originalname = normalizeMultipartFileName(file.originalname)
       if (!getAttachmentRules(file)) {
         callback(new multer.MulterError('LIMIT_UNEXPECTED_FILE', 'attachments'))
         return

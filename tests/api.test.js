@@ -264,7 +264,7 @@ test('API приймає JSON, PDF, XML, XLS та XLSX як докази і зб
         contentType: 'application/octet-stream',
       })
       .attach('attachments', Buffer.from('legacy-excel-workbook'), {
-        filename: 'legacy-scenario.xls',
+        filename: 'CCD_25UA400040016490U5 — копия (3).xls',
         contentType: 'application/vnd.ms-excel',
       })
       .attach('attachments', Buffer.from('openxml-excel-workbook'), {
@@ -279,7 +279,11 @@ test('API приймає JSON, PDF, XML, XLS та XLSX як докази і зб
         { kind: 'document', name: 'sale.json', type: 'application/json' },
         { kind: 'document', name: 'scenario.pdf', type: 'application/pdf' },
         { kind: 'document', name: 'income.xml', type: 'application/xml' },
-        { kind: 'document', name: 'legacy-scenario.xls', type: 'application/vnd.ms-excel' },
+        {
+          kind: 'document',
+          name: 'CCD_25UA400040016490U5 — копия (3).xls',
+          type: 'application/vnd.ms-excel',
+        },
         {
           kind: 'document',
           name: 'scenario.xlsx',
