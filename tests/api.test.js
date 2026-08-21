@@ -245,6 +245,61 @@ test('API створює задачу зі скріншотом і оновлю�
   })
 })
 
+test('API приймає JSON, PDF та XML як докази і зберігає безпечні типи файлів', async () => {
+  await withTestApp(async ({ app, uploadsDirectory }) => {
+    const created = await request(app)
+      .post('/api/tasks')
+      .field('title', 'Chrome Autorecord сценарії')
+      .field('area', 'E2E')
+      .attach('attachments', Buffer.from('{"title":"sale"}'), {
+        filename: 'sale.json',
+        contentType: 'application/json',
+      })
+      .attach('attachments', Buffer.from('%PDF-1.4\n%%EOF'), {
+        filename: 'scenario.pdf',
+        contentType: 'application/pdf',
+      })
+      .attach('attachments', Buffer.from('<scenario name="income"/>'), {
+        filename: 'income.xml',
+        contentType: 'application/octet-stream',
+      })
+      .expect(201)
+
+    assert.deepEqual(
+      created.body.attachments.map(({ kind, name, type }) => ({ kind, name, type })),
+      [
+        { kind: 'document', name: 'sale.json', type: 'application/json' },
+        { kind: 'document', name: 'scenario.pdf', type: 'application/pdf' },
+        { kind: 'document', name: 'income.xml', type: 'application/xml' },
+      ],
+    )
+    assert.deepEqual(
+      (await readdir(uploadsDirectory)).map((name) => path.extname(name)).sort(),
+      ['.json', '.pdf', '.xml'],
+    )
+
+    for (const attachment of created.body.attachments) {
+      await request(app).get(attachment.url).expect(200)
+    }
+  })
+})
+
+test('API відхиляє невідомий binary-файл навіть із загальним MIME', async () => {
+  await withTestApp(async ({ app, uploadsDirectory }) => {
+    const response = await request(app)
+      .post('/api/tasks')
+      .field('title', 'Непідтриманий файл')
+      .attach('attachments', Buffer.from('binary'), {
+        filename: 'payload.exe',
+        contentType: 'application/octet-stream',
+      })
+      .expect(400)
+
+    assert.match(response.body.message, /JSON, PDF або XML/u)
+    assert.deepEqual(await readdir(uploadsDirectory), [])
+  })
+})
+
 test('API зберігає дерево внутрішніх коментарів окремо від контексту AI', async () => {
   await withTestApp(async ({ app }) => {
     const rootComment = await request(app)
@@ -357,6 +412,16 @@ test('SQLite автоматично додає поля задачі та snapsh
     assert.deepEqual(task.agentRun.releaseEvidence, {})
     assert.equal(store.findAgentRun('RUN-LEGACY').contextSnapshot, '')
     assert.equal(store.findAgentRun('RUN-LEGACY').codexSessionId, '')
+
+    const taskWithDocument = store.addAttachments('BUG-1001', [{
+      id: 'legacy-document',
+      name: 'scenario.json',
+      url: '/uploads/scenario.json',
+      type: 'application/json',
+      size: 2,
+      kind: 'document',
+    }])
+    assert.equal(taskWithDocument.attachments[0].kind, 'document')
 
     const updated = store.patch('BUG-1001', {
       siteUrl: 'https://example.com/problem',

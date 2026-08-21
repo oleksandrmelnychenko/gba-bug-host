@@ -45,6 +45,16 @@ const allowedMediaTypes = new Map([
   ['video/mp4', { extension: '.mp4', kind: 'video', maxSize: 200 * 1024 * 1024 }],
   ['video/webm', { extension: '.webm', kind: 'video', maxSize: 200 * 1024 * 1024 }],
   ['video/quicktime', { extension: '.mov', kind: 'video', maxSize: 200 * 1024 * 1024 }],
+  ['application/json', { extension: '.json', kind: 'document', maxSize: 25 * 1024 * 1024 }],
+  ['text/json', { extension: '.json', kind: 'document', maxSize: 25 * 1024 * 1024 }],
+  ['application/pdf', { extension: '.pdf', kind: 'document', maxSize: 25 * 1024 * 1024 }],
+  ['application/xml', { extension: '.xml', kind: 'document', maxSize: 25 * 1024 * 1024 }],
+  ['text/xml', { extension: '.xml', kind: 'document', maxSize: 25 * 1024 * 1024 }],
+])
+const allowedGenericDocumentExtensions = new Map([
+  ['.json', { contentType: 'application/json', extension: '.json', kind: 'document', maxSize: 25 * 1024 * 1024 }],
+  ['.pdf', { contentType: 'application/pdf', extension: '.pdf', kind: 'document', maxSize: 25 * 1024 * 1024 }],
+  ['.xml', { contentType: 'application/xml', extension: '.xml', kind: 'document', maxSize: 25 * 1024 * 1024 }],
 ])
 const allowedVoiceTypes = new Map([
   ['audio/webm', '.webm'],
@@ -59,7 +69,18 @@ const allowedVoiceTypes = new Map([
 ])
 
 function createFileName(file) {
-  return `${Date.now()}-${randomUUID()}${allowedMediaTypes.get(file.mimetype).extension}`
+  return `${Date.now()}-${randomUUID()}${getAttachmentRules(file).extension}`
+}
+
+function getAttachmentRules(file) {
+  const directRules = allowedMediaTypes.get(file.mimetype)
+  if (directRules) return { ...directRules, contentType: file.mimetype }
+
+  if (!file.mimetype || file.mimetype === 'application/octet-stream') {
+    return allowedGenericDocumentExtensions.get(path.extname(file.originalname).toLowerCase()) ?? null
+  }
+
+  return null
 }
 
 function cleanText(value, fallback = '') {
@@ -92,24 +113,26 @@ function normalizeSiteUrl(value, errors) {
 }
 
 function serializeAttachment(file) {
+  const rules = getAttachmentRules(file)
+
   return {
     id: randomUUID(),
     name: file.originalname,
     url: `/uploads/${file.filename}`,
-    type: file.mimetype,
+    type: rules.contentType,
     size: file.size,
-    kind: allowedMediaTypes.get(file.mimetype).kind,
+    kind: rules.kind,
   }
 }
 
 function getMediaValidationError(files = []) {
   for (const file of files) {
-    const rules = allowedMediaTypes.get(file.mimetype)
-    if (!rules) return 'Підтримуються зображення JPG, PNG, WEBP, GIF, AVIF та відео MP4, WEBM або MOV.'
+    const rules = getAttachmentRules(file)
+    if (!rules) return 'Підтримуються зображення, відео, а також файли JSON, PDF та XML.'
     if (file.size > rules.maxSize) {
-      return rules.kind === 'video'
-        ? 'Відео завелике. Максимальний розмір одного файлу — 200 МБ.'
-        : 'Зображення завелике. Максимальний розмір одного файлу — 10 МБ.'
+      if (rules.kind === 'video') return 'Відео завелике. Максимальний розмір одного файлу — 200 МБ.'
+      if (rules.kind === 'document') return 'Документ завеликий. Максимальний розмір одного файлу — 25 МБ.'
+      return 'Зображення завелике. Максимальний розмір одного файлу — 10 МБ.'
     }
   }
   return null
@@ -211,7 +234,7 @@ export async function createApp(options = {}) {
     }),
     limits: { fileSize: 200 * 1024 * 1024, files: 6 },
     fileFilter: (_request, file, callback) => {
-      if (!allowedMediaTypes.has(file.mimetype)) {
+      if (!getAttachmentRules(file)) {
         callback(new multer.MulterError('LIMIT_UNEXPECTED_FILE', 'attachments'))
         return
       }
@@ -818,7 +841,7 @@ export async function createApp(options = {}) {
   app.post('/api/tasks/:id/attachments', upload.array('attachments', 6), async (request, response, next) => {
     try {
       if (!request.files.length) {
-        response.status(400).json({ message: 'Оберіть хоча б одне зображення або відео.' })
+        response.status(400).json({ message: 'Оберіть хоча б один файл.' })
         return
       }
       const mediaError = getMediaValidationError(request.files)
@@ -902,8 +925,8 @@ export async function createApp(options = {}) {
           ? 'Голосовий запис завеликий. Максимальний розмір — 25 МБ.'
           : 'Цей формат аудіо не підтримується. Запишіть голос ще раз у цьому браузері.'
         : error.code === 'LIMIT_FILE_SIZE'
-          ? 'Файл завеликий. Зображення — до 10 МБ, відео — до 200 МБ.'
-          : 'Можна завантажити до 6 файлів: JPG, PNG, WEBP, GIF, AVIF, MP4, WEBM або MOV.'
+          ? 'Файл завеликий. Зображення — до 10 МБ, документи — до 25 МБ, відео — до 200 МБ.'
+          : 'Можна завантажити до 6 файлів: JPG, PNG, WEBP, GIF, AVIF, MP4, WEBM, MOV, JSON, PDF або XML.'
       response.status(400).json({ message })
       return
     }

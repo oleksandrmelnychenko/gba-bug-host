@@ -11,7 +11,7 @@ export interface TaskAttachment {
   url: string
   type: string
   size: number
-  kind: 'image' | 'video'
+  kind: 'image' | 'video' | 'document'
 }
 
 export interface TaskComment {

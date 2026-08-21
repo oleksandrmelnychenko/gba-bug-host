@@ -265,7 +265,7 @@ export class TaskStore {
         url TEXT NOT NULL,
         type TEXT NOT NULL,
         size INTEGER NOT NULL,
-        kind TEXT NOT NULL CHECK (kind IN ('image', 'video'))
+        kind TEXT NOT NULL CHECK (kind IN ('image', 'video', 'document'))
       );
       CREATE TABLE IF NOT EXISTS task_comments (
         id TEXT PRIMARY KEY,
@@ -357,6 +357,29 @@ export class TaskStore {
     `)
 
     this.transaction(() => {
+      const attachmentTableSql = this.database
+        .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'attachments'")
+        .get()?.sql ?? ''
+      if (!attachmentTableSql.includes("'document'")) {
+        this.database.exec(`
+          ALTER TABLE attachments RENAME TO attachments_before_document_support;
+          CREATE TABLE attachments (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            type TEXT NOT NULL,
+            size INTEGER NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('image', 'video', 'document'))
+          );
+          INSERT INTO attachments (id, task_id, name, url, type, size, kind)
+          SELECT id, task_id, name, url, type, size, kind
+          FROM attachments_before_document_support;
+          DROP TABLE attachments_before_document_support;
+          CREATE INDEX IF NOT EXISTS idx_attachments_task_id ON attachments(task_id);
+        `)
+      }
+
       const taskColumns = new Set(
         this.database.prepare('PRAGMA table_info(tasks)').all().map((column) => column.name),
       )

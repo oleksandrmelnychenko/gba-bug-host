@@ -11,6 +11,8 @@ import {
   ChevronUp,
   ChevronsUp,
   CornerDownRight,
+  Download,
+  FileText,
   History,
   Image as ImageIcon,
   Layers3,
@@ -108,6 +110,7 @@ const priorityOrder: TaskPriority[] = ['critical', 'high', 'medium', 'low']
 const pageSizeOptions = [20, 50, 100]
 const maxVoiceRecordingSeconds = 5 * 60
 const recordingMimeTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']
+const attachmentAccept = 'image/png,image/jpeg,image/webp,image/gif,image/avif,video/mp4,video/webm,video/quicktime,application/json,text/json,application/pdf,application/xml,text/xml,.json,.pdf,.xml'
 const dateFormatter = new Intl.DateTimeFormat('uk-UA', {
   day: '2-digit',
   month: 'short',
@@ -196,6 +199,37 @@ function mediaLabel(count: number) {
 
 function isVideo(attachment: Pick<TaskAttachment, 'kind' | 'type'>) {
   return attachment.kind === 'video' || attachment.type.startsWith('video/')
+}
+
+function isDocument(attachment: Pick<TaskAttachment, 'kind' | 'type'>) {
+  return attachment.kind === 'document'
+    || ['application/json', 'text/json', 'application/pdf', 'application/xml', 'text/xml'].includes(attachment.type)
+}
+
+function isSupportedAttachmentFile(file: File) {
+  return file.type.startsWith('image/')
+    || file.type.startsWith('video/')
+    || ['application/json', 'text/json', 'application/pdf', 'application/xml', 'text/xml'].includes(file.type)
+    || ['json', 'pdf', 'xml'].includes(getFileExtension(file.name))
+}
+
+function isDocumentFile(file: File) {
+  return ['application/json', 'text/json', 'application/pdf', 'application/xml', 'text/xml'].includes(file.type)
+    || ['json', 'pdf', 'xml'].includes(getFileExtension(file.name))
+}
+
+function getFileExtension(name: string) {
+  const extension = name.split('.').pop()?.trim().toUpperCase()
+  return extension && extension !== name.toUpperCase() ? extension.toLowerCase() : ''
+}
+
+function DocumentThumbnail({ name, compact = false }: { name: string; compact?: boolean }) {
+  return (
+    <span className={`document-thumbnail${compact ? ' is-compact' : ''}`}>
+      <FileText size={compact ? 15 : 26} />
+      <span>{getFileExtension(name).toUpperCase() || 'FILE'}</span>
+    </span>
+  )
 }
 
 function taskToDraft(task: Task): TaskDraft {
@@ -451,6 +485,8 @@ function AttachmentStack({
               <video src={attachment.url} muted preload="metadata" />
               <span className="mini-video-mark"><Play size={9} fill="currentColor" /></span>
             </>
+          ) : isDocument(attachment) ? (
+            <DocumentThumbnail compact name={attachment.name} />
           ) : <img src={attachment.url} alt="" />}
         </button>
       ))}
@@ -745,18 +781,10 @@ function UploadZone({
   inputId?: string
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
-  const previews = useMemo(
-    () => files.map((file) => ({ file, url: URL.createObjectURL(file) })),
-    [files],
-  )
-
-  useEffect(() => () => {
-    for (const preview of previews) URL.revokeObjectURL(preview.url)
-  }, [previews])
 
   const addFiles = (incoming: File[]) => {
-    const media = incoming.filter((file) => file.type.startsWith('image/') || file.type.startsWith('video/'))
-    onFiles([...files, ...media].slice(0, 6))
+    const supportedFiles = incoming.filter(isSupportedAttachmentFile)
+    onFiles([...files, ...supportedFiles].slice(0, 6))
   }
 
   const handleDrop = (event: DragEvent<HTMLDivElement>) => {
@@ -781,27 +809,29 @@ function UploadZone({
           ref={inputRef}
           id={inputId}
           type="file"
-          accept="image/png,image/jpeg,image/webp,image/gif,image/avif,video/mp4,video/webm,video/quicktime"
+          accept={attachmentAccept}
           multiple
           hidden
           onChange={(event) => addFiles(Array.from(event.target.files ?? []))}
         />
         <span className="upload-icon"><UploadCloud size={22} /></span>
         <div>
-          <strong>Перетягніть фото або відео сюди</strong>
-          <span>до 6 файлів · фото 10 МБ · відео 200 МБ</span>
+          <strong>Перетягніть фото, відео або документ сюди</strong>
+          <span>до 6 файлів · фото 10 МБ · JSON/PDF/XML 25 МБ · відео 200 МБ</span>
         </div>
       </div>
-      {previews.length > 0 && (
+      {files.length > 0 && (
         <div className="preview-strip">
-          {previews.map(({ file, url }, index) => (
+          {files.map((file, index) => (
             <div className="preview-item" key={`${file.name}-${file.lastModified}`}>
               {file.type.startsWith('video/') ? (
                 <>
-                  <video src={url} muted preload="metadata" />
+                  <LocalVideoPreview file={file} />
                   <span className="preview-video-mark"><Play size={12} fill="currentColor" /></span>
                 </>
-              ) : <img src={url} alt="" />}
+              ) : isDocumentFile(file) ? (
+                <DocumentThumbnail name={file.name} />
+              ) : <LocalImagePreview file={file} />}
               <button
                 type="button"
                 onClick={() => onFiles(files.filter((_, fileIndex) => fileIndex !== index))}
@@ -813,6 +843,30 @@ function UploadZone({
       )}
     </div>
   )
+}
+
+function LocalImagePreview({ file }: { file: File }) {
+  const previewRef = useRef<HTMLImageElement>(null)
+
+  useEffect(() => {
+    const url = URL.createObjectURL(file)
+    if (previewRef.current) previewRef.current.src = url
+    return () => URL.revokeObjectURL(url)
+  }, [file])
+
+  return <img ref={previewRef} alt="" />
+}
+
+function LocalVideoPreview({ file }: { file: File }) {
+  const previewRef = useRef<HTMLVideoElement>(null)
+
+  useEffect(() => {
+    const url = URL.createObjectURL(file)
+    if (previewRef.current) previewRef.current.src = url
+    return () => URL.revokeObjectURL(url)
+  }, [file])
+
+  return <video ref={previewRef} muted preload="metadata" />
 }
 
 function VoiceInputButton({ onTranscript }: { onTranscript: (text: string) => void }) {
@@ -1128,7 +1182,7 @@ function CreateTaskDialog({
           </div>
 
           <div className="form-field form-field-wide">
-            <label>Фото та відео</label>
+            <label>Фото, відео та документи</label>
             <UploadZone files={files} onFiles={setFiles} />
           </div>
 
@@ -1540,7 +1594,7 @@ function EditTaskDialog({
                 {uploading ? <LoaderCircle className="spin" size={15} /> : <Paperclip size={15} />}
                 Додати
               </button>
-              <input ref={inputRef} hidden type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif,image/avif,video/mp4,video/webm,video/quicktime" onChange={upload} />
+              <input ref={inputRef} hidden type="file" multiple accept={attachmentAccept} onChange={upload} />
             </div>
             {task.attachments.length > 0 ? (
               <div className="evidence-grid">
@@ -1557,6 +1611,8 @@ function EditTaskDialog({
                           <video src={attachment.url} muted preload="metadata" playsInline />
                           <span className="video-play-badge"><Play size={17} fill="currentColor" /></span>
                         </>
+                      ) : isDocument(attachment) ? (
+                        <DocumentThumbnail name={attachment.name} />
                       ) : <img src={attachment.url} alt={attachment.name} />}
                     </button>
                     <div className="evidence-meta">
@@ -1569,7 +1625,7 @@ function EditTaskDialog({
             ) : (
               <button type="button" className="empty-evidence" onClick={() => inputRef.current?.click()}>
                 <ImageIcon size={22} />
-                <span>Додайте фото або відео помилки</span>
+                <span>Додайте фото, відео, JSON, PDF або XML</span>
               </button>
             )}
           </div>
@@ -1802,9 +1858,25 @@ function Lightbox({ attachment, onClose }: { attachment: TaskAttachment | null; 
     <div className="lightbox" onClick={onClose} role="dialog" aria-modal="true" aria-label={attachment.name}>
       <div className="lightbox-topbar">
         <span>{attachment.name}</span>
-        <button onClick={onClose} aria-label="Закрити"><X size={20} /></button>
+        <div className="lightbox-actions">
+          {isDocument(attachment) ? (
+            <a href={attachment.url} download={attachment.name} onClick={(event) => event.stopPropagation()}>
+              <Download size={17} /> Завантажити
+            </a>
+          ) : null}
+          <button onClick={onClose} aria-label="Закрити"><X size={20} /></button>
+        </div>
       </div>
-      {isVideo(attachment) ? (
+      {isDocument(attachment) ? (
+        <iframe
+          className="lightbox-document"
+          src={attachment.url}
+          title={attachment.name}
+          sandbox=""
+          referrerPolicy="no-referrer"
+          onClick={(event) => event.stopPropagation()}
+        />
+      ) : isVideo(attachment) ? (
         <video
           src={attachment.url}
           controls
