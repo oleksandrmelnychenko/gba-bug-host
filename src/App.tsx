@@ -110,7 +110,30 @@ const priorityOrder: TaskPriority[] = ['critical', 'high', 'medium', 'low']
 const pageSizeOptions = [20, 50, 100]
 const maxVoiceRecordingSeconds = 5 * 60
 const recordingMimeTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']
-const attachmentAccept = 'image/png,image/jpeg,image/webp,image/gif,image/avif,video/mp4,video/webm,video/quicktime,application/json,text/json,application/pdf,application/xml,text/xml,.json,.pdf,.xml'
+const documentMimeTypes = new Set([
+  'application/json',
+  'text/json',
+  'application/pdf',
+  'application/xml',
+  'text/xml',
+  'application/vnd.ms-excel',
+  'application/msexcel',
+  'application/x-msexcel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+])
+const documentExtensions = new Set(['json', 'pdf', 'xml', 'xls', 'xlsx'])
+const attachmentAccept = [
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'image/gif',
+  'image/avif',
+  'video/mp4',
+  'video/webm',
+  'video/quicktime',
+  ...documentMimeTypes,
+  ...[...documentExtensions].map((extension) => `.${extension}`),
+].join(',')
 const dateFormatter = new Intl.DateTimeFormat('uk-UA', {
   day: '2-digit',
   month: 'short',
@@ -203,19 +226,19 @@ function isVideo(attachment: Pick<TaskAttachment, 'kind' | 'type'>) {
 
 function isDocument(attachment: Pick<TaskAttachment, 'kind' | 'type'>) {
   return attachment.kind === 'document'
-    || ['application/json', 'text/json', 'application/pdf', 'application/xml', 'text/xml'].includes(attachment.type)
+    || documentMimeTypes.has(attachment.type)
 }
 
 function isSupportedAttachmentFile(file: File) {
   return file.type.startsWith('image/')
     || file.type.startsWith('video/')
-    || ['application/json', 'text/json', 'application/pdf', 'application/xml', 'text/xml'].includes(file.type)
-    || ['json', 'pdf', 'xml'].includes(getFileExtension(file.name))
+    || documentMimeTypes.has(file.type)
+    || documentExtensions.has(getFileExtension(file.name))
 }
 
 function isDocumentFile(file: File) {
-  return ['application/json', 'text/json', 'application/pdf', 'application/xml', 'text/xml'].includes(file.type)
-    || ['json', 'pdf', 'xml'].includes(getFileExtension(file.name))
+  return documentMimeTypes.has(file.type)
+    || documentExtensions.has(getFileExtension(file.name))
 }
 
 function getFileExtension(name: string) {
@@ -817,7 +840,7 @@ function UploadZone({
         <span className="upload-icon"><UploadCloud size={22} /></span>
         <div>
           <strong>Перетягніть фото, відео або документ сюди</strong>
-          <span>до 6 файлів · фото 10 МБ · JSON/PDF/XML 25 МБ · відео 200 МБ</span>
+          <span>до 6 файлів · фото 10 МБ · JSON/PDF/XML/XLS/XLSX 25 МБ · відео 200 МБ</span>
         </div>
       </div>
       {files.length > 0 && (
@@ -1625,7 +1648,7 @@ function EditTaskDialog({
             ) : (
               <button type="button" className="empty-evidence" onClick={() => inputRef.current?.click()}>
                 <ImageIcon size={22} />
-                <span>Додайте фото, відео, JSON, PDF або XML</span>
+                <span>Додайте фото, відео, JSON, PDF, XML, XLS або XLSX</span>
               </button>
             )}
           </div>

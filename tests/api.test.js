@@ -245,7 +245,7 @@ test('API створює задачу зі скріншотом і оновлю�
   })
 })
 
-test('API приймає JSON, PDF та XML як докази і зберігає безпечні типи файлів', async () => {
+test('API приймає JSON, PDF, XML, XLS та XLSX як докази і зберігає безпечні типи файлів', async () => {
   await withTestApp(async ({ app, uploadsDirectory }) => {
     const created = await request(app)
       .post('/api/tasks')
@@ -263,6 +263,14 @@ test('API приймає JSON, PDF та XML як докази і зберіга�
         filename: 'income.xml',
         contentType: 'application/octet-stream',
       })
+      .attach('attachments', Buffer.from('legacy-excel-workbook'), {
+        filename: 'legacy-scenario.xls',
+        contentType: 'application/vnd.ms-excel',
+      })
+      .attach('attachments', Buffer.from('openxml-excel-workbook'), {
+        filename: 'scenario.xlsx',
+        contentType: 'application/octet-stream',
+      })
       .expect(201)
 
     assert.deepEqual(
@@ -271,11 +279,17 @@ test('API приймає JSON, PDF та XML як докази і зберіга�
         { kind: 'document', name: 'sale.json', type: 'application/json' },
         { kind: 'document', name: 'scenario.pdf', type: 'application/pdf' },
         { kind: 'document', name: 'income.xml', type: 'application/xml' },
+        { kind: 'document', name: 'legacy-scenario.xls', type: 'application/vnd.ms-excel' },
+        {
+          kind: 'document',
+          name: 'scenario.xlsx',
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        },
       ],
     )
     assert.deepEqual(
       (await readdir(uploadsDirectory)).map((name) => path.extname(name)).sort(),
-      ['.json', '.pdf', '.xml'],
+      ['.json', '.pdf', '.xls', '.xlsx', '.xml'],
     )
 
     for (const attachment of created.body.attachments) {
@@ -295,7 +309,7 @@ test('API відхиляє невідомий binary-файл навіть із 
       })
       .expect(400)
 
-    assert.match(response.body.message, /JSON, PDF або XML/u)
+    assert.match(response.body.message, /JSON, PDF, XML, XLS або XLSX/u)
     assert.deepEqual(await readdir(uploadsDirectory), [])
   })
 })

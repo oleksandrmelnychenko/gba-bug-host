@@ -50,11 +50,17 @@ const allowedMediaTypes = new Map([
   ['application/pdf', { extension: '.pdf', kind: 'document', maxSize: 25 * 1024 * 1024 }],
   ['application/xml', { extension: '.xml', kind: 'document', maxSize: 25 * 1024 * 1024 }],
   ['text/xml', { extension: '.xml', kind: 'document', maxSize: 25 * 1024 * 1024 }],
+  ['application/vnd.ms-excel', { extension: '.xls', kind: 'document', maxSize: 25 * 1024 * 1024 }],
+  ['application/msexcel', { extension: '.xls', kind: 'document', maxSize: 25 * 1024 * 1024 }],
+  ['application/x-msexcel', { extension: '.xls', kind: 'document', maxSize: 25 * 1024 * 1024 }],
+  ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', { extension: '.xlsx', kind: 'document', maxSize: 25 * 1024 * 1024 }],
 ])
 const allowedGenericDocumentExtensions = new Map([
   ['.json', { contentType: 'application/json', extension: '.json', kind: 'document', maxSize: 25 * 1024 * 1024 }],
   ['.pdf', { contentType: 'application/pdf', extension: '.pdf', kind: 'document', maxSize: 25 * 1024 * 1024 }],
   ['.xml', { contentType: 'application/xml', extension: '.xml', kind: 'document', maxSize: 25 * 1024 * 1024 }],
+  ['.xls', { contentType: 'application/vnd.ms-excel', extension: '.xls', kind: 'document', maxSize: 25 * 1024 * 1024 }],
+  ['.xlsx', { contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', extension: '.xlsx', kind: 'document', maxSize: 25 * 1024 * 1024 }],
 ])
 const allowedVoiceTypes = new Map([
   ['audio/webm', '.webm'],
@@ -128,7 +134,7 @@ function serializeAttachment(file) {
 function getMediaValidationError(files = []) {
   for (const file of files) {
     const rules = getAttachmentRules(file)
-    if (!rules) return 'Підтримуються зображення, відео, а також файли JSON, PDF та XML.'
+    if (!rules) return 'Підтримуються зображення, відео, а також файли JSON, PDF, XML, XLS та XLSX.'
     if (file.size > rules.maxSize) {
       if (rules.kind === 'video') return 'Відео завелике. Максимальний розмір одного файлу — 200 МБ.'
       if (rules.kind === 'document') return 'Документ завеликий. Максимальний розмір одного файлу — 25 МБ.'
@@ -926,7 +932,7 @@ export async function createApp(options = {}) {
           : 'Цей формат аудіо не підтримується. Запишіть голос ще раз у цьому браузері.'
         : error.code === 'LIMIT_FILE_SIZE'
           ? 'Файл завеликий. Зображення — до 10 МБ, документи — до 25 МБ, відео — до 200 МБ.'
-          : 'Можна завантажити до 6 файлів: JPG, PNG, WEBP, GIF, AVIF, MP4, WEBM, MOV, JSON, PDF або XML.'
+          : 'Можна завантажити до 6 файлів: JPG, PNG, WEBP, GIF, AVIF, MP4, WEBM, MOV, JSON, PDF, XML, XLS або XLSX.'
       response.status(400).json({ message })
       return
     }
