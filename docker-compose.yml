@@ -57,7 +57,9 @@ services:
       CODEX_WORKER_LEASE_TTL_MS: "${CODEX_WORKER_LEASE_TTL_MS:-20000}"
       CODEX_WORKER_HEARTBEAT_MS: "${CODEX_WORKER_HEARTBEAT_MS:-5000}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:?Set OPENAI_API_KEY in the server environment}"
-    command: ["sh", "-lc", "printf '%s' \"$$OPENAI_API_KEY\" | codex login --with-api-key && npm run worker"]
+    # exec makes Node PID 1 after login, so SIGTERM reaches the graceful lease
+    # release handler during recreate instead of leaving a 20s stale lease.
+    command: ["sh", "-lc", "printf '%s' \"$$OPENAI_API_KEY\" | codex login --with-api-key && exec node server/worker.js"]
     volumes:
       - qa-data:/app/data
       - qa-uploads:/app/public/uploads
