@@ -7,6 +7,7 @@ import test from 'node:test'
 import {
   CodexWorker,
   codexExecutionFailureReason,
+  fixedResultQualityFailures,
   normalizeWorkerConcurrency,
   terminateProcessTree,
 } from '../server/codex-worker.js'
@@ -24,12 +25,38 @@ async function waitFor(predicate, timeoutMs = 1000) {
   }
 }
 
-test('Codex worker обмежує конфігурацію трьома паралельними агентами', () => {
-  assert.equal(normalizeWorkerConcurrency(undefined), 3)
-  assert.equal(normalizeWorkerConcurrency('2'), 2)
-  assert.equal(normalizeWorkerConcurrency('3'), 3)
-  assert.equal(normalizeWorkerConcurrency('20'), 3)
-  assert.equal(normalizeWorkerConcurrency('invalid'), 3)
+test('Codex worker примусово нормалізує будь-яку конфігурацію до одного агента', () => {
+  assert.equal(normalizeWorkerConcurrency(undefined), 1)
+  assert.equal(normalizeWorkerConcurrency('1'), 1)
+  assert.equal(normalizeWorkerConcurrency('2'), 1)
+  assert.equal(normalizeWorkerConcurrency('3'), 1)
+  assert.equal(normalizeWorkerConcurrency('20'), 1)
+  assert.equal(normalizeWorkerConcurrency('invalid'), 1)
+})
+
+test('Codex worker підключає legacy references окремо від writable stack', () => {
+  const previous = process.env.CODEX_REFERENCE_REPOS_CONSOLE
+  process.env.CODEX_REFERENCE_REPOS_CONSOLE = '/tmp/gba_client'
+  try {
+    const worker = new CodexWorker({
+      store: {},
+      rootDirectory: '/tmp',
+      dataDirectory: '/tmp',
+      uploadsDirectory: '/tmp',
+      targetRepository: '/tmp',
+    })
+    assert.deepEqual(worker.resolveProjectReferences('console'), [{
+      name: 'gba_client',
+      repositoryPath: '/tmp/gba_client',
+    }])
+    assert.deepEqual(worker.resolveProjectStack('console'), [{
+      name: 'tmp',
+      repositoryPath: '/tmp',
+    }])
+  } finally {
+    if (previous === undefined) delete process.env.CODEX_REFERENCE_REPOS_CONSOLE
+    else process.env.CODEX_REFERENCE_REPOS_CONSOLE = previous
+  }
 })
 
 test('Codex worker відхиляє heartbeat, який не встигає оновити lease', () => {
@@ -69,11 +96,12 @@ test('зупинка detached Codex надсилає сигнал усій proce
   }
 })
 
-test('Codex worker одночасно обробляє три задачі й добирає наступну після звільнення слота', async () => {
+test('Codex worker обробляє чергу строго по одній задачі', async () => {
   const queue = Array.from({ length: 5 }, (_, index) => ({
     id: `RUN-PARALLEL-${index + 1}`,
     taskId: `BUG-PARALLEL-${index + 1}`,
   }))
+  const expectedRunIds = queue.map((run) => run.id)
   const started = []
   const releases = new Map()
   let active = 0
@@ -99,22 +127,44 @@ test('Codex worker одночасно обробляє три задачі й д
   }
 
   worker.tick()
-  await waitFor(() => started.length === 3)
-  assert.deepEqual(started, ['RUN-PARALLEL-1', 'RUN-PARALLEL-2', 'RUN-PARALLEL-3'])
-  assert.equal(maximumActive, 3)
-  assert.equal(worker.activeRuns.size, 3)
+  await waitFor(() => started.length === 1)
+  assert.deepEqual(started, ['RUN-PARALLEL-1'])
+  assert.equal(maximumActive, 1)
+  assert.equal(worker.activeRuns.size, 1)
 
-  releases.get('RUN-PARALLEL-2')()
-  await waitFor(() => started.length === 4)
-  assert.equal(started[3], 'RUN-PARALLEL-4')
-  assert.equal(maximumActive, 3)
-
-  for (const runId of started) releases.get(runId)?.()
-  await waitFor(() => started.length === 5)
-  releases.get('RUN-PARALLEL-5')()
+  for (let index = 1; index <= 5; index += 1) {
+    releases.get(`RUN-PARALLEL-${index}`)()
+    if (index < 5) await waitFor(() => started.length === index + 1)
+  }
   await waitFor(() => worker.activeRuns.size === 0)
-  assert.equal(maximumActive, 3)
+  assert.deepEqual(started, expectedRunIds)
+  assert.equal(maximumActive, 1)
   await worker.stop()
+})
+
+test('quality gate відхиляє недоведений fixed і сторонній global test config', () => {
+  const result = {
+    outcome: 'fixed',
+    rootCause: 'Поле додано не на тому етапі workflow.',
+    acceptanceEvidence: [{ criterion: 'Поле після створення', evidence: 'Сусідня форма', status: 'not_met' }],
+    referenceEvidence: ['Переглянуто поточний компонент'],
+    tests: ['PASS targeted test'],
+    changedFiles: ['gba_console/src/form.tsx', 'gba_console/vitest.config.cjs'],
+    reviewedAttachments: ['screen.jpg'],
+    attachmentEvidence: [{ name: 'screen.jpg', observation: 'Post-create логістичний екран' }],
+    scopeReview: { diffReviewed: true, unrelatedFiles: [] },
+    releasePlan: { repositories: ['gba_console'] },
+  }
+
+  const failures = fixedResultQualityFailures(result, {
+    task: { title: 'Додати знижку до інвойса', description: 'Поле після створення інвойса' },
+    mediaPaths: [{ name: 'screen.jpg', available: true }],
+    actualChangedFiles: ['gba_console/src/form.tsx', 'gba_console/vitest.config.cjs'],
+    actualRepositories: ['gba_console'],
+  })
+
+  assert.ok(failures.some((failure) => /не всі acceptance-критерії/.test(failure)))
+  assert.ok(failures.some((failure) => /глобальні build\/test-конфіги/.test(failure)))
 })
 
 test('Codex worker працює в окремому worktree та зберігає результат', async () => {
@@ -145,9 +195,18 @@ writeFileSync('target/app.txt', 'after\\n', 'utf8')
 writeFileSync(outputPath, JSON.stringify({
   outcome: 'fixed',
   summary: 'Тестове виправлення готове.',
-  tests: ['fixture test'],
+  rootCause: 'Fixture доводить точну причину тестової зміни.',
+  acceptanceEvidence: [{ criterion: 'Файл змінено', evidence: 'target/app.txt має after', status: 'met' }],
+  referenceEvidence: ['target/app.txt — current contract'],
+  tests: ['PASS fixture test'],
   changedFiles: ['app.txt'],
   reviewedAttachments: ['proof.png', 'walkthrough.mp4', 'missing.mov — недоступне'],
+  attachmentEvidence: [
+    { name: 'proof.png', observation: 'Тестове зображення переглянуто' },
+    { name: 'walkthrough.mp4', observation: 'Тестове відео переглянуто' },
+    { name: 'missing.mov', observation: 'Файл недоступний, вміст не вигадувався' }
+  ],
+  scopeReview: { diffReviewed: true, unrelatedFiles: [] },
   releasePlan: { repositories: ['target'], migrationFiles: [], services: [], postDeployChecks: [{ label: 'fixture', url: 'http://127.0.0.1/health', expectedStatus: 200, contains: '' }] }
 }), 'utf8')
 `, 'utf8')
@@ -221,7 +280,9 @@ writeFileSync(outputPath, JSON.stringify({
     assert.deepEqual(store.ensureBuild('worker-test-build').bugs, [])
     const schema = JSON.parse(await readFile(path.join(dataDirectory, 'agent-runs', `${run.id}-schema.json`), 'utf8'))
     assert.equal(schema.properties.outcome.type, 'string')
+    assert.equal(schema.properties.acceptanceEvidence.minItems, 1)
     assert.equal(schema.properties.reviewedAttachments.type, 'array')
+    assert.equal(schema.properties.scopeReview.type, 'object')
     await assert.rejects(readFile(path.join(dataDirectory, 'agent-runs', 'result-schema.json'), 'utf8'), /ENOENT/)
     assert.equal(await readFile(path.join(worktreesDirectory, 'bug-1051', 'target', 'app.txt'), 'utf8'), 'after\n')
     const prompt = await readFile(path.join(worktreesDirectory, 'bug-1051', 'prompt.txt'), 'utf8')
@@ -231,6 +292,9 @@ writeFileSync(outputPath, JSON.stringify({
     assert.match(prompt, /walkthrough\.mp4.*video\/mp4/)
     assert.match(prompt, /missing\.mov.*ФАЙЛ НЕДОСТУПНИЙ/)
     assert.match(prompt, /Відкрий кожне доступне вкладення/)
+    assert.match(prompt, /Acceptance contract/)
+    assert.match(prompt, /Схожий чи сусідній екран не вважається виправленням/)
+    assert.match(prompt, /переглянь повний git diff/)
     assert.match(prompt, /створи НОВУ forward-only міграцію/)
     assert.match(prompt, /release-worker сам застосує штатний migrator/)
     assert.doesNotMatch(prompt, /Внутрішній коментар команди/)
@@ -239,6 +303,8 @@ writeFileSync(outputPath, JSON.stringify({
       JSON.parse(result.details).reviewedAttachments,
       ['proof.png', 'walkthrough.mp4', 'missing.mov — недоступне'],
     )
+    assert.equal(JSON.parse(result.details).qualityGate.applied, true)
+    assert.equal(JSON.parse(result.details).qualityGate.passed, true)
     assert.equal(await readFile(path.join(targetRepository, 'app.txt'), 'utf8'), 'before\n')
     assert.equal(git(targetRepository, 'status', '--short'), '')
   } finally {
@@ -281,9 +347,14 @@ process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: '${sess
 writeFileSync(outputPath, JSON.stringify({
   outcome: 'fixed',
   summary: \`Виправлення \${count} готове.\`,
-  tests: ['fixture test'],
+  rootCause: 'Fixture доводить збереження окремої Codex-сесії.',
+  acceptanceEvidence: [{ criterion: 'Сесія продовжена', evidence: 'invocation history', status: 'met' }],
+  referenceEvidence: ['target/app.txt — current contract'],
+  tests: ['PASS fixture test'],
   changedFiles: ['app.txt'],
   reviewedAttachments: [],
+  attachmentEvidence: [],
+  scopeReview: { diffReviewed: true, unrelatedFiles: [] },
   releasePlan: { repositories: ['target'], migrationFiles: [], services: [], postDeployChecks: [{ label: 'fixture', url: 'http://127.0.0.1/health', expectedStatus: 200, contains: '' }] }
 }), 'utf8')
 `, 'utf8')
@@ -378,9 +449,14 @@ writeFileSync('backend/app.txt', 'back-after\\n', 'utf8')
 writeFileSync(outputPath, JSON.stringify({
   outcome: 'fixed',
   summary: 'Фул-стек виправлення готове.',
-  tests: ['fixture test'],
+  rootCause: 'Fixture потребує узгодженої зміни обох репозиторіїв.',
+  acceptanceEvidence: [{ criterion: 'Обидва файли змінено', evidence: 'front/back after', status: 'met' }],
+  referenceEvidence: ['frontend/app.txt і backend/app.txt — current contract'],
+  tests: ['PASS fixture test'],
   changedFiles: ['frontend/app.txt', 'backend/app.txt'],
   reviewedAttachments: [],
+  attachmentEvidence: [],
+  scopeReview: { diffReviewed: true, unrelatedFiles: [] },
   releasePlan: { repositories: ['frontend', 'backend'], migrationFiles: [], services: [], postDeployChecks: [{ label: 'fixture', url: 'http://127.0.0.1/health', expectedStatus: 200, contains: '' }] }
 }), 'utf8')
 `, 'utf8')
@@ -442,7 +518,8 @@ test('Codex worker ізолює залежності у worktree і диктує
   git(repository, 'config', 'user.email', 'worker-test@example.com')
   git(repository, 'config', 'user.name', 'Worker Test')
   await writeFile(path.join(repository, 'app.txt'), 'before\n', 'utf8')
-  git(repository, 'add', 'app.txt')
+  await writeFile(path.join(repository, '.gitignore'), 'node_modules/\n', 'utf8')
+  git(repository, 'add', 'app.txt', '.gitignore')
   git(repository, 'commit', '-m', 'Initial fixture')
 
   await mkdir(path.join(repository, 'node_modules'), { recursive: true })
@@ -458,9 +535,14 @@ writeFileSync('prompt.txt', prompt, 'utf8')
 writeFileSync(outputPath, JSON.stringify({
   outcome: 'fixed',
   summary: 'Перевірки пройдені.',
-  tests: ['npx tsc --noEmit'],
+  rootCause: 'Fixture помилково стверджує, що змін не потрібно.',
+  acceptanceEvidence: [{ criterion: 'Зміна присутня', evidence: 'Немає diff', status: 'met' }],
+  referenceEvidence: ['target/app.txt — current contract'],
+  tests: ['PASS npx tsc --noEmit'],
   changedFiles: [],
   reviewedAttachments: [],
+  attachmentEvidence: [],
+  scopeReview: { diffReviewed: true, unrelatedFiles: [] },
   releasePlan: { repositories: [], migrationFiles: [], services: [], postDeployChecks: [{ label: 'fixture', url: 'http://127.0.0.1/health', expectedStatus: 200, contains: '' }] }
 }), 'utf8')
 `, 'utf8')
@@ -508,7 +590,7 @@ writeFileSync(outputPath, JSON.stringify({
       (await stat(path.join(repository, 'node_modules', 'marker.txt'))).ino,
     )
     assert.equal(store.findAgentRun(run.id).status, 'needs_review')
-    assert.match(store.findAgentRun(run.id).summary, /автоматичний released заборонено/)
+    assert.match(store.findAgentRun(run.id).summary, /фактичний git diff порожній/)
 
     await rm(linkPath, { recursive: true, force: true })
     execFileSync('cp', ['-al', '--', path.join(repository, 'node_modules'), linkPath])

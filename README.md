@@ -67,7 +67,7 @@ CODEX_TARGET_REPO_HOST_PATH=/srv/gba-console
 CODEX_WORKTREES_HOST_PATH=/srv/gba-worktrees
 CODEX_NETWORK_ACCESS=false
 CODEX_JOB_TIMEOUT_MS=2700000
-CODEX_CONCURRENCY=3
+# coding queue is deliberately singleton (one active Codex task)
 CODEX_WORKER_LEASE_TTL_MS=20000
 CODEX_WORKER_HEARTBEAT_MS=5000
 CODEX_RUN_STALE_MS=30000
@@ -115,7 +115,11 @@ Docker image для `web` містить `faster-whisper` і multilingual-мод
 
 Щоб Codex міг відкривати URL або завантажувати залежності, встановіть `CODEX_NETWORK_ACCESS=true`. Вмикайте це лише для довірених задач і репозиторію.
 
-`CODEX_CONCURRENCY` задає кількість паралельних Codex-агентів від 1 до 3; типовим значенням є `3`. Кожен агент отримує окремий git worktree, а release-черга лишається послідовною.
+Codex-черга навмисно виконує рівно одну coding-задачу за раз. Окремі git worktree-и зберігають ізоляцію й історію повторних спроб, але наступна задача не конкурує з поточною за CPU/RAM або test runner. `CODEX_CONCURRENCY` примусово нормалізується до `1`, навіть якщо старе середовище ще передає більше значення.
+
+`CODEX_REFERENCE_REPOS_CONSOLE` і `CODEX_REFERENCE_REPOS_ECOMMERCE` задають необов’язкові read-only legacy/stable репозиторії. Вони доступні лише як джерело бізнес-контракту: worker не створює там worktree, не змінює їх і не включає в release. У локальному override legacy `gba_client` монтується з Docker-прапорцем `:ro`.
+
+Перед `completed` worker тепер застосовує fail-closed quality gate: Codex має зіставити кожен acceptance-критерій із доказом, пояснити root cause і current/legacy/API контракт, зафіксувати конкретні спостереження з усіх вкладень та підтвердити перегляд повного diff. Host окремо звіряє declared files/repositories з фактичним Git, а стороння зміна глобального build/test-конфіга переводить результат у `needs_review`, а не в automatic release.
 
 Постійний контекст задається у `server/codex-worker-context.md`. Під час першого запуску нової версії пам’яті worker фіксує epoch у SQLite. Для кожного запуску він зберігає незмінний snapshot контексту та додає останні підтверджені release-и відповідного проєкту, зроблені після цього epoch. Невипущені, старі або відхилені зміни в нову спільну пам’ять не потрапляють. Повторна спроба тієї самої задачі використовує її збережений `codexSessionId`; якщо rollout-файл сесії втрачено, worker безпечно запускає нову сесію з тим самим snapshot. Ліміти керуються `CODEX_CONTEXT_HISTORY_LIMIT` і `CODEX_CONTEXT_MAX_LENGTH`; нову чисту епоху можна почати зміною `CODEX_CONTEXT_EPOCH_KEY`.
 

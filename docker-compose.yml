@@ -48,7 +48,11 @@ services:
       CODEX_HOME: /app/codex-home
       CODEX_NETWORK_ACCESS: "${CODEX_NETWORK_ACCESS:-false}"
       CODEX_JOB_TIMEOUT_MS: "${CODEX_JOB_TIMEOUT_MS:-2700000}"
-      CODEX_CONCURRENCY: "${CODEX_CONCURRENCY:-3}"
+      # Coding mutations are deliberately serialized. Parallel max-reasoning
+      # runs caused timeout/resource contention and weaker cross-task isolation.
+      CODEX_CONCURRENCY: "1"
+      CODEX_REFERENCE_REPOS_CONSOLE: "${CODEX_REFERENCE_REPOS_CONSOLE:-}"
+      CODEX_REFERENCE_REPOS_ECOMMERCE: "${CODEX_REFERENCE_REPOS_ECOMMERCE:-}"
       CODEX_WORKER_LEASE_NAME: "${CODEX_WORKER_LEASE_NAME:-codex-worker}"
       CODEX_WORKER_LEASE_TTL_MS: "${CODEX_WORKER_LEASE_TTL_MS:-20000}"
       CODEX_WORKER_HEARTBEAT_MS: "${CODEX_WORKER_HEARTBEAT_MS:-5000}"
