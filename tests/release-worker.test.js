@@ -3,7 +3,7 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { ReleaseWorker, branchName, defaultRepoPlan, hasWorkNewerThanGate, isMigrationFile, isReleased, isRetryableValidation, isSandboxLimitedReview, isSentinelTask, lastGateAt, parseComposePs, releaseStatusFor, selectReleasableTasks, selectRepositoryChecks, taskSlug, validateReleaseHandoff, validationGateFingerprint } from '../server/release-worker.js'
+import { ReleaseWorker, branchName, classifyGitPushFailure, classifyPostDeployCheckFailure, defaultRepoPlan, hasWorkNewerThanGate, isMigrationFile, isReleased, isRetryableValidation, isSandboxLimitedReview, isSentinelTask, lastGateAt, parseComposePs, releaseStatusFor, selectReleasableTasks, selectRepositoryChecks, taskSlug, validateReleaseHandoff, validationGateFingerprint } from '../server/release-worker.js'
 import { materializeInstalledDependencies } from '../server/worktree-dependencies.js'
 
 function releasePlanDetails(repositories = ['repo'], services = []) {
@@ -681,6 +681,21 @@ test('HTML live-check звіряє текст без хибного падінн
 
   assert.equal(result.ok, true)
   assert.equal(result.evidence[0].passed, true)
+})
+
+test('live-check розрізняє детермінований mismatch і тимчасову недоступність', () => {
+  assert.equal(classifyPostDeployCheckFailure({ code: 0, status: 200 }), 'validation')
+  assert.equal(classifyPostDeployCheckFailure({ code: 0, status: 404 }), 'validation')
+  assert.equal(classifyPostDeployCheckFailure({ code: 0, status: 503 }), 'transient')
+  assert.equal(classifyPostDeployCheckFailure({ code: 7, status: null }), 'transient')
+})
+
+test('non-fast-forward push є repository-помилкою, а network failure лишається transient', () => {
+  assert.equal(
+    classifyGitPushFailure("! [rejected] abc -> development (non-fast-forward)\nhint: tip of your current branch is behind"),
+    'repository',
+  )
+  assert.equal(classifyGitPushFailure('fatal: unable to access remote: connection reset'), 'transient')
 })
 
 test('успішна validation того самого commit повторно не запускає батарею після deploy-retry', async () => {

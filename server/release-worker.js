@@ -18,6 +18,18 @@ const REPOSITORY_SHA_ENV = {
   'gba-ecommerce-api': 'GBA_ECOMMERCE_API_GIT_SHA',
 }
 
+export function classifyGitPushFailure(output) {
+  return /(?:non-fast-forward|\[rejected\].*(?:fetch first|non-fast-forward)|tip of your current branch is behind)/is.test(output ?? '')
+    ? 'repository'
+    : 'transient'
+}
+
+export function classifyPostDeployCheckFailure({ code, status }) {
+  return code !== 0 || !Number.isInteger(status) || status >= 500
+    ? 'transient'
+    : 'validation'
+}
+
 export const serviceProbes = {
   'gba-console': 'http://127.0.0.1:8083/build.json',
   'data-concord': 'http://127.0.0.1:35981/health',
@@ -797,7 +809,7 @@ export class ReleaseWorker {
     evidence = mergeEvidence(evidence, { scenarioChecks: scenario.evidence })
     if (!scenario.ok) {
       await this.handleReleaseFailure(task, {
-        kind: 'transient',
+        kind: scenario.kind ?? 'transient',
         reason: scenario.reason,
         phase: 'verifying',
         evidence,
@@ -1036,7 +1048,12 @@ export class ReleaseWorker {
         passed,
       })
       if (!passed) {
-        return { ok: false, reason: `live-check «${check.label}» не пройшов`, evidence }
+        return {
+          ok: false,
+          kind: classifyPostDeployCheckFailure({ code: result.code, status }),
+          reason: `live-check «${check.label}» не пройшов`,
+          evidence,
+        }
       }
     }
     return { ok: true, evidence }
@@ -1340,7 +1357,13 @@ export class ReleaseWorker {
         {},
       )
       if (push.code !== 0) {
-        return { ok: false, kind: 'transient', phase: 'publishing', reason: `${item.repo}: push не пройшов: ${push.output.slice(-500)}`, evidence }
+        return {
+          ok: false,
+          kind: classifyGitPushFailure(push.output),
+          phase: 'publishing',
+          reason: `${item.repo}: push не пройшов: ${push.output.slice(-500)}`,
+          evidence,
+        }
       }
       evidence = mergeEvidence(evidence, {
         repositories: {
