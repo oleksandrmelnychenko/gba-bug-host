@@ -110,6 +110,7 @@ export interface Task {
   area: string
   project: TaskProject
   status: TaskStatus
+  qaStatus: string
   priority: TaskPriority
   createdAt: string
   updatedAt: string

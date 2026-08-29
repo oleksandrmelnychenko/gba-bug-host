@@ -184,6 +184,7 @@ function taskFromRow(row, attachments = [], agentRun = null) {
     area: row.area,
     project: row.project ?? 'console',
     status: row.status,
+    qaStatus: row.qa_status ?? '',
     priority: row.priority,
     assignee: row.assignee,
     createdAt: row.created_at,
@@ -244,6 +245,7 @@ export class TaskStore {
         review_comment TEXT NOT NULL DEFAULT '',
         area TEXT NOT NULL,
         status TEXT NOT NULL,
+        qa_status TEXT NOT NULL DEFAULT '',
         priority TEXT NOT NULL,
         assignee TEXT NOT NULL,
         created_at TEXT NOT NULL,
@@ -398,6 +400,9 @@ export class TaskStore {
       if (!taskColumns.has('project')) {
         this.database.exec("ALTER TABLE tasks ADD COLUMN project TEXT NOT NULL DEFAULT 'console'")
       }
+      if (!taskColumns.has('qa_status')) {
+        this.database.exec("ALTER TABLE tasks ADD COLUMN qa_status TEXT NOT NULL DEFAULT ''")
+      }
 
       const commentColumns = new Set(
         this.database.prepare('PRAGMA table_info(task_comments)').all().map((column) => column.name),
@@ -513,8 +518,8 @@ export class TaskStore {
 
   insertTask(task) {
     this.database.prepare(`
-      INSERT INTO tasks (id, title, description, site_url, notes, staff_comments, review_comment, area, project, status, priority, assignee, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO tasks (id, title, description, site_url, notes, staff_comments, review_comment, area, project, status, qa_status, priority, assignee, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       task.id,
       task.title,
@@ -526,6 +531,7 @@ export class TaskStore {
       task.area,
       task.project ?? 'console',
       task.status,
+      task.qaStatus ?? '',
       task.priority,
       task.assignee,
       task.createdAt,
@@ -786,7 +792,7 @@ export class TaskStore {
     const existingTask = this.find(id)
     if (!existingTask) return null
 
-    const allowedFields = ['title', 'description', 'siteUrl', 'notes', 'staffComments', 'reviewComment', 'area', 'project', 'status', 'priority', 'assignee']
+    const allowedFields = ['title', 'description', 'siteUrl', 'notes', 'staffComments', 'reviewComment', 'area', 'project', 'status', 'qaStatus', 'priority', 'assignee']
     const fields = allowedFields.filter((field) => Object.hasOwn(values, field))
     const updatedAt = new Date().toISOString()
 
@@ -801,6 +807,7 @@ export class TaskStore {
         area: 'area',
         project: 'project',
         status: 'status',
+        qaStatus: 'qa_status',
         priority: 'priority',
         assignee: 'assignee',
       }

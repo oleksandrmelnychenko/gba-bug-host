@@ -117,7 +117,7 @@ export function createTask(draft: TaskDraft, attachments: File[]) {
   return request<Task>('/api/tasks', { method: 'POST', body })
 }
 
-export function updateTask(id: string, patch: Partial<TaskDraft>) {
+export function updateTask(id: string, patch: Partial<TaskDraft & Pick<Task, 'qaStatus'>>) {
   return request<Task>(`/api/tasks/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },

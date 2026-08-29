@@ -161,6 +161,7 @@ function validateTaskInput(body, { partial = false } = {}) {
   const area = cleanText(body.area)
   const project = cleanText(body.project)
   const status = cleanText(body.status)
+  const qaStatus = cleanText(body.qaStatus)
   const priority = cleanText(body.priority)
   const assignee = cleanText(body.assignee)
 
@@ -174,13 +175,14 @@ function validateTaskInput(body, { partial = false } = {}) {
   if (reviewComment.length > 5000) errors.push('Коментар для AI має бути коротшим за 5000 символів.')
   if (area.length > 80) errors.push('Назва розділу має бути коротшою за 80 символів.')
   if (assignee.length > 80) errors.push('Ім’я виконавця має бути коротшим за 80 символів.')
+  if (qaStatus.length > 40) errors.push('QA status має бути коротшим за 40 символів.')
   if (status && !allowedStatuses.has(status)) errors.push('Невідомий статус задачі.')
   if (priority && !allowedPriorities.has(priority)) errors.push('Невідомий пріоритет задачі.')
   if (project && !allowedProjects.has(project)) errors.push('Невідомий проєкт задачі.')
 
   return {
     errors,
-    values: { title, description, siteUrl, notes, staffComments, reviewComment, area, project, status, priority, assignee },
+    values: { title, description, siteUrl, notes, staffComments, reviewComment, area, project, status, qaStatus, priority, assignee },
   }
 }
 
@@ -478,6 +480,7 @@ export async function createApp(options = {}) {
         area: values.area || 'Загальне',
         project: values.project || 'console',
         status: values.status || 'new',
+        qaStatus: values.qaStatus,
         priority: values.priority || 'medium',
         assignee: values.assignee || 'Не призначено',
       }, request.files.map(serializeAttachment))
@@ -517,7 +520,7 @@ export async function createApp(options = {}) {
       }
 
       const patch = {}
-      for (const key of ['title', 'description', 'siteUrl', 'notes', 'staffComments', 'reviewComment', 'area', 'project', 'status', 'priority', 'assignee']) {
+      for (const key of ['title', 'description', 'siteUrl', 'notes', 'staffComments', 'reviewComment', 'area', 'project', 'status', 'qaStatus', 'priority', 'assignee']) {
         if (Object.hasOwn(request.body, key)) patch[key] = values[key]
       }
       if (Object.hasOwn(patch, 'project') && !patch.project) delete patch.project

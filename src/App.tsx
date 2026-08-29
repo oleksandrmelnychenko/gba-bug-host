@@ -181,11 +181,12 @@ function isSentinelTask(task: Task) {
   return (task.notes ?? '').includes('[sentinel:')
 }
 
-const COLUMN_WIDTHS_STORAGE_KEY = 'gba-qa-desk-column-widths-v2'
+const COLUMN_WIDTHS_STORAGE_KEY = 'gba-qa-desk-column-widths-v3'
 const tableColumns: Array<{ key: string; label: string; className?: string; srOnly?: boolean }> = [
   { key: 'title', label: 'Задача' },
   { key: 'created', label: 'Створено', className: 'column-created' },
   { key: 'status', label: 'Статус' },
+  { key: 'qaStatus', label: 'QA status' },
   { key: 'area', label: 'Розділ' },
   { key: 'url', label: 'URL сторінки' },
   { key: 'notes', label: 'Нотатки' },
@@ -518,6 +519,53 @@ function AttachmentStack({
   )
 }
 
+function QaStatusInput({
+  task,
+  disabled,
+  onChange,
+}: {
+  task: Task
+  disabled: boolean
+  onChange: (task: Task, qaStatus: string) => void
+}) {
+  const [value, setValue] = useState(task.qaStatus)
+
+  useEffect(() => {
+    setValue(task.qaStatus)
+  }, [task.qaStatus])
+
+  const normalizedValue = value.trim().toLowerCase()
+  const stateClass = normalizedValue === 'done'
+    ? ' is-done'
+    : normalizedValue === 'not done' ? ' is-not-done' : ''
+
+  const commit = (nextValue: string) => {
+    const trimmedValue = nextValue.trim()
+    setValue(trimmedValue)
+    if (trimmedValue !== task.qaStatus) onChange(task, trimmedValue)
+  }
+
+  return (
+    <input
+      className={`qa-status-input${stateClass}`}
+      value={value}
+      list="qa-status-options"
+      placeholder="done / not done"
+      maxLength={40}
+      disabled={disabled}
+      autoComplete="off"
+      spellCheck={false}
+      aria-label={`QA status для ${task.id}`}
+      onChange={(event) => setValue(event.target.value)}
+      onBlur={(event) => commit(event.currentTarget.value)}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') event.currentTarget.blur()
+        if (event.key === 'Escape') setValue(task.qaStatus)
+      }}
+    />
+  )
+}
+
 function TaskTable({
   tasks,
   updatingId,
@@ -526,6 +574,7 @@ function TaskTable({
   sortDirection,
   onOpenTask,
   onStatusChange,
+  onQaStatusChange,
   onSortDirectionChange,
   onOpenAttachment,
   onEnqueue,
@@ -537,6 +586,7 @@ function TaskTable({
   sortDirection: DateSortDirection
   onOpenTask: (task: Task) => void
   onStatusChange: (task: Task, status: TaskStatus) => void
+  onQaStatusChange: (task: Task, qaStatus: string) => void
   onSortDirectionChange: (direction: DateSortDirection) => void
   onOpenAttachment: (attachment: TaskAttachment) => void
   onEnqueue: (task: Task) => void
@@ -661,6 +711,13 @@ function TaskTable({
                       onChange={(status) => onStatusChange(task, status)}
                     />
                   </td>
+                  <td onClick={(event) => event.stopPropagation()}>
+                    <QaStatusInput
+                      task={task}
+                      disabled={updatingId === task.id}
+                      onChange={onQaStatusChange}
+                    />
+                  </td>
                   <td><span className="area-label">{task.area}</span></td>
                   <td>
                     {task.siteUrl ? (
@@ -699,6 +756,11 @@ function TaskTable({
           </tbody>
         </table>
       </div>
+
+      <datalist id="qa-status-options">
+        <option value="done" />
+        <option value="not done" />
+      </datalist>
 
       <div className="task-cards">
         {tasks.map((task) => (
@@ -2847,6 +2909,24 @@ function DeskApp({ user, onLogout }: { user: AuthUser; onLogout: () => void }) {
     }
   }
 
+  const changeQaStatus = async (task: Task, qaStatus: string) => {
+    if (task.qaStatus === qaStatus) return
+    const previousQaStatus = task.qaStatus
+    setUpdatingId(task.id)
+    setTasks((current) => current.map((item) => item.id === task.id ? { ...item, qaStatus } : item))
+    try {
+      replaceTask(await updateTask(task.id, { qaStatus }))
+      setToast(`${task.id}: QA status оновлено`)
+    } catch {
+      setTasks((current) => current.map((item) => item.id === task.id
+        ? { ...item, qaStatus: previousQaStatus }
+        : item))
+      setToast('Не вдалося оновити QA status')
+    } finally {
+      setUpdatingId(null)
+    }
+  }
+
   const handleCreated = (task: Task) => {
     setTasks((current) => [task, ...current])
     setPage(1)
@@ -3003,6 +3083,7 @@ function DeskApp({ user, onLogout }: { user: AuthUser; onLogout: () => void }) {
               sortDirection={sortDirection}
               onOpenTask={(task) => setSelectedId(task.id)}
               onStatusChange={(task, status) => void changeStatus(task, status)}
+              onQaStatusChange={(task, qaStatus) => void changeQaStatus(task, qaStatus)}
               onSortDirectionChange={setSortDirection}
               onOpenAttachment={setLightboxAttachment}
               onEnqueue={(task) => void enqueueTaskRun(task)}

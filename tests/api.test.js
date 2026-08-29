@@ -213,6 +213,7 @@ test('API створює задачу зі скріншотом і оновлю�
       .field('area', 'Тестування')
       .field('priority', 'high')
       .field('status', 'new')
+      .field('qaStatus', 'not done')
       .field('assignee', 'QA')
       .attach('attachments', tinyPng, { filename: 'proof.png', contentType: 'image/png' })
       .expect(201)
@@ -223,9 +224,11 @@ test('API створює задачу зі скріншотом і оновлю�
     assert.equal(created.body.siteUrl, 'https://qa.example.com/orders/42')
     assert.equal(created.body.notes, 'POST /api/orders\nResponse: 500')
     assert.equal(created.body.staffComments, 'Олена перевірить виправлення після обіду.')
+    assert.equal(created.body.qaStatus, 'not done')
     assert.equal(created.body.agentRun.status, 'queued')
     assert.equal(created.body.agentRun.attempt, 1)
     assert.equal(Object.hasOwn(created.body.agentRun.inputSnapshot, 'staffComments'), false)
+    assert.equal(Object.hasOwn(created.body.agentRun.inputSnapshot, 'qaStatus'), false)
     const initialComments = await request(app).get(`/api/tasks/${created.body.id}/comments`).expect(200)
     assert.equal(initialComments.body.length, 1)
     assert.equal(initialComments.body[0].author, 'Команда')
@@ -238,10 +241,11 @@ test('API створює задачу зі скріншотом і оновлю�
 
     const updated = await request(app)
       .patch(`/api/tasks/${created.body.id}`)
-      .send({ status: 'ready_for_retest' })
+      .send({ status: 'ready_for_retest', qaStatus: 'done' })
       .expect(200)
 
     assert.equal(updated.body.status, 'ready_for_retest')
+    assert.equal(updated.body.qaStatus, 'done')
   })
 })
 
@@ -418,6 +422,7 @@ test('SQLite автоматично додає поля задачі та snapsh
     assert.equal(task.siteUrl, '')
     assert.equal(task.notes, '')
     assert.equal(task.staffComments, '')
+    assert.equal(task.qaStatus, '')
     assert.equal(task.reviewComment, '')
     assert.equal(task.agentRun.reviewComment, '')
     assert.equal(task.agentRun.inputSnapshot, null)
@@ -445,11 +450,13 @@ test('SQLite автоматично додає поля задачі та snapsh
       siteUrl: 'https://example.com/problem',
       notes: 'GET /api/products → 500',
       staffComments: 'Перевіряє команда підтримки.',
+      qaStatus: 'done',
       reviewComment: 'Кнопка все ще повертає 500.',
     })
     assert.equal(updated.siteUrl, 'https://example.com/problem')
     assert.equal(updated.notes, 'GET /api/products → 500')
     assert.equal(updated.staffComments, 'Перевіряє команда підтримки.')
+    assert.equal(updated.qaStatus, 'done')
     assert.equal(updated.reviewComment, 'Кнопка все ще повертає 500.')
 
     store.close()

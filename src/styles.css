@@ -957,7 +957,7 @@ main {
 
 .task-table {
   width: 100%;
-  min-width: 1380px;
+  min-width: 1500px;
   border-spacing: 0;
   border-collapse: separate;
   table-layout: fixed;
@@ -966,12 +966,13 @@ main {
 .task-table th:nth-child(1) { width: 36%; }
 .task-table th:nth-child(2) { width: 105px; }
 .task-table th:nth-child(3) { width: 175px; }
-.task-table th:nth-child(4) { width: 110px; }
-.task-table th:nth-child(5) { width: 165px; }
-.task-table th:nth-child(6) { width: 170px; }
-.task-table th:nth-child(7) { width: 112px; }
-.task-table th:nth-child(8) { width: 82px; }
-.task-table th:nth-child(9) { width: 56px; }
+.task-table th:nth-child(4) { width: 125px; }
+.task-table th:nth-child(5) { width: 110px; }
+.task-table th:nth-child(6) { width: 165px; }
+.task-table th:nth-child(7) { width: 170px; }
+.task-table th:nth-child(8) { width: 112px; }
+.task-table th:nth-child(9) { width: 82px; }
+.task-table th:nth-child(10) { width: 56px; }
 
 .task-table th {
   height: 40px;
@@ -1023,6 +1024,44 @@ main {
 
 .task-table tbody tr:last-child td {
   border-bottom: 0;
+}
+
+.qa-status-input {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  padding: 4px 8px;
+  color: var(--gray-700);
+  background: #fff;
+  border: 1px solid var(--gray-300);
+  border-radius: 6px;
+  outline: none;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.qa-status-input:focus {
+  border-color: var(--brand-500);
+  box-shadow: 0 0 0 3px rgb(239 124 32 / 12%);
+}
+
+.qa-status-input.is-done {
+  color: #067647;
+  background: #ecfdf3;
+  border-color: #abefc6;
+}
+
+.qa-status-input.is-not-done {
+  color: #b42318;
+  background: #fef3f2;
+  border-color: #fecdca;
+}
+
+.qa-status-input:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
 
 .column-created {
