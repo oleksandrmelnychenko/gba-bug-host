@@ -764,6 +764,29 @@ test('HTML live-check звіряє текст без хибного падінн
   assert.equal(result.evidence[0].passed, true)
 })
 
+test('live-check нормалізує публічний nip.io http до https без довільного redirect', async () => {
+  let requestedUrl = ''
+  const worker = new ReleaseWorker({
+    processRunner: async (command, args) => {
+      assert.equal(command, 'curl')
+      requestedUrl = args.at(-1)
+      return { code: 0, output: '<title>GBA CONSOLE</title>\n200' }
+    },
+  })
+
+  const result = await worker.verifyPostDeployChecks([{
+    label: 'legacy http handoff',
+    url: 'http://gba-console.85.17.167.167.nip.io/orders/ukraine/all',
+    expectedStatus: 200,
+    contains: '',
+  }])
+
+  assert.equal(result.ok, true)
+  assert.equal(requestedUrl, 'https://gba-console.85.17.167.167.nip.io/orders/ukraine/all')
+  assert.equal(result.evidence[0].url, 'http://gba-console.85.17.167.167.nip.io/orders/ukraine/all')
+  assert.equal(result.evidence[0].resolvedUrl, requestedUrl)
+})
+
 test('live-check розрізняє детермінований mismatch і тимчасову недоступність', () => {
   assert.equal(classifyPostDeployCheckFailure({ code: 0, status: 200 }), 'validation')
   assert.equal(classifyPostDeployCheckFailure({ code: 0, status: 404 }), 'validation')

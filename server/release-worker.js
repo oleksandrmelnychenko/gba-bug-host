@@ -1128,9 +1128,14 @@ export class ReleaseWorker {
   async verifyPostDeployChecks(checks) {
     const evidence = []
     for (const check of checks) {
+      const requestUrl = new URL(check.url)
+      if (requestUrl.protocol === 'http:' && requestUrl.hostname.endsWith('.85.17.167.167.nip.io')) {
+        requestUrl.protocol = 'https:'
+      }
+      const resolvedUrl = requestUrl.toString()
       const result = await this.runProcess(
         'curl',
-        ['-sS', '--max-time', '20', '--retry', '2', '--retry-delay', '2', '-w', '\n%{http_code}', check.url],
+        ['-sS', '--max-time', '20', '--retry', '2', '--retry-delay', '2', '-w', '\n%{http_code}', resolvedUrl],
         { timeoutMs: 60_000 },
       )
       const split = result.output.lastIndexOf('\n')
@@ -1143,6 +1148,7 @@ export class ReleaseWorker {
       evidence.push({
         label: check.label,
         url: check.url,
+        resolvedUrl,
         expectedStatus: check.expectedStatus,
         actualStatus: Number.isInteger(status) ? status : null,
         contains: check.contains,
