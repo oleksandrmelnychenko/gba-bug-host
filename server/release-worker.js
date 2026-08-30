@@ -648,7 +648,10 @@ export class ReleaseWorker {
       for (const task of candidates) {
         if (!this.firstSeenAt.has(task.id)) this.firstSeenAt.set(task.id, now)
       }
-      const ready = candidates.filter((task) => now - this.firstSeenAt.get(task.id) >= this.settleMs)
+      const ready = candidates.filter((task) => {
+        const requiredSettleMs = isVerifiedAudit(task) ? 0 : this.settleMs
+        return now - this.firstSeenAt.get(task.id) >= requiredSettleMs
+      })
       if (ready.length === 0) return
 
       // Release queue is deliberately single-task. A multi-repository task may

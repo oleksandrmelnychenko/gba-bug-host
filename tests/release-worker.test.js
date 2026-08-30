@@ -237,6 +237,31 @@ test('settle одного нового кандидата не блокує вж
   }
 })
 
+test('verified audit не чекає deploy settle, бо не змінює код або контейнери', async () => {
+  const originalFetch = global.fetch
+  const task = {
+    id: 'verified-audit',
+    status: 'in_progress',
+    notes: '',
+    agentRun: {
+      status: 'completed',
+      releaseStatus: 'pending',
+      details: JSON.stringify({ outcome: 'verified' }),
+    },
+  }
+  const released = []
+  const worker = new ReleaseWorker({ settleMs: 60_000 })
+  worker.releaseBatch = async (batch) => released.push(...batch.map((item) => item.id))
+  global.fetch = async () => ({ ok: true, json: async () => [task] })
+
+  try {
+    await worker.tick()
+    assert.deepEqual(released, ['verified-audit'])
+  } finally {
+    global.fetch = originalFetch
+  }
+})
+
 test('детермінована release-помилка блокує pipeline, але не змінює людський статус задачі', async () => {
   const task = {
     id: 'BUG-2001',
