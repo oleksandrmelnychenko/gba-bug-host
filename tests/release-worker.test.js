@@ -764,7 +764,7 @@ test('HTML live-check звіряє текст без хибного падінн
   assert.equal(result.evidence[0].passed, true)
 })
 
-test('live-check нормалізує публічний nip.io http до https без довільного redirect', async () => {
+test('live-check нормалізує старий публічний nip.io vhost до актуального DEV https без довільного redirect', async () => {
   let requestedUrl = ''
   const worker = new ReleaseWorker({
     processRunner: async (command, args) => {
@@ -782,7 +782,7 @@ test('live-check нормалізує публічний nip.io http до https 
   }])
 
   assert.equal(result.ok, true)
-  assert.equal(requestedUrl, 'https://gba-console.85.17.167.167.nip.io/orders/ukraine/all')
+  assert.equal(requestedUrl, 'https://gba-console-dev.85.17.167.167.nip.io/orders/ukraine/all')
   assert.equal(result.evidence[0].url, 'http://gba-console.85.17.167.167.nip.io/orders/ukraine/all')
   assert.equal(result.evidence[0].resolvedUrl, requestedUrl)
 })

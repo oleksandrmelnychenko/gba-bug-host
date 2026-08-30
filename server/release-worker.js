@@ -17,6 +17,13 @@ const REPOSITORY_SHA_ENV = {
   gba_ecommerce: 'GBA_ECOMMERCE_GIT_SHA',
   'gba-ecommerce-api': 'GBA_ECOMMERCE_API_GIT_SHA',
 }
+const DEV_PUBLIC_HOST_ALIASES = new Map([
+  ['gba-console.85.17.167.167.nip.io', 'gba-console-dev.85.17.167.167.nip.io'],
+  ['shop.85.17.167.167.nip.io', 'shop-dev.85.17.167.167.nip.io'],
+  ['gba-api.85.17.167.167.nip.io', 'gba-api-dev.85.17.167.167.nip.io'],
+  ['gba-analytics.85.17.167.167.nip.io', 'gba-analytics-dev.85.17.167.167.nip.io'],
+  ['ecom-api.85.17.167.167.nip.io', 'ecom-api-dev.85.17.167.167.nip.io'],
+])
 
 export function classifyGitPushFailure(output) {
   return /(?:non-fast-forward|\[rejected\].*(?:fetch first|non-fast-forward)|tip of your current branch is behind)/is.test(output ?? '')
@@ -1129,6 +1136,7 @@ export class ReleaseWorker {
     const evidence = []
     for (const check of checks) {
       const requestUrl = new URL(check.url)
+      requestUrl.hostname = DEV_PUBLIC_HOST_ALIASES.get(requestUrl.hostname) ?? requestUrl.hostname
       if (requestUrl.protocol === 'http:' && requestUrl.hostname.endsWith('.85.17.167.167.nip.io')) {
         requestUrl.protocol = 'https:'
       }
