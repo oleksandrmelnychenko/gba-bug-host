@@ -181,9 +181,8 @@ function isSentinelTask(task: Task) {
   return (task.notes ?? '').includes('[sentinel:')
 }
 
-const COLUMN_WIDTHS_STORAGE_KEY = 'gba-qa-desk-column-widths-v4'
+const COLUMN_WIDTHS_STORAGE_KEY = 'gba-qa-desk-column-widths-v5'
 const tableColumns: Array<{ key: string; label: string; className?: string; srOnly?: boolean }> = [
-  { key: 'creator', label: 'Хто створив', className: 'column-creator' },
   { key: 'title', label: 'Задача' },
   { key: 'created', label: 'Створено', className: 'column-created' },
   { key: 'status', label: 'Статус' },
@@ -566,17 +565,37 @@ function QaStatusInput({
   )
 }
 
-function TaskCreator({ name }: { name: string }) {
-  const creatorName = name.trim()
-  if (!creatorName) return <span className="empty-cell">—</span>
+function AgentRunChip({ task }: { task: Task }) {
+  const run = task.agentRun
+  if (!run) return null
+
+  if (run.status === 'queued' || run.status === 'running') {
+    return (
+      <span className={`codex-progress codex-progress-${run.status}`} title={agentRunMeta[run.status].label}>
+        <LoaderCircle className="spin" size={10} />
+        {run.status === 'running' ? 'Codex' : 'Черга'}
+      </span>
+    )
+  }
 
   return (
-    <div className="task-creator" title={`Створив: ${creatorName}`}>
+    <span className={`agent-table-state agent-run-${run.status}`} title={agentRunMeta[run.status].label}>
+      <Bot size={10} /> {agentRunMeta[run.status].shortLabel}
+    </span>
+  )
+}
+
+function TaskCreatorChip({ name }: { name: string }) {
+  const creatorName = name.trim()
+  if (!creatorName) return null
+
+  return (
+    <span className="task-creator-chip" title={`Хто створив: ${creatorName}`}>
       <span className="task-creator-avatar" aria-hidden="true">
         {commentInitials(creatorName)}
       </span>
       <span className="task-creator-name">{creatorName}</span>
-    </div>
+    </span>
   )
 }
 
@@ -695,25 +714,13 @@ function TaskTable({
                   onClick={() => onOpenTask(task)}
                   style={{ '--row-delay': `${Math.min(index, 7) * 35}ms` } as React.CSSProperties}
                 >
-                  <td>
-                    <TaskCreator name={task.createdByName} />
-                  </td>
                   <td className="task-main-column">
                     <div className="task-title-cell">
                       <strong>{task.title}</strong>
                       <div className="task-title-meta">
                         <span className="task-id">{task.id}</span>
-                        {task.agentRun && (task.agentRun.status === 'queued' || task.agentRun.status === 'running') ? (
-                          <span className={`codex-progress codex-progress-${task.agentRun.status}`} title={agentRunMeta[task.agentRun.status].label}>
-                            <LoaderCircle className="spin" size={10} />
-                            {task.agentRun.status === 'running' ? 'Codex' : 'Черга'}
-                          </span>
-                        ) : task.agentRun ? (
-                          <span className={`agent-table-state agent-run-${task.agentRun.status}`} title={agentRunMeta[task.agentRun.status].label}>
-                            <Bot size={10} /> {agentRunMeta[task.agentRun.status].shortLabel}
-                          </span>
-                        ) : null}
-                        <span className="task-description">{task.description || 'Без додаткового опису'}</span>
+                        <AgentRunChip task={task} />
+                        <TaskCreatorChip name={task.createdByName} />
                       </div>
                     </div>
                   </td>
@@ -772,7 +779,12 @@ function TaskTable({
               <PriorityBadge priority={task.priority} />
             </div>
             <h3>{task.title}</h3>
-            <p>{task.description || 'Без додаткового опису'}</p>
+            {(task.agentRun || task.createdByName.trim()) && (
+              <div className="task-card-state-line">
+                <AgentRunChip task={task} />
+                <TaskCreatorChip name={task.createdByName} />
+              </div>
+            )}
             <div className="task-card-meta">
               <span><Layers3 size={14} /> {task.area}</span>
               <time dateTime={task.createdAt}><CalendarDays size={14} /> {formatDateTime(task.createdAt)}</time>
