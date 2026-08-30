@@ -1035,6 +1035,29 @@ export class TaskStore {
 
   claimNextAgentRun(workerId = '') {
     return this.transaction(() => {
+      // Coding і release використовують різні процеси, але мутують спільні
+      // mainline-репозиторії. Не відкриваємо наступний worktree, доки
+      // попередній completed-run не отримав фінальний release-state: інакше
+      // наступна гілка стартує зі старого baseline та закономірно ловить
+      // non-fast-forward/conflict під час публікації.
+      const releaseInFlight = this.database.prepare(`
+        SELECT 1
+        FROM agent_runs AS run
+        JOIN tasks AS task ON task.id = run.task_id
+        WHERE run.status = 'completed'
+          AND run.release_status IN ('pending', 'processing', 'retrying')
+          AND task.status <> 'done'
+          AND run.id = (
+            SELECT latest.id
+            FROM agent_runs AS latest
+            WHERE latest.task_id = run.task_id
+            ORDER BY latest.created_at DESC
+            LIMIT 1
+          )
+        LIMIT 1
+      `).get()
+      if (releaseInFlight) return null
+
       const row = this.database
         .prepare("SELECT * FROM agent_runs WHERE status = 'queued' ORDER BY queue_priority DESC, created_at ASC LIMIT 1")
         .get()
@@ -1090,9 +1113,11 @@ export class TaskStore {
         ORDER BY created_at DESC
         LIMIT 1
       ) AS latest
+      JOIN tasks AS task ON task.id = ?
       WHERE latest.status IN ('completed', 'needs_review')
         AND latest.release_status IN ('pending', 'processing', 'retrying')
-    `).get(taskId))
+        AND task.status <> 'done'
+    `).get(taskId, taskId))
   }
 
   heartbeatAgentRuns(workerId, runIds) {

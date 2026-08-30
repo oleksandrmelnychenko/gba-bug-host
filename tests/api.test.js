@@ -754,6 +754,43 @@ test('API піднімає задачу в черзі Codex', async () => {
   })
 })
 
+test('coding-черга чекає фінального release-state попередньої задачі', async () => {
+  await withTestApp(async ({ app, store }) => {
+    const first = await request(app).post('/api/tasks').field('title', 'Спочатку release').expect(201)
+    const second = await request(app).post('/api/tasks').field('title', 'Потім наступний аналіз').expect(201)
+    const claimed = store.claimNextAgentRun('worker-serial')
+    assert.equal(claimed.taskId, first.body.id)
+
+    store.patch(first.body.id, { status: 'in_progress' })
+    store.updateAgentRun(claimed.id, {
+      status: 'completed',
+      finishedAt: new Date().toISOString(),
+    })
+    assert.equal(store.claimNextAgentRun('worker-serial'), null)
+
+    store.updateAgentRunRelease(claimed.id, { status: 'released' }, 'ready_for_retest')
+    assert.equal(store.claimNextAgentRun('worker-serial')?.taskId, second.body.id)
+  })
+})
+
+test('ручний done завершує старий release і не блокує новий доказовий аудит', async () => {
+  await withTestApp(async ({ app, store }) => {
+    const created = await request(app).post('/api/tasks').field('title', 'Повторний аудит done').expect(201)
+    const first = store.claimNextAgentRun('worker-old-release')
+    store.updateAgentRun(first.id, {
+      status: 'completed',
+      finishedAt: new Date().toISOString(),
+    })
+    store.patch(created.body.id, { status: 'done' })
+
+    const response = await request(app)
+      .post(`/api/tasks/${created.body.id}/agent-runs`)
+      .expect(202)
+    assert.equal(response.body.agentRun.status, 'queued')
+    assert.equal(response.body.agentRun.attempt, 2)
+  })
+})
+
 test('API зупиняє чергову задачу і повертає її назад', async () => {
   await withTestApp(async ({ app, store }) => {
     const created = await request(app).post('/api/tasks').field('title', 'Задача для зупинки').expect(201)
