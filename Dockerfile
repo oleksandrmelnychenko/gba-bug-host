@@ -26,7 +26,7 @@ ENV DOTNET_CLI_TELEMETRY_OPTOUT=1 \
     DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        git ca-certificates curl libicu72 \
+        git ca-certificates curl libicu72 ripgrep \
         file unzip ffmpeg poppler-utils \
         python3 python3-openpyxl python3-xlrd \
     && rm -rf /var/lib/apt/lists/* \

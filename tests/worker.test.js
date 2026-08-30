@@ -35,9 +35,9 @@ test('Codex worker примусово нормалізує будь-яку ко�
   assert.equal(normalizeWorkerConcurrency('invalid'), 1)
 })
 
-test('worker image має локальні декодери для всіх дозволених форматів доказів', async () => {
+test('worker image має локальні інструменти для коду й усіх дозволених форматів доказів', async () => {
   const dockerfile = await readFile(new URL('../Dockerfile', import.meta.url), 'utf8')
-  for (const tool of ['ffmpeg', 'poppler-utils', 'python3-openpyxl', 'python3-xlrd']) {
+  for (const tool of ['ripgrep', 'ffmpeg', 'poppler-utils', 'python3-openpyxl', 'python3-xlrd']) {
     assert.match(dockerfile, new RegExp(`\\b${tool}\\b`))
   }
 })
