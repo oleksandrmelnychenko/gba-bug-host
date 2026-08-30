@@ -495,7 +495,7 @@ Acceptance contract — виконай ДО першої зміни:
 3. Перевір current contract у фронтенді й бекенді. Для відновлення старої поведінки, фінансів, логістики, клієнтів або оплат обов’язково звір read-only legacy/stable джерело та git history; не копіюй legacy-баги механічно.
 4. До коду зафіксуй точну root cause. Якщо її не доведено, не вгадуй реалізацію — поверни needs_review.
 5. Якщо current main уже повністю задовольняє всі критерії й це доведено тестами/current contract, не створюй штучний diff: поверни outcome=verified, порожні changedFiles/repositories/migrationFiles/services і конкретні postDeployChecks. Outcome=verified заборонений, якщо хоча б один критерій не доведено.
-6. Worktree може містити коміти або WIP попередньої спроби. Для кожного репозиторію візьми Authoritative baseline зі списку стека, переглянь git log <baseline>..HEAD і повний git diff <baseline> --. Саме сукупний diff від baseline, включно зі старими task-комітами, є змінами цієї задачі; звичайний git diff без baseline їх не показує.
+6. Worktree може містити коміти або WIP попередньої спроби. Для кожного репозиторію візьми Authoritative baseline зі списку стека, переглянь git log <baseline>..HEAD і повний git diff <baseline> --. Саме сукупний diff від baseline, включно зі старими task-комітами, є змінами цієї задачі; звичайний git diff без baseline їх не показує. Якщо baselineState містить \`preserved read-only at refs/gba-qa/preserved/...\`, стара task-реалізація конфліктувала з новішим main: обов’язково переглянь log/diff цього ref як довідковий доказ, але змінюй лише current task-гілку від authoritative baseline й перенось тільки те, чого справді бракує acceptance-критеріям.
 
 Обов’язкова перевірка вхідних даних перед змінами:
 1. Прочитай усі поля баг-репорту й усі внутрішні коментарі нижче та врахуй їх як один сценарій відтворення.
@@ -847,7 +847,7 @@ export class CodexWorker {
         if (added.code !== 0) throw new Error(`Не вдалося створити worktree для ${repository.name}: ${added.stderr || added.stdout}`)
       }
 
-      const baseline = await this.synchronizeWorktreeBaseline(repository, worktreePath)
+      const baseline = await this.synchronizeWorktreeBaseline(repository, worktreePath, taskId)
       await materializeInstalledDependencies(repository.repositoryPath, worktreePath)
       worktrees.push({ ...repository, worktreePath, ...baseline })
     }
@@ -855,7 +855,7 @@ export class CodexWorker {
     return { branch, jobDirectory, worktrees }
   }
 
-  async synchronizeWorktreeBaseline(repository, worktreePath) {
+  async synchronizeWorktreeBaseline(repository, worktreePath, taskId) {
     const authoritative = await runProcess('git', ['-C', repository.repositoryPath, 'rev-parse', 'HEAD'])
     if (authoritative.code !== 0 || !/^[0-9a-f]{40}$/i.test(authoritative.stdout.trim())) {
       throw new Error(`Не вдалося визначити authoritative HEAD для ${repository.name}`)
@@ -905,7 +905,57 @@ export class CodexWorker {
     const rebased = await runProcess('git', ['-C', worktreePath, 'rebase', baselineCommit])
     if (rebased.code !== 0) {
       await runProcess('git', ['-C', worktreePath, 'rebase', '--abort'])
-      throw new Error(`Task-коміти ${repository.name} конфліктують з authoritative HEAD; rebase скасовано без втрати даних: ${rebased.stderr || rebased.stdout}`)
+
+      // A later consolidated fix can supersede an older per-task commit while
+      // changing the same lines. Keep that commit reachable for the audit, but
+      // start the writable task branch from authoritative HEAD so the agent can
+      // compare the preserved implementation and re-apply only anything missing.
+      const taskCommit = taskHead.stdout.trim()
+      const slug = safeTaskSlug(taskId)
+      const taskBranch = `codex/qa-${slug}`
+      const preservedRef = `refs/gba-qa/preserved/${slug}/${taskCommit}`
+      const preserved = await runProcess('git', [
+        '-C', repository.repositoryPath, 'update-ref', preservedRef, taskCommit,
+      ])
+      if (preserved.code !== 0) {
+        throw new Error(
+          `Task-коміти ${repository.name} конфліктують з authoritative HEAD, а зберегти їх у окремий ref не вдалося: `
+          + `${preserved.stderr || preserved.stdout || rebased.stderr || rebased.stdout}`,
+        )
+      }
+
+      const detached = await runProcess('git', ['-C', worktreePath, 'switch', '--detach', baselineCommit])
+      if (detached.code !== 0) {
+        throw new Error(
+          `Task-коміти ${repository.name} збережено у ${preservedRef}, але не вдалося перейти на authoritative HEAD: `
+          + `${detached.stderr || detached.stdout}`,
+        )
+      }
+
+      const moved = await runProcess('git', [
+        '-C', repository.repositoryPath,
+        'update-ref', `refs/heads/${taskBranch}`, baselineCommit, taskCommit,
+      ])
+      if (moved.code !== 0) {
+        await runProcess('git', ['-C', worktreePath, 'switch', taskBranch])
+        throw new Error(
+          `Task-коміти ${repository.name} збережено у ${preservedRef}, але не вдалося оновити task-гілку: `
+          + `${moved.stderr || moved.stdout}`,
+        )
+      }
+
+      const switched = await runProcess('git', ['-C', worktreePath, 'switch', taskBranch])
+      if (switched.code !== 0) {
+        throw new Error(
+          `Task-коміти ${repository.name} збережено у ${preservedRef}, task-гілку оновлено до authoritative HEAD, `
+          + `але не вдалося підключити її у worktree: ${switched.stderr || switched.stdout}`,
+        )
+      }
+
+      return {
+        baselineCommit,
+        baselineState: `current; conflicting prior task commits preserved read-only at ${preservedRef}`,
+      }
     }
     return { baselineCommit, baselineState: 'rebased task commits' }
   }

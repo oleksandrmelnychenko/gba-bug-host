@@ -139,6 +139,60 @@ test('повторний аудит rebases і враховує вже зако�
   }
 })
 
+test('конфліктні task-коміти зберігаються у read-only ref, а аудит стартує від authoritative HEAD', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-codex-baseline-preserve-'))
+  const repository = path.join(root, 'repo')
+  const worktreesDirectory = path.join(root, 'worktrees')
+  await mkdir(repository, { recursive: true })
+  git(repository, 'init')
+  git(repository, 'config', 'user.email', 'worker-test@example.com')
+  git(repository, 'config', 'user.name', 'Worker Test')
+  await writeFile(path.join(repository, 'app.txt'), 'initial\n', 'utf8')
+  git(repository, 'add', 'app.txt')
+  git(repository, 'commit', '-m', 'Initial fixture')
+
+  const worker = new CodexWorker({
+    store: {},
+    rootDirectory: root,
+    dataDirectory: root,
+    uploadsDirectory: root,
+    targetRepository: repository,
+    worktreesDirectory,
+  })
+  const stack = [{ name: 'repo', repositoryPath: repository }]
+
+  try {
+    const first = await worker.ensureWorktrees('BUG-BASELINE-PRESERVE', stack)
+    const taskWorktree = first.worktrees[0].worktreePath
+    await writeFile(path.join(taskWorktree, 'app.txt'), 'older task implementation\n', 'utf8')
+    git(taskWorktree, 'add', 'app.txt')
+    git(taskWorktree, 'commit', '-m', 'Older task implementation')
+    const taskCommit = git(taskWorktree, 'rev-parse', 'HEAD')
+
+    await writeFile(path.join(repository, 'app.txt'), 'new consolidated implementation\n', 'utf8')
+    git(repository, 'add', 'app.txt')
+    git(repository, 'commit', '-m', 'Consolidated authoritative fix')
+    const currentMain = git(repository, 'rev-parse', 'HEAD')
+
+    const second = await worker.ensureWorktrees('BUG-BASELINE-PRESERVE', stack)
+    const preservedRef = `refs/gba-qa/preserved/bug-baseline-preserve/${taskCommit}`
+
+    assert.equal(git(taskWorktree, 'rev-parse', 'HEAD'), currentMain)
+    assert.equal(git(taskWorktree, 'branch', '--show-current'), 'codex/qa-bug-baseline-preserve')
+    assert.equal(second.worktrees[0].baselineCommit, currentMain)
+    assert.equal(
+      second.worktrees[0].baselineState,
+      `current; conflicting prior task commits preserved read-only at ${preservedRef}`,
+    )
+    assert.equal(git(repository, 'rev-parse', preservedRef), taskCommit)
+    assert.equal(git(repository, 'show', `${preservedRef}:app.txt`), 'older task implementation')
+    assert.equal(await readFile(path.join(taskWorktree, 'app.txt'), 'utf8'), 'new consolidated implementation\n')
+    assert.deepEqual(await collectWorktreeChanges(second.worktrees), { files: [], repositories: [] })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('baseline sync не затирає конфліктний незакомічений WIP', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'gba-codex-baseline-wip-'))
   const repository = path.join(root, 'repo')
