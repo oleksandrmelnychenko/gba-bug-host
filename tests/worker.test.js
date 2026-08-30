@@ -34,6 +34,13 @@ test('Codex worker примусово нормалізує будь-яку ко�
   assert.equal(normalizeWorkerConcurrency('invalid'), 1)
 })
 
+test('worker image має локальні декодери для всіх дозволених форматів доказів', async () => {
+  const dockerfile = await readFile(new URL('../Dockerfile', import.meta.url), 'utf8')
+  for (const tool of ['ffmpeg', 'poppler-utils', 'python3-openpyxl', 'python3-xlrd']) {
+    assert.match(dockerfile, new RegExp(`\\b${tool}\\b`))
+  }
+})
+
 test('Codex worker підключає legacy references окремо від writable stack', () => {
   const previous = process.env.CODEX_REFERENCE_REPOS_CONSOLE
   process.env.CODEX_REFERENCE_REPOS_CONSOLE = '/tmp/gba_client'
@@ -449,6 +456,10 @@ writeFileSync(outputPath, JSON.stringify({
     assert.match(prompt, /walkthrough\.mp4.*video\/mp4/)
     assert.match(prompt, /missing\.mov.*ФАЙЛ НЕДОСТУПНИЙ/)
     assert.match(prompt, /Відкрий кожне доступне вкладення/)
+    assert.match(prompt, /pdftotext -layout/)
+    assert.match(prompt, /XLS читай.*xlrd/)
+    assert.match(prompt, /XLSX.*openpyxl/)
+    assert.match(prompt, /ffprobe.*ffmpeg/)
     assert.match(prompt, /Acceptance contract/)
     assert.match(prompt, /Схожий чи сусідній екран не вважається виправленням/)
     assert.match(prompt, /переглянь повний git diff/)

@@ -25,7 +25,10 @@ ENV DOTNET_CLI_TELEMETRY_OPTOUT=1 \
     DOTNET_NOLOGO=1 \
     DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates curl libicu72 \
+    && apt-get install -y --no-install-recommends \
+        git ca-certificates curl libicu72 \
+        file unzip ffmpeg poppler-utils \
+        python3 python3-openpyxl python3-xlrd \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
     && bash /tmp/dotnet-install.sh --channel "${DOTNET_CHANNEL}" --install-dir "${DOTNET_ROOT}" \
