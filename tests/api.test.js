@@ -889,8 +889,14 @@ test('осиротілі running-рани повертаються в чергу
 
     const requeued = store.requeueOrphanedRuns()
     assert.deepEqual(requeued, [created.body.id])
-    assert.equal(store.findAgentRun(claimed.id).status, 'queued')
-    assert.equal(store.claimNextAgentRun()?.taskId, created.body.id)
+    const interrupted = store.findAgentRun(claimed.id)
+    assert.equal(interrupted.status, 'queued')
+    assert.match(interrupted.error, /рестартом воркера/)
+
+    const reclaimed = store.claimNextAgentRun()
+    assert.equal(reclaimed.taskId, created.body.id)
+    assert.equal(reclaimed.error, '')
+    assert.equal(reclaimed.finishedAt, null)
   })
 })
 

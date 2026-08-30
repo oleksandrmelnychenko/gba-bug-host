@@ -1087,7 +1087,12 @@ export class TaskStore {
 
       const now = new Date().toISOString()
       const result = this.database
-        .prepare("UPDATE agent_runs SET status = 'running', worker_id = ?, heartbeat_at = ?, started_at = ?, updated_at = ? WHERE id = ? AND status = 'queued'")
+        .prepare(`
+          UPDATE agent_runs
+          SET status = 'running', worker_id = ?, heartbeat_at = ?, started_at = ?,
+              finished_at = NULL, error = '', updated_at = ?
+          WHERE id = ? AND status = 'queued'
+        `)
         .run(workerId, now, now, now, row.id)
       return result.changes === 1 ? this.findAgentRun(row.id) : null
     })
