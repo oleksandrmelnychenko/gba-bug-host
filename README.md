@@ -65,6 +65,7 @@ OPENAI_API_KEY=your_api_key
 VOICE_TRANSCRIBE_MODEL=base
 CODEX_TARGET_REPO_HOST_PATH=/srv/gba-console
 CODEX_WORKTREES_HOST_PATH=/srv/gba-worktrees
+RTK_HOST_PATH=/absolute/path/to/rtk
 CODEX_NETWORK_ACCESS=false
 CODEX_JOB_TIMEOUT_MS=2700000
 # coding queue is deliberately singleton (one active Codex task)
@@ -118,6 +119,8 @@ Docker image для `web` містить `faster-whisper` і multilingual-мод
 Codex-черга навмисно виконує рівно одну coding-задачу за раз. Окремі git worktree-и зберігають ізоляцію й історію повторних спроб, але наступна задача не конкурує з поточною за CPU/RAM або test runner. `CODEX_CONCURRENCY` примусово нормалізується до `1`, навіть якщо старе середовище ще передає більше значення. Наступний coding-job не стартує, доки попередній `completed`-run не завершив release як `released` або `blocked`: це не дозволяє release-worker пересунути mainline під уже відкритим наступним worktree.
 
 `CODEX_REFERENCE_REPOS_CONSOLE` і `CODEX_REFERENCE_REPOS_ECOMMERCE` задають необов’язкові read-only legacy/stable репозиторії. Вони доступні лише як джерело бізнес-контракту: worker не створює там worktree, не змінює їх і не включає в release. У локальному override legacy `gba_client` монтується з Docker-прапорцем `:ro`.
+
+`RTK_HOST_PATH` має вказувати на абсолютний шлях до host-бінарника `rtk`. Compose монтує його у `/usr/local/bin/rtk` з прапорцем `:ro`; без змінної worker не стартує. Це забезпечує виконання локальної `AGENTS.md`-вимоги для кожної shell-команди й не дозволяє контейнеру підмінити proxy.
 
 Перед `completed` worker тепер застосовує fail-closed quality gate: Codex має зіставити кожен acceptance-критерій із доказом, пояснити root cause і current/legacy/API контракт, зафіксувати конкретні спостереження з усіх вкладень та підтвердити перегляд повного diff. Host окремо звіряє declared files/repositories з фактичним Git, а стороння зміна глобального build/test-конфіга переводить результат у `needs_review`, а не в automatic release.
 

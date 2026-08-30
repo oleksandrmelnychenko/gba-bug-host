@@ -42,6 +42,11 @@ test('worker image має локальні декодери для всіх до
   }
 })
 
+test('server worker отримує обов’язковий RTK proxy лише для читання', async () => {
+  const compose = await readFile(new URL('../docker-compose.yml', import.meta.url), 'utf8')
+  assert.match(compose, /\$\{RTK_HOST_PATH:\?Set RTK_HOST_PATH\}:\/usr\/local\/bin\/rtk:ro/)
+})
+
 test('повторний аудит fast-forward-ить чистий task-worktree до authoritative HEAD', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'gba-codex-baseline-ff-'))
   const repository = path.join(root, 'repo')

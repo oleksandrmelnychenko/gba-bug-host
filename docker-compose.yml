@@ -66,6 +66,9 @@ services:
       - qa-data:/app/data
       - qa-uploads:/app/public/uploads
       - codex-home:/app/codex-home
+      # AGENTS.md requires every worker shell command to go through RTK.
+      # Fail closed when the host tool was not configured and mount it read-only.
+      - "${RTK_HOST_PATH:?Set RTK_HOST_PATH}:/usr/local/bin/rtk:ro"
       - "${CODEX_TARGET_REPO_HOST_PATH:?Set CODEX_TARGET_REPO_HOST_PATH}:${CODEX_TARGET_REPO_HOST_PATH:?Set CODEX_TARGET_REPO_HOST_PATH}"
       - "${CODEX_SERVER_REPO_HOST_PATH:?Set CODEX_SERVER_REPO_HOST_PATH}:${CODEX_SERVER_REPO_HOST_PATH:?Set CODEX_SERVER_REPO_HOST_PATH}"
       - "${CODEX_ECOMMERCE_REPO_HOST_PATH:?Set CODEX_ECOMMERCE_REPO_HOST_PATH}:${CODEX_ECOMMERCE_REPO_HOST_PATH:?Set CODEX_ECOMMERCE_REPO_HOST_PATH}"
