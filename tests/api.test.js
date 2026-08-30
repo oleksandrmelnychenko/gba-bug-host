@@ -791,6 +791,48 @@ test('ручний done завершує старий release і не блоку
   })
 })
 
+test('новий аудит supersedes pending needs_review, але не активний release', async () => {
+  await withTestApp(async ({ app, store }) => {
+    const reviewable = await request(app).post('/api/tasks').field('title', 'Needs review без артефакту').expect(201)
+    const oldRun = store.claimNextAgentRun('worker-review')
+    store.updateAgentRun(oldRun.id, {
+      status: 'needs_review',
+      summary: 'Потрібне змістовне уточнення бізнес-правила.',
+      finishedAt: new Date().toISOString(),
+    })
+    store.patch(reviewable.body.id, { status: 'blocked' })
+    assert.equal(store.findAgentRun(oldRun.id).releaseStatus, 'pending')
+
+    const rerun = await request(app)
+      .post(`/api/tasks/${reviewable.body.id}/agent-runs`)
+      .expect(202)
+    assert.equal(rerun.body.agentRun.status, 'queued')
+    assert.equal(rerun.body.agentRun.attempt, 2)
+    assert.equal(store.findAgentRun(oldRun.id).releaseStatus, 'blocked')
+    assert.match(store.findAgentRun(oldRun.id).releaseError, /замінено/)
+    const supersedingRun = store.claimNextAgentRun('worker-review')
+    assert.equal(supersedingRun.id, rerun.body.agentRun.id)
+    store.failAgentRun(supersedingRun.id, reviewable.body.id, 'Fixture завершено.')
+    assert.equal(store.findAgentRun(supersedingRun.id).releaseStatus, 'blocked')
+
+    const activeRelease = await request(app).post('/api/tasks').field('title', 'Needs review у release').expect(201)
+    const activeRun = store.claimNextAgentRun('worker-review')
+    assert.equal(activeRun.taskId, activeRelease.body.id)
+    store.updateAgentRun(activeRun.id, {
+      status: 'needs_review',
+      summary: 'Sandbox обмежив тест, release уже стартував.',
+      finishedAt: new Date().toISOString(),
+    })
+    store.updateAgentRunRelease(activeRun.id, { status: 'processing' })
+    store.patch(activeRelease.body.id, { status: 'blocked' })
+
+    await request(app)
+      .post(`/api/tasks/${activeRelease.body.id}/agent-runs`)
+      .expect(409)
+    assert.equal(store.findAgentRun(activeRun.id).releaseStatus, 'processing')
+  })
+})
+
 test('API зупиняє чергову задачу і повертає її назад', async () => {
   await withTestApp(async ({ app, store }) => {
     const created = await request(app).post('/api/tasks').field('title', 'Задача для зупинки').expect(201)
@@ -801,6 +843,7 @@ test('API зупиняє чергову задачу і повертає її н
       .send({ revert: false })
       .expect(200)
     assert.equal(stopped.body.agentRun.status, 'blocked')
+    assert.equal(stopped.body.agentRun.releaseStatus, 'blocked')
     assert.match(stopped.body.agentRun.error, /Знято з черги/)
     assert.equal(store.claimNextAgentRun(), null)
 
@@ -833,6 +876,7 @@ test('стоп із відкатом позначає керуючу коман�
 
     const finished = store.markStopped(claimed.id, { reverted: true })
     assert.equal(finished.status, 'blocked')
+    assert.equal(finished.releaseStatus, 'blocked')
     assert.match(finished.error, /відкочено/)
   })
 })

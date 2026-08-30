@@ -905,6 +905,8 @@ writeFileSync(outputPath, JSON.stringify({
       (await stat(path.join(repository, 'node_modules', 'marker.txt'))).ino,
     )
     assert.equal(store.findAgentRun(run.id).status, 'needs_review')
+    assert.equal(store.findAgentRun(run.id).releaseStatus, 'blocked')
+    assert.match(store.findAgentRun(run.id).releaseError, /змістовного перегляду/)
     assert.match(store.findAgentRun(run.id).summary, /фактичний git diff порожній/)
 
     await rm(linkPath, { recursive: true, force: true })

@@ -941,6 +941,28 @@ export class TaskStore {
   enqueueAgentRun(id, taskId, trigger = 'manual') {
     const task = this.find(taskId)
     if (!task) return { status: 'task_not_found', run: null, created: false }
+
+    // A substantive needs_review result has no releasable artifact. A new
+    // evidence run supersedes that still-pending release marker atomically
+    // before the new queue row is inserted. processing/retrying releases are
+    // deliberately not superseded because they may already mutate DEV.
+    const supersededAt = new Date().toISOString()
+    this.database.prepare(`
+      UPDATE agent_runs
+      SET release_status = 'blocked',
+          release_error = 'Попередній needs_review замінено новим доказовим запуском.',
+          release_phase = 'failed',
+          updated_at = ?
+      WHERE id = (
+        SELECT id FROM agent_runs
+        WHERE task_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+      )
+        AND status = 'needs_review'
+        AND release_status = 'pending'
+    `).run(supersededAt, taskId)
+
     if (this.hasActiveRelease(taskId)) {
       return { status: 'release_active', run: task.agentRun, created: false }
     }
@@ -1114,8 +1136,11 @@ export class TaskStore {
         LIMIT 1
       ) AS latest
       JOIN tasks AS task ON task.id = ?
-      WHERE latest.status IN ('completed', 'needs_review')
-        AND latest.release_status IN ('pending', 'processing', 'retrying')
+      WHERE (
+          (latest.status = 'completed' AND latest.release_status IN ('pending', 'processing', 'retrying'))
+          OR
+          (latest.status = 'needs_review' AND latest.release_status IN ('processing', 'retrying'))
+        )
         AND task.status <> 'done'
     `).get(taskId, taskId))
   }
@@ -1145,9 +1170,11 @@ export class TaskStore {
     return this.transaction(() => {
       this.database.prepare(`
         UPDATE agent_runs
-        SET status = 'failed', error = ?, details = ?, finished_at = ?, updated_at = ?
+        SET status = 'failed', error = ?, details = ?,
+            release_status = 'blocked', release_error = ?, release_phase = 'failed',
+            finished_at = ?, updated_at = ?
         WHERE id = ?
-      `).run(error, details, now, now, runId)
+      `).run(error, details, error, now, now, runId)
       const active = this.database
         .prepare("SELECT 1 FROM agent_runs WHERE task_id = ? AND status IN ('queued', 'running') LIMIT 1")
         .get(taskId)
@@ -1171,9 +1198,10 @@ export class TaskStore {
 
       if (row.status === 'queued') {
         // Черговий ран ще не стартував: гасимо одразу, воркеру нічого вбивати.
+        const reason = revert ? 'Знято з черги оператором (із відкатом).' : 'Знято з черги оператором.'
         this.database
-          .prepare("UPDATE agent_runs SET status = 'blocked', control = ?, error = ?, finished_at = ?, updated_at = ? WHERE id = ?")
-          .run(control, revert ? 'Знято з черги оператором (із відкатом).' : 'Знято з черги оператором.', now, now, row.id)
+          .prepare("UPDATE agent_runs SET status = 'blocked', control = ?, error = ?, release_status = 'blocked', release_error = ?, release_phase = 'failed', finished_at = ?, updated_at = ? WHERE id = ?")
+          .run(control, reason, reason, now, now, row.id)
         return { run: this.findAgentRun(row.id), stoppedImmediately: true }
       }
 
@@ -1191,9 +1219,10 @@ export class TaskStore {
 
   markStopped(runId, { reverted = false } = {}) {
     const now = new Date().toISOString()
+    const reason = reverted ? 'Зупинено оператором, зміни відкочено.' : 'Зупинено оператором.'
     this.database
-      .prepare("UPDATE agent_runs SET status = 'blocked', control = '', error = ?, finished_at = ?, updated_at = ? WHERE id = ?")
-      .run(reverted ? 'Зупинено оператором, зміни відкочено.' : 'Зупинено оператором.', now, now, runId)
+      .prepare("UPDATE agent_runs SET status = 'blocked', control = '', error = ?, release_status = 'blocked', release_error = ?, release_phase = 'failed', finished_at = ?, updated_at = ? WHERE id = ?")
+      .run(reason, reason, now, now, runId)
     return this.findAgentRun(runId)
   }
 
@@ -1352,7 +1381,9 @@ export class TaskStore {
     const now = new Date().toISOString()
     this.database.prepare(`
       UPDATE agent_runs
-      SET status = 'failed', error = 'Worker було перезапущено під час виконання.', finished_at = ?, updated_at = ?
+      SET status = 'failed', error = 'Worker було перезапущено під час виконання.',
+          release_status = 'blocked', release_error = 'Worker було перезапущено під час виконання.',
+          release_phase = 'failed', finished_at = ?, updated_at = ?
       WHERE status = 'running' AND updated_at < ?
     `).run(now, now, olderThan)
   }

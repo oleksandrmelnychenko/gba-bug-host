@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { composePersistentContext, createCodexSessionTracker } from './codex-context.js'
-import { checkCommand, defaultRepoPlan } from './release-worker.js'
+import { checkCommand, defaultRepoPlan, isSandboxLimitedReview } from './release-worker.js'
 import { materializeInstalledDependencies } from './worktree-dependencies.js'
 
 const outputSchema = {
@@ -1150,7 +1150,7 @@ export class CodexWorker {
     const summary = qualityFailures.length > 0
       ? `${result.summary}\nQuality gate не дозволив automatic release:\n- ${qualityFailures.join('\n- ')}`
       : result.summary
-    this.store.updateAgentRun(run.id, {
+    const storedRun = this.store.updateAgentRun(run.id, {
       status: runStatus,
       summary: tail(summary, 10_000),
       details: JSON.stringify({
@@ -1175,6 +1175,19 @@ export class CodexWorker {
       }),
       finishedAt: new Date().toISOString(),
     })
+
+    const sandboxLimitedReview = runStatus === 'needs_review'
+      && result.outcome === 'needs_review'
+      && isSandboxLimitedReview({ agentRun: storedRun })
+    if (runStatus !== 'completed' && !sandboxLimitedReview) {
+      this.store.updateAgentRunRelease(run.id, {
+        status: 'blocked',
+        error: runStatus === 'needs_review'
+          ? 'AI-результат потребує змістовного перегляду до release.'
+          : 'AI-результат не містить готового до release виправлення.',
+        phase: 'failed',
+      })
+    }
 
     if (runStatus === 'completed') {
       // У бакет білда задача потрапляє НЕ тут: вердикт Codex ще не означає, що
