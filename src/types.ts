@@ -112,6 +112,8 @@ export interface Task {
   status: TaskStatus
   qaStatus: string
   priority: TaskPriority
+  createdByUserId: string | null
+  createdByName: string
   createdAt: string
   updatedAt: string
   attachments: TaskAttachment[]

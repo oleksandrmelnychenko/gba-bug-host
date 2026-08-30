@@ -187,6 +187,8 @@ function taskFromRow(row, attachments = [], agentRun = null) {
     qaStatus: row.qa_status ?? '',
     priority: row.priority,
     assignee: row.assignee,
+    createdByUserId: row.created_by_user_id ?? null,
+    createdByName: row.created_by_name ?? 'Імпорт',
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     attachments,
@@ -248,6 +250,8 @@ export class TaskStore {
         qa_status TEXT NOT NULL DEFAULT '',
         priority TEXT NOT NULL,
         assignee TEXT NOT NULL,
+        created_by_user_id TEXT,
+        created_by_name TEXT NOT NULL DEFAULT 'Імпорт',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -403,6 +407,12 @@ export class TaskStore {
       if (!taskColumns.has('qa_status')) {
         this.database.exec("ALTER TABLE tasks ADD COLUMN qa_status TEXT NOT NULL DEFAULT ''")
       }
+      if (!taskColumns.has('created_by_user_id')) {
+        this.database.exec('ALTER TABLE tasks ADD COLUMN created_by_user_id TEXT')
+      }
+      if (!taskColumns.has('created_by_name')) {
+        this.database.exec("ALTER TABLE tasks ADD COLUMN created_by_name TEXT NOT NULL DEFAULT 'Імпорт'")
+      }
 
       const commentColumns = new Set(
         this.database.prepare('PRAGMA table_info(task_comments)').all().map((column) => column.name),
@@ -518,8 +528,11 @@ export class TaskStore {
 
   insertTask(task) {
     this.database.prepare(`
-      INSERT INTO tasks (id, title, description, site_url, notes, staff_comments, review_comment, area, project, status, qa_status, priority, assignee, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO tasks (
+        id, title, description, site_url, notes, staff_comments, review_comment, area, project,
+        status, qa_status, priority, assignee, created_by_user_id, created_by_name, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       task.id,
       task.title,
@@ -534,6 +547,8 @@ export class TaskStore {
       task.qaStatus ?? '',
       task.priority,
       task.assignee,
+      task.createdByUserId ?? null,
+      task.createdByName ?? 'Імпорт',
       task.createdAt,
       task.updatedAt,
     )

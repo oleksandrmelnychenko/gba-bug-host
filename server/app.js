@@ -483,6 +483,8 @@ export async function createApp(options = {}) {
         qaStatus: values.qaStatus,
         priority: values.priority || 'medium',
         assignee: values.assignee || 'Не призначено',
+        createdByUserId: request.user?.internal ? null : request.user?.id ?? null,
+        createdByName: request.user?.displayName ?? 'Команда',
       }, request.files.map(serializeAttachment))
 
       if (['ready_for_retest', 'done'].includes(task.status)) {

@@ -181,14 +181,14 @@ function isSentinelTask(task: Task) {
   return (task.notes ?? '').includes('[sentinel:')
 }
 
-const COLUMN_WIDTHS_STORAGE_KEY = 'gba-qa-desk-column-widths-v3'
+const COLUMN_WIDTHS_STORAGE_KEY = 'gba-qa-desk-column-widths-v4'
 const tableColumns: Array<{ key: string; label: string; className?: string; srOnly?: boolean }> = [
+  { key: 'creator', label: 'Хто створив', className: 'column-creator' },
   { key: 'title', label: 'Задача' },
   { key: 'created', label: 'Створено', className: 'column-created' },
   { key: 'status', label: 'Статус' },
   { key: 'qaStatus', label: 'QA status' },
   { key: 'area', label: 'Розділ' },
-  { key: 'url', label: 'URL сторінки' },
   { key: 'notes', label: 'Нотатки' },
   { key: 'priority', label: 'Пріоритет' },
   { key: 'evidence', label: 'Докази' },
@@ -681,6 +681,14 @@ function TaskTable({
                   onClick={() => onOpenTask(task)}
                   style={{ '--row-delay': `${Math.min(index, 7) * 35}ms` } as React.CSSProperties}
                 >
+                  <td>
+                    <div className="task-creator" title={`Створив: ${task.createdByName}`}>
+                      <span className="task-creator-avatar" aria-hidden="true">
+                        {commentInitials(task.createdByName)}
+                      </span>
+                      <span className="task-creator-name">{task.createdByName}</span>
+                    </div>
+                  </td>
                   <td className="task-main-column">
                     <div className="task-title-cell">
                       <strong>{task.title}</strong>
@@ -719,21 +727,6 @@ function TaskTable({
                     />
                   </td>
                   <td><span className="area-label">{task.area}</span></td>
-                  <td>
-                    {task.siteUrl ? (
-                      <a
-                        className="task-url"
-                        href={task.siteUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        onClick={(event) => event.stopPropagation()}
-                        title={task.siteUrl}
-                      >
-                        <Link2 size={13} />
-                        <span>{new URL(task.siteUrl).hostname}</span>
-                      </a>
-                    ) : <span className="empty-cell">—</span>}
-                  </td>
                   <td><span className="notes-cell" title={task.notes}>{task.notes || '—'}</span></td>
                   <td><PriorityBadge priority={task.priority} /></td>
                   <td><AttachmentStack task={task} onOpen={onOpenAttachment} /></td>

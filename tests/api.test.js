@@ -99,6 +99,13 @@ test('персональний логін захищає Desk і визнача�
       assert.equal(body.email, user.email)
       assert.equal(body.displayName, 'Олександр')
     })
+    const createdTask = await agent
+      .post('/api/tasks')
+      .field('title', 'Задача авторизованого користувача')
+      .expect(201)
+    assert.equal(createdTask.body.createdByUserId, user.id)
+    assert.equal(createdTask.body.createdByName, user.displayName)
+
     const comment = await agent
       .post('/api/tasks/BUG-1051/comments')
       .send({ author: 'Підмінений автор', body: 'Коментар від залогіненого користувача.', parentId: null })
@@ -225,6 +232,8 @@ test('API створює задачу зі скріншотом і оновлю�
     assert.equal(created.body.notes, 'POST /api/orders\nResponse: 500')
     assert.equal(created.body.staffComments, 'Олена перевірить виправлення після обіду.')
     assert.equal(created.body.qaStatus, 'not done')
+    assert.equal(created.body.createdByUserId, null)
+    assert.equal(created.body.createdByName, 'Команда')
     assert.equal(created.body.agentRun.status, 'queued')
     assert.equal(created.body.agentRun.attempt, 1)
     assert.equal(Object.hasOwn(created.body.agentRun.inputSnapshot, 'staffComments'), false)
@@ -423,6 +432,8 @@ test('SQLite автоматично додає поля задачі та snapsh
     assert.equal(task.notes, '')
     assert.equal(task.staffComments, '')
     assert.equal(task.qaStatus, '')
+    assert.equal(task.createdByUserId, null)
+    assert.equal(task.createdByName, 'Імпорт')
     assert.equal(task.reviewComment, '')
     assert.equal(task.agentRun.reviewComment, '')
     assert.equal(task.agentRun.inputSnapshot, null)
