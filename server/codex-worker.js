@@ -202,14 +202,14 @@ function runProcess(command, args, {
   })
 }
 
-async function collectWorktreeChanges(worktrees) {
+export async function collectWorktreeChanges(worktrees) {
   const files = []
   const repositories = []
 
   for (const worktree of worktrees) {
     const tracked = await runProcess('git', [
       '-C', worktree.worktreePath,
-      'diff', '--name-only', '--diff-filter=ACDMRTUXB', 'HEAD', '--',
+      'diff', '--name-only', '--diff-filter=ACDMRTUXB', worktree.baselineCommit ?? 'HEAD', '--',
     ])
     if (tracked.code !== 0) {
       throw new Error(`Не вдалося прочитати git diff ${worktree.name}: ${tracked.stderr || tracked.stdout}`)
@@ -465,7 +465,7 @@ function buildPrompt(task, run, mediaPaths, worktrees, referenceRepositories, pe
         .map((check) => `    ${check.join(' ')}`)
         .join('\n')
       const services = defaultRepoPlan[worktree.name]?.services ?? []
-      return `- ${worktree.name}: ./${worktree.name} (worktree репозиторію ${worktree.repositoryPath})${services.length ? `\n  DEV-сервіси: ${services.join(', ')}` : ''}${checks ? `\n  Перевірки:\n${checks}` : ''}`
+      return `- ${worktree.name}: ./${worktree.name} (worktree репозиторію ${worktree.repositoryPath})\n  Authoritative baseline: ${worktree.baselineCommit} (${worktree.baselineState})${services.length ? `\n  DEV-сервіси: ${services.join(', ')}` : ''}${checks ? `\n  Перевірки:\n${checks}` : ''}`
     })
     .join('\n')
   const references = referenceRepositories.length > 0
@@ -495,6 +495,7 @@ Acceptance contract — виконай ДО першої зміни:
 3. Перевір current contract у фронтенді й бекенді. Для відновлення старої поведінки, фінансів, логістики, клієнтів або оплат обов’язково звір read-only legacy/stable джерело та git history; не копіюй legacy-баги механічно.
 4. До коду зафіксуй точну root cause. Якщо її не доведено, не вгадуй реалізацію — поверни needs_review.
 5. Якщо current main уже повністю задовольняє всі критерії й це доведено тестами/current contract, не створюй штучний diff: поверни outcome=verified, порожні changedFiles/repositories/migrationFiles/services і конкретні postDeployChecks. Outcome=verified заборонений, якщо хоча б один критерій не доведено.
+6. Worktree може містити коміти або WIP попередньої спроби. Для кожного репозиторію візьми Authoritative baseline зі списку стека, переглянь git log <baseline>..HEAD і повний git diff <baseline> --. Саме сукупний diff від baseline, включно зі старими task-комітами, є змінами цієї задачі; звичайний git diff без baseline їх не показує.
 
 Обов’язкова перевірка вхідних даних перед змінами:
 1. Прочитай усі поля баг-репорту й усі внутрішні коментарі нижче та врахуй їх як один сценарій відтворення.
@@ -844,11 +845,67 @@ export class CodexWorker {
         if (added.code !== 0) throw new Error(`Не вдалося створити worktree для ${repository.name}: ${added.stderr || added.stdout}`)
       }
 
+      const baseline = await this.synchronizeWorktreeBaseline(repository, worktreePath)
       await materializeInstalledDependencies(repository.repositoryPath, worktreePath)
-      worktrees.push({ ...repository, worktreePath })
+      worktrees.push({ ...repository, worktreePath, ...baseline })
     }
 
     return { branch, jobDirectory, worktrees }
+  }
+
+  async synchronizeWorktreeBaseline(repository, worktreePath) {
+    const authoritative = await runProcess('git', ['-C', repository.repositoryPath, 'rev-parse', 'HEAD'])
+    if (authoritative.code !== 0 || !/^[0-9a-f]{40}$/i.test(authoritative.stdout.trim())) {
+      throw new Error(`Не вдалося визначити authoritative HEAD для ${repository.name}`)
+    }
+    const baselineCommit = authoritative.stdout.trim()
+    const status = await runProcess('git', ['-C', worktreePath, 'status', '--porcelain'])
+    if (status.code !== 0) throw new Error(`Не вдалося перевірити worktree ${repository.name}`)
+    const hasWip = Boolean(status.stdout.trim())
+
+    const taskHead = await runProcess('git', ['-C', worktreePath, 'rev-parse', 'HEAD'])
+    if (taskHead.code !== 0) throw new Error(`Не вдалося визначити task HEAD для ${repository.name}`)
+    if (taskHead.stdout.trim() === baselineCommit) {
+      return { baselineCommit, baselineState: hasWip ? 'current + uncommitted task WIP' : 'current' }
+    }
+
+    const taskIsAncestor = await runProcess('git', [
+      '-C', worktreePath, 'merge-base', '--is-ancestor', taskHead.stdout.trim(), baselineCommit,
+    ])
+    if (taskIsAncestor.code === 0) {
+      const forwarded = await runProcess('git', ['-C', worktreePath, 'merge', '--ff-only', baselineCommit])
+      if (forwarded.code !== 0) {
+        const wipHint = hasWip
+          ? ' Незакомічений WIP збережено без змін; його треба узгодити з current main вручну.'
+          : ''
+        throw new Error(`Не вдалося fast-forward ${repository.name} до authoritative HEAD: ${forwarded.stderr || forwarded.stdout}${wipHint}`)
+      }
+      return { baselineCommit, baselineState: hasWip ? 'fast-forwarded + uncommitted task WIP' : 'fast-forwarded' }
+    }
+
+    const baselineIsAncestor = await runProcess('git', [
+      '-C', worktreePath, 'merge-base', '--is-ancestor', baselineCommit, taskHead.stdout.trim(),
+    ])
+    if (baselineIsAncestor.code === 0) {
+      return {
+        baselineCommit,
+        baselineState: hasWip ? 'current + task commits + uncommitted task WIP' : 'current + task commits',
+      }
+    }
+
+    if (hasWip) {
+      throw new Error(
+        `Task-гілка ${repository.name} розійшлася з authoritative HEAD і містить незакомічений WIP. `
+        + 'Автоматичний rebase зупинено без reset/stash: спочатку треба безпечно узгодити WIP вручну.',
+      )
+    }
+
+    const rebased = await runProcess('git', ['-C', worktreePath, 'rebase', baselineCommit])
+    if (rebased.code !== 0) {
+      await runProcess('git', ['-C', worktreePath, 'rebase', '--abort'])
+      throw new Error(`Task-коміти ${repository.name} конфліктують з authoritative HEAD; rebase скасовано без втрати даних: ${rebased.stderr || rebased.stdout}`)
+    }
+    return { baselineCommit, baselineState: 'rebased task commits' }
   }
 
   async mediaPaths(task) {

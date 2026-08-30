@@ -7,6 +7,7 @@ import test from 'node:test'
 import {
   CodexWorker,
   codexExecutionFailureReason,
+  collectWorktreeChanges,
   fixedResultQualityFailures,
   normalizeWorkerConcurrency,
   terminateProcessTree,
@@ -38,6 +39,139 @@ test('worker image має локальні декодери для всіх до
   const dockerfile = await readFile(new URL('../Dockerfile', import.meta.url), 'utf8')
   for (const tool of ['ffmpeg', 'poppler-utils', 'python3-openpyxl', 'python3-xlrd']) {
     assert.match(dockerfile, new RegExp(`\\b${tool}\\b`))
+  }
+})
+
+test('повторний аудит fast-forward-ить чистий task-worktree до authoritative HEAD', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-codex-baseline-ff-'))
+  const repository = path.join(root, 'repo')
+  const worktreesDirectory = path.join(root, 'worktrees')
+  await mkdir(repository, { recursive: true })
+  git(repository, 'init')
+  git(repository, 'config', 'user.email', 'worker-test@example.com')
+  git(repository, 'config', 'user.name', 'Worker Test')
+  await writeFile(path.join(repository, 'app.txt'), 'initial\n', 'utf8')
+  git(repository, 'add', 'app.txt')
+  git(repository, 'commit', '-m', 'Initial fixture')
+
+  const worker = new CodexWorker({
+    store: {},
+    rootDirectory: root,
+    dataDirectory: root,
+    uploadsDirectory: root,
+    targetRepository: repository,
+    worktreesDirectory,
+  })
+  const stack = [{ name: 'repo', repositoryPath: repository }]
+
+  try {
+    const first = await worker.ensureWorktrees('BUG-BASELINE-FF', stack)
+    const oldHead = git(first.worktrees[0].worktreePath, 'rev-parse', 'HEAD')
+    await writeFile(path.join(repository, 'main-only.txt'), 'current main\n', 'utf8')
+    git(repository, 'add', 'main-only.txt')
+    git(repository, 'commit', '-m', 'Advance authoritative main')
+    const currentMain = git(repository, 'rev-parse', 'HEAD')
+    assert.notEqual(currentMain, oldHead)
+
+    const second = await worker.ensureWorktrees('BUG-BASELINE-FF', stack)
+    assert.equal(git(second.worktrees[0].worktreePath, 'rev-parse', 'HEAD'), currentMain)
+    assert.equal(second.worktrees[0].baselineCommit, currentMain)
+    assert.equal(second.worktrees[0].baselineState, 'fast-forwarded')
+    assert.equal(await readFile(path.join(second.worktrees[0].worktreePath, 'main-only.txt'), 'utf8'), 'current main\n')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('повторний аудит rebases і враховує вже закомічену task-роботу від current main', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-codex-baseline-rebase-'))
+  const repository = path.join(root, 'repo')
+  const worktreesDirectory = path.join(root, 'worktrees')
+  await mkdir(repository, { recursive: true })
+  git(repository, 'init')
+  git(repository, 'config', 'user.email', 'worker-test@example.com')
+  git(repository, 'config', 'user.name', 'Worker Test')
+  await writeFile(path.join(repository, 'app.txt'), 'initial\n', 'utf8')
+  git(repository, 'add', 'app.txt')
+  git(repository, 'commit', '-m', 'Initial fixture')
+
+  const worker = new CodexWorker({
+    store: {},
+    rootDirectory: root,
+    dataDirectory: root,
+    uploadsDirectory: root,
+    targetRepository: repository,
+    worktreesDirectory,
+  })
+  const stack = [{ name: 'repo', repositoryPath: repository }]
+
+  try {
+    const first = await worker.ensureWorktrees('BUG-BASELINE-REBASE', stack)
+    const taskWorktree = first.worktrees[0].worktreePath
+    await writeFile(path.join(taskWorktree, 'task-only.txt'), 'retained task fix\n', 'utf8')
+    git(taskWorktree, 'add', 'task-only.txt')
+    git(taskWorktree, 'commit', '-m', 'Retain prior task fix')
+
+    await writeFile(path.join(repository, 'main-only.txt'), 'current main\n', 'utf8')
+    git(repository, 'add', 'main-only.txt')
+    git(repository, 'commit', '-m', 'Advance authoritative main')
+    const currentMain = git(repository, 'rev-parse', 'HEAD')
+
+    const second = await worker.ensureWorktrees('BUG-BASELINE-REBASE', stack)
+    const taskHead = git(taskWorktree, 'rev-parse', 'HEAD')
+    assert.equal(second.worktrees[0].baselineCommit, currentMain)
+    assert.equal(second.worktrees[0].baselineState, 'rebased task commits')
+    assert.equal(git(taskWorktree, 'merge-base', '--is-ancestor', currentMain, taskHead), '')
+    assert.equal(await readFile(path.join(taskWorktree, 'main-only.txt'), 'utf8'), 'current main\n')
+    assert.equal(await readFile(path.join(taskWorktree, 'task-only.txt'), 'utf8'), 'retained task fix\n')
+
+    assert.deepEqual(await collectWorktreeChanges(second.worktrees), {
+      files: ['repo/task-only.txt'],
+      repositories: ['repo'],
+    })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('baseline sync не затирає конфліктний незакомічений WIP', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-codex-baseline-wip-'))
+  const repository = path.join(root, 'repo')
+  const worktreesDirectory = path.join(root, 'worktrees')
+  await mkdir(repository, { recursive: true })
+  git(repository, 'init')
+  git(repository, 'config', 'user.email', 'worker-test@example.com')
+  git(repository, 'config', 'user.name', 'Worker Test')
+  await writeFile(path.join(repository, 'app.txt'), 'initial\n', 'utf8')
+  git(repository, 'add', 'app.txt')
+  git(repository, 'commit', '-m', 'Initial fixture')
+
+  const worker = new CodexWorker({
+    store: {},
+    rootDirectory: root,
+    dataDirectory: root,
+    uploadsDirectory: root,
+    targetRepository: repository,
+    worktreesDirectory,
+  })
+  const stack = [{ name: 'repo', repositoryPath: repository }]
+
+  try {
+    const first = await worker.ensureWorktrees('BUG-BASELINE-WIP', stack)
+    const taskWorktree = first.worktrees[0].worktreePath
+    await writeFile(path.join(taskWorktree, 'app.txt'), 'uncommitted task WIP\n', 'utf8')
+    await writeFile(path.join(repository, 'app.txt'), 'new authoritative value\n', 'utf8')
+    git(repository, 'add', 'app.txt')
+    git(repository, 'commit', '-m', 'Conflicting main change')
+
+    await assert.rejects(
+      worker.ensureWorktrees('BUG-BASELINE-WIP', stack),
+      /WIP збережено без змін/,
+    )
+    assert.equal(await readFile(path.join(taskWorktree, 'app.txt'), 'utf8'), 'uncommitted task WIP\n')
+    assert.equal(git(taskWorktree, 'status', '--short'), 'M app.txt')
+  } finally {
+    await rm(root, { recursive: true, force: true })
   }
 })
 
