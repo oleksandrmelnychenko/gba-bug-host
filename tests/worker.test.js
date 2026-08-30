@@ -604,6 +604,8 @@ writeFileSync(outputPath, JSON.stringify({
     assert.match(prompt, /переглянь повний git diff/)
     assert.match(prompt, /створи НОВУ forward-only міграцію/)
     assert.match(prompt, /release-worker сам застосує штатний migrator/)
+    assert.match(prompt, /audit-only outcome=verified.*точні regression-тести/)
+    assert.match(prompt, /один ізольований повтор падіння достатній/)
     assert.match(prompt, /Внутрішній legacy-коментар команди/)
     assert.match(prompt, /Окремо перевір очищення поля пошуку/)
     assert.doesNotMatch(prompt, /Це новіший коментар, який не належить RUN-TEST-1/)
