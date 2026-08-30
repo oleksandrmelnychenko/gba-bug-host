@@ -150,12 +150,13 @@ function agentRunFromRow(row, { includeWorkerContext = false } = {}) {
   }
 }
 
-function agentRunInputFromTask(task) {
+function agentRunInputFromTask(task, comments = []) {
   return {
     title: task.title,
     description: task.description ?? '',
     siteUrl: task.siteUrl ?? '',
     notes: task.notes ?? '',
+    staffComments: task.staffComments ?? '',
     reviewComment: task.reviewComment ?? '',
     area: task.area,
     project: task.project ?? 'console',
@@ -168,6 +169,16 @@ function agentRunInputFromTask(task) {
       type: attachment.type,
       size: attachment.size,
       kind: attachment.kind,
+    })),
+    comments: comments.map((comment) => ({
+      id: comment.id,
+      taskId: comment.taskId,
+      parentId: comment.parentId,
+      authorUserId: comment.authorUserId,
+      author: comment.author,
+      body: comment.body,
+      createdAt: comment.createdAt,
+      updatedAt: comment.updatedAt,
     })),
   }
 }
@@ -943,7 +954,7 @@ export class TaskStore {
       .prepare('SELECT COALESCE(MAX(attempt), 0) + 1 AS nextAttempt FROM agent_runs WHERE task_id = ?')
       .get(taskId)
     const now = new Date().toISOString()
-    const inputSnapshot = agentRunInputFromTask(task)
+    const inputSnapshot = agentRunInputFromTask(task, this.commentsForTask(taskId))
     const previousSession = this.database
       .prepare(`
         SELECT codex_session_id FROM agent_runs

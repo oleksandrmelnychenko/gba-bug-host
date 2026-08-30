@@ -45,12 +45,14 @@ export interface AgentRunInputSnapshot {
   description: string
   siteUrl: string
   notes: string
+  staffComments: string
   reviewComment: string
   area: string
   project: TaskProject
   status: TaskStatus
   priority: TaskPriority
   attachments: TaskAttachment[]
+  comments: TaskComment[]
 }
 
 export interface AgentRun {

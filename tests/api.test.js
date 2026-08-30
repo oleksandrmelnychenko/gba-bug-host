@@ -236,7 +236,9 @@ test('API створює задачу зі скріншотом і оновлю�
     assert.equal(created.body.createdByName, 'Команда')
     assert.equal(created.body.agentRun.status, 'queued')
     assert.equal(created.body.agentRun.attempt, 1)
-    assert.equal(Object.hasOwn(created.body.agentRun.inputSnapshot, 'staffComments'), false)
+    assert.equal(created.body.agentRun.inputSnapshot.staffComments, 'Олена перевірить виправлення після обіду.')
+    assert.equal(created.body.agentRun.inputSnapshot.comments.length, 1)
+    assert.equal(created.body.agentRun.inputSnapshot.comments[0].body, 'Олена перевірить виправлення після обіду.')
     assert.equal(Object.hasOwn(created.body.agentRun.inputSnapshot, 'qaStatus'), false)
     const initialComments = await request(app).get(`/api/tasks/${created.body.id}/comments`).expect(200)
     assert.equal(initialComments.body.length, 1)
@@ -331,7 +333,7 @@ test('API відхиляє невідомий binary-файл навіть із 
   })
 })
 
-test('API зберігає дерево внутрішніх коментарів окремо від контексту AI', async () => {
+test('API зберігає дерево внутрішніх коментарів і додає його до наступного AI snapshot', async () => {
   await withTestApp(async ({ app }) => {
     const rootComment = await request(app)
       .post('/api/tasks/BUG-1051/comments')
@@ -364,8 +366,16 @@ test('API зберігає дерево внутрішніх коментарі�
       .expect(400)
     await request(app).get('/api/tasks/BUG-9999/comments').expect(404)
 
-    const task = await request(app).get('/api/tasks').expect(200)
-    assert.equal(Object.hasOwn(task.body[0].agentRun?.inputSnapshot ?? {}, 'comments'), false)
+    const queued = await request(app)
+      .post('/api/tasks/BUG-1051/agent-runs')
+      .expect(202)
+    assert.deepEqual(
+      queued.body.agentRun.inputSnapshot.comments.map(({ id, parentId, author, body }) => ({ id, parentId, author, body })),
+      [
+        { id: rootComment.body.id, parentId: null, author: 'Олена', body: 'Перевірю сценарій на касі.' },
+        { id: reply.body.id, parentId: rootComment.body.id, author: 'Ігор', body: 'Додай, будь ласка, відео.' },
+      ],
+    )
   })
 })
 

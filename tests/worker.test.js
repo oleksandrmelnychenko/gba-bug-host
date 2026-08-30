@@ -152,12 +152,18 @@ test('quality gate відхиляє недоведений fixed і сторон
     changedFiles: ['gba_console/src/form.tsx', 'gba_console/vitest.config.cjs'],
     reviewedAttachments: ['screen.jpg'],
     attachmentEvidence: [{ name: 'screen.jpg', observation: 'Post-create логістичний екран' }],
+    reviewedComments: [],
+    commentEvidence: [],
     scopeReview: { diffReviewed: true, unrelatedFiles: [] },
     releasePlan: { repositories: ['gba_console'] },
   }
 
   const failures = fixedResultQualityFailures(result, {
-    task: { title: 'Додати знижку до інвойса', description: 'Поле після створення інвойса' },
+    task: {
+      title: 'Додати знижку до інвойса',
+      description: 'Поле після створення інвойса',
+      comments: [{ id: 'COMMENT-QA', author: 'QA', body: 'Перевірити саме після створення.' }],
+    },
     mediaPaths: [{ name: 'screen.jpg', available: true }],
     actualChangedFiles: ['gba_console/src/form.tsx', 'gba_console/vitest.config.cjs'],
     actualRepositories: ['gba_console'],
@@ -165,6 +171,8 @@ test('quality gate відхиляє недоведений fixed і сторон
 
   assert.ok(failures.some((failure) => /не всі acceptance-критерії/.test(failure)))
   assert.ok(failures.some((failure) => /глобальні build\/test-конфіги/.test(failure)))
+  assert.ok(failures.some((failure) => /коментар не зафіксовано.*COMMENT-QA/.test(failure)))
+  assert.ok(failures.some((failure) => /немає конкретного висновку.*COMMENT-QA/.test(failure)))
 })
 
 test('Codex worker працює в окремому worktree та зберігає результат', async () => {
@@ -206,6 +214,11 @@ writeFileSync(outputPath, JSON.stringify({
     { name: 'walkthrough.mp4', observation: 'Тестове відео переглянуто' },
     { name: 'missing.mov', observation: 'Файл недоступний, вміст не вигадувався' }
   ],
+  reviewedComments: ['staff-comments', 'COMMENT-BEFORE'],
+  commentEvidence: [
+    { id: 'staff-comments', observation: 'Legacy-коментар уточнює внутрішню перевірку команди' },
+    { id: 'COMMENT-BEFORE', observation: 'Коментар вимагає перевірити точний сценарій очищення поля' }
+  ],
   scopeReview: { diffReviewed: true, unrelatedFiles: [] },
   releasePlan: { repositories: ['target'], migrationFiles: [], services: [], postDeployChecks: [{ label: 'fixture', url: 'http://127.0.0.1/health', expectedStatus: 200, contains: '' }] }
 }), 'utf8')
@@ -219,8 +232,14 @@ writeFileSync(outputPath, JSON.stringify({
       for (const task of getSeedTasks()) store.insertTask(task)
     })
     store.patch('BUG-1051', {
-      staffComments: 'Внутрішній коментар команди — не показувати Codex.',
+      staffComments: 'Внутрішній legacy-коментар команди.',
       reviewComment: 'Після першого виправлення пошук усе ще падає на порожньому рядку.',
+    })
+    store.addTaskComment('COMMENT-BEFORE', 'BUG-1051', {
+      parentId: null,
+      authorUserId: null,
+      author: 'Олена',
+      body: 'Окремо перевір очищення поля пошуку.',
     })
     await writeFile(path.join(uploadsDirectory, 'proof.png'), 'image fixture', 'utf8')
     await writeFile(path.join(uploadsDirectory, 'walkthrough.mp4'), 'video fixture', 'utf8')
@@ -254,8 +273,17 @@ writeFileSync(outputPath, JSON.stringify({
     assert.equal(queued.created, true)
     assert.equal(queued.run.reviewComment, 'Після першого виправлення пошук усе ще падає на порожньому рядку.')
     assert.equal(queued.run.inputSnapshot.title, 'Пошук падає після очищення поля')
-    assert.equal(Object.hasOwn(queued.run.inputSnapshot, 'staffComments'), false)
+    assert.equal(queued.run.inputSnapshot.staffComments, 'Внутрішній legacy-коментар команди.')
+    assert.deepEqual(queued.run.inputSnapshot.comments.map(({ id, body }) => ({ id, body })), [
+      { id: 'COMMENT-BEFORE', body: 'Окремо перевір очищення поля пошуку.' },
+    ])
     store.patch('BUG-1051', { reviewComment: 'Це новіший коментар, який не належить RUN-TEST-1.' })
+    store.addTaskComment('COMMENT-AFTER', 'BUG-1051', {
+      parentId: null,
+      authorUserId: null,
+      author: 'Ігор',
+      body: 'Це новіший внутрішній коментар, який не належить RUN-TEST-1.',
+    })
     const run = store.claimNextAgentRun()
 
     const worker = new CodexWorker({
@@ -282,6 +310,7 @@ writeFileSync(outputPath, JSON.stringify({
     assert.equal(schema.properties.outcome.type, 'string')
     assert.equal(schema.properties.acceptanceEvidence.minItems, 1)
     assert.equal(schema.properties.reviewedAttachments.type, 'array')
+    assert.equal(schema.properties.reviewedComments.type, 'array')
     assert.equal(schema.properties.scopeReview.type, 'object')
     await assert.rejects(readFile(path.join(dataDirectory, 'agent-runs', 'result-schema.json'), 'utf8'), /ENOENT/)
     assert.equal(await readFile(path.join(worktreesDirectory, 'bug-1051', 'target', 'app.txt'), 'utf8'), 'after\n')
@@ -297,8 +326,10 @@ writeFileSync(outputPath, JSON.stringify({
     assert.match(prompt, /переглянь повний git diff/)
     assert.match(prompt, /створи НОВУ forward-only міграцію/)
     assert.match(prompt, /release-worker сам застосує штатний migrator/)
-    assert.doesNotMatch(prompt, /Внутрішній коментар команди/)
+    assert.match(prompt, /Внутрішній legacy-коментар команди/)
+    assert.match(prompt, /Окремо перевір очищення поля пошуку/)
     assert.doesNotMatch(prompt, /Це новіший коментар, який не належить RUN-TEST-1/)
+    assert.doesNotMatch(prompt, /Це новіший внутрішній коментар, який не належить RUN-TEST-1/)
     assert.deepEqual(
       JSON.parse(result.details).reviewedAttachments,
       ['proof.png', 'walkthrough.mp4', 'missing.mov — недоступне'],
@@ -354,6 +385,8 @@ writeFileSync(outputPath, JSON.stringify({
   changedFiles: ['app.txt'],
   reviewedAttachments: [],
   attachmentEvidence: [],
+  reviewedComments: [],
+  commentEvidence: [],
   scopeReview: { diffReviewed: true, unrelatedFiles: [] },
   releasePlan: { repositories: ['target'], migrationFiles: [], services: [], postDeployChecks: [{ label: 'fixture', url: 'http://127.0.0.1/health', expectedStatus: 200, contains: '' }] }
 }), 'utf8')
@@ -456,6 +489,8 @@ writeFileSync(outputPath, JSON.stringify({
   changedFiles: ['frontend/app.txt', 'backend/app.txt'],
   reviewedAttachments: [],
   attachmentEvidence: [],
+  reviewedComments: [],
+  commentEvidence: [],
   scopeReview: { diffReviewed: true, unrelatedFiles: [] },
   releasePlan: { repositories: ['frontend', 'backend'], migrationFiles: [], services: [], postDeployChecks: [{ label: 'fixture', url: 'http://127.0.0.1/health', expectedStatus: 200, contains: '' }] }
 }), 'utf8')
@@ -542,6 +577,8 @@ writeFileSync(outputPath, JSON.stringify({
   changedFiles: [],
   reviewedAttachments: [],
   attachmentEvidence: [],
+  reviewedComments: [],
+  commentEvidence: [],
   scopeReview: { diffReviewed: true, unrelatedFiles: [] },
   releasePlan: { repositories: [], migrationFiles: [], services: [], postDeployChecks: [{ label: 'fixture', url: 'http://127.0.0.1/health', expectedStatus: 200, contains: '' }] }
 }), 'utf8')
