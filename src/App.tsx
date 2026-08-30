@@ -566,6 +566,20 @@ function QaStatusInput({
   )
 }
 
+function TaskCreator({ name }: { name: string }) {
+  const creatorName = name.trim()
+  if (!creatorName) return <span className="empty-cell">—</span>
+
+  return (
+    <div className="task-creator" title={`Створив: ${creatorName}`}>
+      <span className="task-creator-avatar" aria-hidden="true">
+        {commentInitials(creatorName)}
+      </span>
+      <span className="task-creator-name">{creatorName}</span>
+    </div>
+  )
+}
+
 function TaskTable({
   tasks,
   updatingId,
@@ -682,12 +696,7 @@ function TaskTable({
                   style={{ '--row-delay': `${Math.min(index, 7) * 35}ms` } as React.CSSProperties}
                 >
                   <td>
-                    <div className="task-creator" title={`Створив: ${task.createdByName}`}>
-                      <span className="task-creator-avatar" aria-hidden="true">
-                        {commentInitials(task.createdByName)}
-                      </span>
-                      <span className="task-creator-name">{task.createdByName}</span>
-                    </div>
+                    <TaskCreator name={task.createdByName} />
                   </td>
                   <td className="task-main-column">
                     <div className="task-title-cell">

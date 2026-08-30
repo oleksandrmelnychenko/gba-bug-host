@@ -433,7 +433,7 @@ test('SQLite автоматично додає поля задачі та snapsh
     assert.equal(task.staffComments, '')
     assert.equal(task.qaStatus, '')
     assert.equal(task.createdByUserId, null)
-    assert.equal(task.createdByName, 'Імпорт')
+    assert.equal(task.createdByName, '')
     assert.equal(task.reviewComment, '')
     assert.equal(task.agentRun.reviewComment, '')
     assert.equal(task.agentRun.inputSnapshot, null)
@@ -478,7 +478,23 @@ test('SQLite автоматично додає поля задачі та snapsh
     ])
     await reopenedStore.ensureReady()
     assert.equal(reopenedStore.commentsForTask('BUG-1001').length, 1)
+    reopenedStore.database
+      .prepare("UPDATE tasks SET created_by_name = 'Імпорт', notes = '' WHERE id = 'BUG-1001'")
+      .run()
     reopenedStore.close()
+
+    const sanitizedStore = new TaskStore(dataDirectory)
+    await sanitizedStore.ensureReady()
+    assert.equal(sanitizedStore.find('BUG-1001').createdByName, '')
+    sanitizedStore.database
+      .prepare("UPDATE tasks SET created_by_name = 'Імпорт', notes = '[sentinel:test]' WHERE id = 'BUG-1001'")
+      .run()
+    sanitizedStore.close()
+
+    const systemStore = new TaskStore(dataDirectory)
+    await systemStore.ensureReady()
+    assert.equal(systemStore.find('BUG-1001').createdByName, 'Система')
+    systemStore.close()
   } finally {
     store.close()
     await rm(root, { recursive: true, force: true })

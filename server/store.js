@@ -188,7 +188,7 @@ function taskFromRow(row, attachments = [], agentRun = null) {
     priority: row.priority,
     assignee: row.assignee,
     createdByUserId: row.created_by_user_id ?? null,
-    createdByName: row.created_by_name ?? 'Імпорт',
+    createdByName: row.created_by_name === 'Імпорт' ? '' : row.created_by_name ?? '',
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     attachments,
@@ -251,7 +251,7 @@ export class TaskStore {
         priority TEXT NOT NULL,
         assignee TEXT NOT NULL,
         created_by_user_id TEXT,
-        created_by_name TEXT NOT NULL DEFAULT 'Імпорт',
+        created_by_name TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -411,7 +411,7 @@ export class TaskStore {
         this.database.exec('ALTER TABLE tasks ADD COLUMN created_by_user_id TEXT')
       }
       if (!taskColumns.has('created_by_name')) {
-        this.database.exec("ALTER TABLE tasks ADD COLUMN created_by_name TEXT NOT NULL DEFAULT 'Імпорт'")
+        this.database.exec("ALTER TABLE tasks ADD COLUMN created_by_name TEXT NOT NULL DEFAULT ''")
       }
 
       const commentColumns = new Set(
@@ -427,6 +427,40 @@ export class TaskStore {
         FROM tasks
         WHERE TRIM(staff_comments) <> ''
         ON CONFLICT(id) DO NOTHING
+      `)
+
+      // The first creator-column deployment used "Імпорт" as a placeholder for
+      // historical rows. It is not a person's name, so retain only creators we
+      // can prove and leave unrecoverable manual rows empty. Sentinel tasks are
+      // deterministically system-created.
+      this.database.exec(`
+        UPDATE tasks
+        SET created_by_user_id = (
+              SELECT task_comments.author_user_id
+              FROM task_comments
+              WHERE task_comments.id = 'legacy-staff:' || tasks.id
+                AND task_comments.author_user_id IS NOT NULL
+            ),
+            created_by_name = (
+              SELECT task_comments.author
+              FROM task_comments
+              WHERE task_comments.id = 'legacy-staff:' || tasks.id
+                AND task_comments.author_user_id IS NOT NULL
+            )
+        WHERE created_by_name = 'Імпорт'
+          AND EXISTS (
+            SELECT 1
+            FROM task_comments
+            WHERE task_comments.id = 'legacy-staff:' || tasks.id
+              AND task_comments.author_user_id IS NOT NULL
+          );
+
+        UPDATE tasks
+        SET created_by_name = CASE
+          WHEN notes LIKE '%[sentinel:%' THEN 'Система'
+          ELSE ''
+        END
+        WHERE created_by_name = 'Імпорт';
       `)
 
       const agentRunColumns = new Set(
@@ -548,7 +582,7 @@ export class TaskStore {
       task.priority,
       task.assignee,
       task.createdByUserId ?? null,
-      task.createdByName ?? 'Імпорт',
+      task.createdByName ?? '',
       task.createdAt,
       task.updatedAt,
     )

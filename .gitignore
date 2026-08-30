@@ -18,6 +18,7 @@ npm-debug.log*
 dev.*.log
 .playwright-cli/
 output/
+backups/
 docker-compose.override.yml
 .codex-worker-home/
 .voice-venv/
