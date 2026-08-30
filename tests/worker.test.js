@@ -175,6 +175,134 @@ test('quality gate відхиляє недоведений fixed і сторон
   assert.ok(failures.some((failure) => /немає конкретного висновку.*COMMENT-QA/.test(failure)))
 })
 
+test('quality gate дозволяє доказаний verified лише з повністю чистим git', () => {
+  const result = {
+    outcome: 'verified',
+    rootCause: 'Поточний main уже містить виправлення точного сценарію задачі.',
+    acceptanceEvidence: [{
+      criterion: 'Точний сценарій працює',
+      evidence: 'PASS regression test і current component contract',
+      status: 'met',
+    }],
+    referenceEvidence: ['src/form.tsx — current contract підтверджує потрібний стан'],
+    tests: ['PASS targeted regression test'],
+    changedFiles: [],
+    reviewedAttachments: ['screen.png'],
+    attachmentEvidence: [{ name: 'screen.png', observation: 'Форма показує очікуваний стан' }],
+    reviewedComments: ['COMMENT-QA'],
+    commentEvidence: [{ id: 'COMMENT-QA', observation: 'QA просить перевірити той самий сценарій' }],
+    scopeReview: { diffReviewed: true, unrelatedFiles: [] },
+    releasePlan: {
+      repositories: [],
+      migrationFiles: [],
+      services: [],
+      postDeployChecks: [{
+        label: 'current dev scenario',
+        url: 'http://127.0.0.1/health',
+        expectedStatus: 200,
+        contains: '',
+      }],
+    },
+  }
+  const context = {
+    task: {
+      title: 'Перевірити форму',
+      description: 'Очікуваний стан форми',
+      comments: [{ id: 'COMMENT-QA', author: 'QA', body: 'Перевірити точний сценарій.' }],
+    },
+    mediaPaths: [{ name: 'screen.png', available: true }],
+    actualChangedFiles: [],
+    actualRepositories: [],
+  }
+
+  assert.deepEqual(fixedResultQualityFailures(result, context), [])
+  assert.ok(fixedResultQualityFailures(result, {
+    ...context,
+    actualChangedFiles: ['gba_console/src/form.tsx'],
+    actualRepositories: ['gba_console'],
+  }).some((failure) => /verified забороняє зміни/.test(failure)))
+})
+
+test('Codex worker зберігає verified як completed без штучного diff', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-codex-verified-'))
+  const targetRepository = path.join(root, 'target')
+  const dataDirectory = path.join(root, 'data')
+  const uploadsDirectory = path.join(root, 'uploads')
+  const worktreesDirectory = path.join(root, 'worktrees')
+  const fakeCodex = path.join(root, 'fake-codex.mjs')
+  await mkdir(targetRepository, { recursive: true })
+  await mkdir(uploadsDirectory, { recursive: true })
+
+  git(targetRepository, 'init')
+  git(targetRepository, 'config', 'user.email', 'worker-test@example.com')
+  git(targetRepository, 'config', 'user.name', 'Worker Test')
+  await writeFile(path.join(targetRepository, 'app.txt'), 'already fixed\n', 'utf8')
+  git(targetRepository, 'add', 'app.txt')
+  git(targetRepository, 'commit', '-m', 'Verified fixture')
+
+  await writeFile(fakeCodex, `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs'
+const args = process.argv.slice(2)
+const outputPath = args[args.indexOf('--output-last-message') + 1]
+writeFileSync(outputPath, JSON.stringify({
+  outcome: 'verified',
+  summary: 'Поточний main уже відповідає задачі.',
+  rootCause: 'Потрібна поведінка вже реалізована у current main і захищена тестом.',
+  acceptanceEvidence: [{ criterion: 'Поведінка наявна', evidence: 'PASS current contract regression', status: 'met' }],
+  referenceEvidence: ['target/app.txt — current contract'],
+  tests: ['PASS current contract regression'],
+  changedFiles: [],
+  reviewedAttachments: [],
+  attachmentEvidence: [],
+  reviewedComments: [],
+  commentEvidence: [],
+  scopeReview: { diffReviewed: true, unrelatedFiles: [] },
+  releasePlan: { repositories: [], migrationFiles: [], services: [], postDeployChecks: [{ label: 'fixture', url: 'http://127.0.0.1/health', expectedStatus: 200, contains: '' }] }
+}), 'utf8')
+`, 'utf8')
+  await chmod(fakeCodex, 0o755)
+
+  const previousStack = process.env.CODEX_REPOS_CONSOLE
+  process.env.CODEX_REPOS_CONSOLE = targetRepository
+  const store = new TaskStore(dataDirectory)
+  try {
+    await store.ensureReady()
+    store.transaction(() => {
+      for (const task of getSeedTasks()) store.insertTask(task)
+    })
+    store.patch('BUG-1049', { status: 'done' })
+    const queued = store.enqueueAgentRun('RUN-VERIFIED-1', 'BUG-1049', 'manual')
+    assert.equal(queued.run.inputSnapshot.status, 'done')
+
+    const worker = new CodexWorker({
+      store,
+      rootDirectory: root,
+      dataDirectory,
+      uploadsDirectory,
+      targetRepository,
+      worktreesDirectory,
+      codexBinary: fakeCodex,
+      timeoutMs: 10_000,
+    })
+    await worker.processRun(store.claimNextAgentRun())
+
+    const result = store.findAgentRun('RUN-VERIFIED-1')
+    const details = JSON.parse(result.details)
+    assert.equal(result.status, 'completed')
+    assert.equal(details.outcome, 'verified')
+    assert.equal(details.qualityGate.applied, true)
+    assert.equal(details.qualityGate.passed, true)
+    assert.deepEqual(details.changedFiles, [])
+    assert.equal(store.find('BUG-1049').status, 'in_progress')
+    assert.equal(git(targetRepository, 'status', '--short'), '')
+  } finally {
+    if (previousStack === undefined) delete process.env.CODEX_REPOS_CONSOLE
+    else process.env.CODEX_REPOS_CONSOLE = previousStack
+    store.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('Codex worker працює в окремому worktree та зберігає результат', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'gba-codex-worker-'))
   const targetRepository = path.join(root, 'target')
@@ -334,6 +462,11 @@ writeFileSync(outputPath, JSON.stringify({
       JSON.parse(result.details).reviewedAttachments,
       ['proof.png', 'walkthrough.mp4', 'missing.mov — недоступне'],
     )
+    assert.deepEqual(
+      JSON.parse(result.details).reviewedComments,
+      ['staff-comments', 'COMMENT-BEFORE'],
+    )
+    assert.equal(JSON.parse(result.details).commentEvidence.length, 2)
     assert.equal(JSON.parse(result.details).qualityGate.applied, true)
     assert.equal(JSON.parse(result.details).qualityGate.passed, true)
     assert.equal(await readFile(path.join(targetRepository, 'app.txt'), 'utf8'), 'before\n')

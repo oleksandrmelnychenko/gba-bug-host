@@ -301,13 +301,22 @@ function mergeEvidence(current, patch) {
   return merged
 }
 
-function readAgentReleasePlan(task) {
+function readAgentDetails(task) {
   try {
     const details = JSON.parse(task.agentRun?.details ?? '{}')
-    return details?.releasePlan && typeof details.releasePlan === 'object' ? details.releasePlan : {}
+    return details && typeof details === 'object' && !Array.isArray(details) ? details : {}
   } catch {
     return {}
   }
+}
+
+function readAgentReleasePlan(task) {
+  const details = readAgentDetails(task)
+  return details.releasePlan && typeof details.releasePlan === 'object' ? details.releasePlan : {}
+}
+
+function isVerifiedAudit(task) {
+  return readAgentDetails(task).outcome === 'verified'
 }
 
 export function isMigrationFile(repo, file) {
@@ -658,6 +667,10 @@ export class ReleaseWorker {
     const task = tasks[0]
     if (!task) return
     await this.assertLease()
+    if (isVerifiedAudit(task)) {
+      await this.releaseVerifiedAudit(task)
+      return
+    }
     const outcome = await this.releaseTask(task)
     if (!outcome.ok) {
       await this.handleReleaseFailure(task, outcome)
@@ -845,6 +858,91 @@ export class ReleaseWorker {
     console.log(`[release] ${task.id}: випущено з міграційним і live доказом${closing ? ' та закрито' : ''}`)
   }
 
+  async releaseVerifiedAudit(task) {
+    const handoff = readAgentReleasePlan(task)
+    const handoffValidation = validateReleaseHandoff(handoff, [], [], {}, this.repoPlan)
+    if (!handoffValidation.ok) {
+      await this.handleReleaseFailure(task, {
+        kind: 'validation',
+        phase: 'preflight',
+        reason: handoffValidation.reason,
+      })
+      return
+    }
+
+    let evidence = mergeEvidence(task.agentRun?.releaseEvidence, {
+      auditOnly: {
+        outcome: 'verified',
+        codeChangesRequired: false,
+        migrationsRequired: false,
+        rebuildRequired: false,
+      },
+      repositories: {},
+      services: [],
+      handoff,
+      handoffConsistency: {
+        legacy: handoffValidation.legacy,
+        matches: true,
+        migrations: [],
+        declaredServices: [],
+        effectiveServices: [],
+        autoAddedServices: [],
+      },
+    })
+    await this.updateRelease(task, {
+      status: 'processing',
+      phase: 'verifying',
+      repositories: [],
+      error: '',
+      evidence,
+    })
+    await this.assertLease()
+
+    const scenario = await this.verifyPostDeployChecks(handoffValidation.checks)
+    evidence = mergeEvidence(evidence, {
+      deployment: {
+        services: {},
+        repositoryCommits: {},
+        verifiedAt: new Date().toISOString(),
+        composeOutput: 'Audit-only: current DEV behavior verified; no code changes or rebuild were required.',
+      },
+      scenarioChecks: scenario.evidence,
+    })
+    if (!scenario.ok) {
+      await this.handleReleaseFailure(task, {
+        kind: scenario.kind ?? 'transient',
+        reason: scenario.reason,
+        phase: 'verifying',
+        evidence,
+      })
+      return
+    }
+
+    await this.updateRelease(task, {
+      status: 'processing',
+      phase: 'verifying',
+      evidence,
+    })
+    const stamp = new Date().toISOString()
+    const originalStatus = task.agentRun?.inputSnapshot?.status
+    const taskStatus = releaseStatusFor(task)
+      ?? (originalStatus === 'done' ? 'done' : 'ready_for_retest')
+    const cleanupErrors = await this.cleanupReleasedWorktrees(task)
+    await this.annotate(task, [
+      `[released:${stamp}] audit-only: current main, тести й live-сценарій підтверджені; зміни коду, міграції та rebuild не знадобилися`,
+      cleanupErrors.length > 0 ? `[release-cleanup-warning] ${cleanupErrors.join('; ')}` : '',
+    ].filter(Boolean).join('\n').slice(0, 1200))
+    await this.updateRelease(task, {
+      status: 'released',
+      phase: 'released',
+      error: '',
+      evidence,
+      releasedAt: stamp,
+      taskStatus,
+    })
+    console.log(`[release] ${task.id}: audit-only перевірку завершено, DEV-сценарій підтверджено`)
+  }
+
   async handleReleaseFailure(task, outcome) {
     const attempts = (task.agentRun?.releaseAttempts ?? 0) + 1
     const deterministic = ['conflict', 'validation', 'repository'].includes(outcome.kind)
@@ -863,7 +961,7 @@ export class ReleaseWorker {
         attempts,
         error: outcome.reason,
         evidence,
-        taskStatus: isSentinelTask(task) ? 'blocked' : task.status,
+        taskStatus: isSentinelTask(task) || isVerifiedAudit(task) ? 'blocked' : task.status,
       })
       await this.annotate(task, `[release-blocked:${stamp}] ${attempts} невдалих спроб на фазі ${outcome.phase ?? 'release'}: ${outcome.reason}.`.slice(0, 700))
       console.error(`[release] ${task.id}: заблоковано після ${attempts} спроб — ${outcome.reason.slice(0, 160)}`)

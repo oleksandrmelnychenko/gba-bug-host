@@ -103,6 +103,62 @@ test('після релізу закривається лише лог-зада�
   assert.equal(releaseStatusFor({ title: 'Кошик губить позицію', notes: '' }), undefined)
 })
 
+test('verified-аудит перевіряє live-сценарій без merge/rebuild і відновлює done', async () => {
+  const task = {
+    id: 'BUG-AUDIT',
+    title: 'Уже виправлений сценарій',
+    status: 'in_progress',
+    notes: '',
+    agentRun: {
+      id: 'RUN-AUDIT',
+      releaseAttempts: 0,
+      inputSnapshot: { status: 'done' },
+      details: JSON.stringify({
+        outcome: 'verified',
+        releasePlan: {
+          repositories: [],
+          migrationFiles: [],
+          services: [],
+          postDeployChecks: [{
+            label: 'verified dev scenario',
+            url: 'http://127.0.0.1/health',
+            expectedStatus: 200,
+            contains: '',
+          }],
+        },
+      }),
+    },
+  }
+  const annotations = []
+  let scenarioChecks
+  const worker = new ReleaseWorker({
+    processRunner: async () => assert.fail('audit-only release не має запускати build/deploy process'),
+  })
+  worker.releaseTask = async () => assert.fail('audit-only release не має викликати releaseTask')
+  worker.verifyPostDeployChecks = async (checks) => {
+    scenarioChecks = checks
+    return { ok: true, evidence: [{ label: checks[0].label, actualStatus: 200, passed: true }] }
+  }
+  worker.cleanupReleasedWorktrees = async () => []
+  worker.annotate = async (_item, line) => annotations.push(line)
+  worker.updateRelease = async (item, values) => {
+    item.agentRun.releaseStatus = values.status
+    if (values.phase !== undefined) item.agentRun.releasePhase = values.phase
+    if (values.evidence !== undefined) item.agentRun.releaseEvidence = values.evidence
+    if (values.taskStatus) item.status = values.taskStatus
+  }
+
+  await worker.releaseBatch([task])
+
+  assert.equal(task.agentRun.releaseStatus, 'released')
+  assert.equal(task.agentRun.releasePhase, 'released')
+  assert.equal(task.status, 'done')
+  assert.equal(scenarioChecks[0].label, 'verified dev scenario')
+  assert.equal(task.agentRun.releaseEvidence.auditOnly.outcome, 'verified')
+  assert.deepEqual(task.agentRun.releaseEvidence.deployment.services, {})
+  assert.match(annotations[0], /audit-only/)
+})
+
 test('нова робота після релізу знову потрапляє у вибірку', () => {
   const released = { id: 'A', status: 'ready_for_retest', notes: '[released:2026-08-07 00:20] змерджено' }
   const stale = { ...released, agentRun: { status: 'completed', finishedAt: '2026-08-06T23:00:00.000Z' } }

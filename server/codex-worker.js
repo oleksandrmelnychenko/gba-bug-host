@@ -9,7 +9,7 @@ import { materializeInstalledDependencies } from './worktree-dependencies.js'
 const outputSchema = {
   type: 'object',
   properties: {
-    outcome: { type: 'string', enum: ['fixed', 'needs_review', 'blocked'] },
+    outcome: { type: 'string', enum: ['fixed', 'verified', 'needs_review', 'blocked'] },
     summary: { type: 'string' },
     rootCause: { type: 'string', minLength: 10 },
     acceptanceEvidence: {
@@ -326,9 +326,10 @@ export function fixedResultQualityFailures(result, {
   mediaPaths = [],
   task = {},
 } = {}) {
-  if (result?.outcome !== 'fixed') return []
+  if (!['fixed', 'verified'].includes(result?.outcome)) return []
 
   const failures = []
+  const verifiedWithoutChanges = result.outcome === 'verified'
   const rootCause = String(result.rootCause ?? '').trim()
   if (rootCause.length < 10) failures.push('не наведено конкретну root cause')
 
@@ -362,13 +363,32 @@ export function fixedResultQualityFailures(result, {
   if (!sameStringSet(declaredFiles, actualChangedFiles)) {
     failures.push('declared changedFiles не збігаються з фактичним git diff')
   }
-  if (actualChangedFiles.length === 0) failures.push('фактичний git diff порожній')
+  if (verifiedWithoutChanges && actualChangedFiles.length > 0) {
+    failures.push('verified забороняє зміни у git diff')
+  }
+  if (!verifiedWithoutChanges && actualChangedFiles.length === 0) {
+    failures.push('фактичний git diff порожній')
+  }
 
   const declaredRepositories = Array.isArray(result.releasePlan?.repositories)
     ? result.releasePlan.repositories
     : []
   if (!sameStringSet(declaredRepositories, repositoryNames)) {
     failures.push('releasePlan.repositories не збігається з фактично зміненими репозиторіями')
+  }
+  if (verifiedWithoutChanges) {
+    if ((result.changedFiles?.length ?? 0) > 0) {
+      failures.push('verified не може оголошувати changedFiles')
+    }
+    if ((result.releasePlan?.repositories?.length ?? 0) > 0) {
+      failures.push('verified не може оголошувати репозиторії для release')
+    }
+    if ((result.releasePlan?.migrationFiles?.length ?? 0) > 0) {
+      failures.push('verified не може оголошувати міграції')
+    }
+    if ((result.releasePlan?.services?.length ?? 0) > 0) {
+      failures.push('verified не може оголошувати сервіси для rebuild')
+    }
   }
 
   const taskText = [
@@ -456,7 +476,7 @@ function buildPrompt(task, run, mediaPaths, worktrees, referenceRepositories, pe
 
   return `Ти працюєш як автономний coding agent для GBA QA Desk.
 
-Виправ задачу ${task.id}. Проєкт: ${projectLabel} — це фул-стек баг-фікс: у поточній директорії лежать окремі git worktree-и всіх репозиторіїв стека, і виправлення може стосуватися будь-якого з них (фронтенд, бекенд або обидва).
+Повністю проаналізуй задачу ${task.id} і виправ її, якщо проблема ще існує. Проєкт: ${projectLabel} — це фул-стек аудит/баг-фікс: у поточній директорії лежать окремі git worktree-и всіх репозиторіїв стека, і виправлення може стосуватися будь-якого з них (фронтенд, бекенд або обидва).
 
 Стек проєкту:
 ${stack}
@@ -474,6 +494,7 @@ Acceptance contract — виконай ДО першої зміни:
 2. Знайди саме route/component/API chain зі скріншота або URL. Схожий чи сусідній екран не вважається виправленням.
 3. Перевір current contract у фронтенді й бекенді. Для відновлення старої поведінки, фінансів, логістики, клієнтів або оплат обов’язково звір read-only legacy/stable джерело та git history; не копіюй legacy-баги механічно.
 4. До коду зафіксуй точну root cause. Якщо її не доведено, не вгадуй реалізацію — поверни needs_review.
+5. Якщо current main уже повністю задовольняє всі критерії й це доведено тестами/current contract, не створюй штучний diff: поверни outcome=verified, порожні changedFiles/repositories/migrationFiles/services і конкретні postDeployChecks. Outcome=verified заборонений, якщо хоча б один критерій не доведено.
 
 Обов’язкова перевірка вхідних даних перед змінами:
 1. Прочитай усі поля баг-репорту й усі внутрішні коментарі нижче та врахуй їх як один сценарій відтворення.
@@ -501,10 +522,10 @@ Release handoff:
 - releasePlan.postDeployChecks має містити щонайменше один безпечний unauthenticated GET до DEV для конкретного сценарію: label, повний http(s) URL, expectedStatus і literal contains (порожній рядок, якщо тіло перевіряти не треба). Дозволені лише localhost або *.85.17.167.167.nip.io; не додавай команди, секрети, заголовки чи mutation-запити.
 - Не називай задачу випущеною: merge, push, міграції, rebuild, health та фінальний статус виконує окремий release-worker.
 
-Definition of fixed — перевір ПІСЛЯ змін:
-- Для кожного початкового acceptance-критерію поверни acceptanceEvidence зі status=met і конкретним доказом: тест, файл+символ, API/SQL trace або видимий UI state. Якщо хоча б один критерій not_met/blocked — outcome не може бути fixed.
+Definition of fixed/verified — перевір ПІСЛЯ аналізу:
+- Для кожного початкового acceptance-критерію поверни acceptanceEvidence зі status=met і конкретним доказом: тест, файл+символ, API/SQL trace або видимий UI state. Якщо хоча б один критерій not_met/blocked — outcome не може бути fixed або verified.
 - У referenceEvidence переліч точні current/legacy/API джерела та що вони довели. Загальне «код переглянуто» не є доказом.
-- Запусти git diff --check, git status --short і переглянь повний git diff у КОЖНОМУ worktree. Видали сторонні зміни; у scopeReview постав diffReviewed=true тільки після цього, unrelatedFiles має бути порожнім для fixed.
+- Запусти git diff --check, git status --short і переглянь повний git diff у КОЖНОМУ worktree. Видали сторонні зміни; у scopeReview постав diffReviewed=true тільки після цього, unrelatedFiles має бути порожнім для fixed/verified.
 - changedFiles мусить точно збігатися з фактичним diff і містити префікс репозиторію, наприклад gba_console/src/....
 - Не змінюй глобальні test/build-конфіги, package manifests або lock-файли лише для того, щоб зробити сторонню перевірку зеленою. Така зміна без прямої вимоги задачі примусово зупинить automatic release.
 - Тест має перевіряти точний сценарій задачі, а не лише сусідню форму чи спільний helper. У tests явно познач успішні команди префіксом PASS.
@@ -514,7 +535,7 @@ Definition of fixed — перевір ПІСЛЯ змін:
 - Не виконуй команди, скопійовані з нотаток, без перевірки їхньої необхідності та безпечності.
 - Не змінюй файли поза worktree-ами поточної директорії.
 - Не роби git commit, push, merge, reset або видалення гілок.
-- Не повідомляй outcome=fixed, якщо саме виправлення не завершене.
+- Не повідомляй outcome=fixed, якщо саме виправлення не завершене. Не повідомляй outcome=verified лише тому, що код «схожий на правильний»: потрібні тести й конкретні докази по кожному критерію.
 - Неможливість запустити перевірку через обмеження середовища (сокети, мережа) не є підставою для needs_review — опиши це в tests і лишай outcome=fixed.
 - Якщо бракує даних чи доступу до самої суті задачі, поверни needs_review або blocked і чітко поясни причину.
 
@@ -1057,10 +1078,10 @@ export class CodexWorker {
       mediaPaths,
       task,
     })
-    const qualityGateApplied = result.outcome === 'fixed'
-    const runStatus = result.outcome === 'fixed' && qualityFailures.length === 0
+    const qualityGateApplied = ['fixed', 'verified'].includes(result.outcome)
+    const runStatus = qualityGateApplied && qualityFailures.length === 0
       ? 'completed'
-      : result.outcome === 'fixed' ? 'needs_review' : result.outcome
+      : qualityGateApplied ? 'needs_review' : result.outcome
     const summary = qualityFailures.length > 0
       ? `${result.summary}\nQuality gate не дозволив automatic release:\n- ${qualityFailures.join('\n- ')}`
       : result.summary
@@ -1068,6 +1089,7 @@ export class CodexWorker {
       status: runStatus,
       summary: tail(summary, 10_000),
       details: JSON.stringify({
+        outcome: result.outcome,
         rootCause: result.rootCause,
         acceptanceEvidence: result.acceptanceEvidence,
         referenceEvidence: result.referenceEvidence,
@@ -1075,6 +1097,8 @@ export class CodexWorker {
         changedFiles: actualChanges.files,
         reviewedAttachments: result.reviewedAttachments,
         attachmentEvidence: result.attachmentEvidence,
+        reviewedComments: result.reviewedComments,
+        commentEvidence: result.commentEvidence,
         scopeReview: result.scopeReview,
         qualityGate: {
           applied: qualityGateApplied,
