@@ -6,6 +6,7 @@ import path from 'node:path'
 import test from 'node:test'
 import {
   CodexWorker,
+  codexRetryableInfrastructureFailureKind,
   codexExecutionFailureReason,
   collectWorktreeChanges,
   fixedResultQualityFailures,
@@ -57,6 +58,24 @@ test('Codex worker розпізнає лише retryable втрату сесії
   assert.equal(isMissingCodexSessionFailure({ code: 1, stderr: 'tests failed', stdout: '' }), false)
   assert.equal(isMissingCodexSessionFailure({ code: 0, stderr: 'thread not found', stdout: '' }), false)
   assert.equal(isMissingCodexSessionFailure({ code: 1, timedOut: true, stderr: 'thread not found', stdout: '' }), false)
+})
+
+test('Codex worker один раз відновлюється після відомого пошкодження models cache', () => {
+  const cacheFailure = {
+    code: 1,
+    stderr: 'ERROR codex_models_manager::cache: failed to load models cache: missing field `base_instructions` at line 97 column 5',
+    stdout: '',
+  }
+  assert.equal(codexRetryableInfrastructureFailureKind(cacheFailure), 'models-cache')
+  assert.equal(
+    codexRetryableInfrastructureFailureKind({ code: 1, stderr: 'thread 123 not found', stdout: '' }),
+    'session',
+  )
+  assert.equal(
+    codexRetryableInfrastructureFailureKind({ code: 1, stderr: 'compile failed', stdout: '' }),
+    '',
+  )
+  assert.equal(codexRetryableInfrastructureFailureKind({ ...cacheFailure, code: 0 }), '')
 })
 
 test('worker image має локальні інструменти для коду й усіх дозволених форматів доказів', async () => {

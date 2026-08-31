@@ -131,6 +131,14 @@ export function isMissingCodexSessionFailure(execution) {
     .test(`${execution.stderr}\n${execution.stdout}`)
 }
 
+export function codexRetryableInfrastructureFailureKind(execution) {
+  if (!execution || execution.timedOut || execution.code === 0) return ''
+  if (isMissingCodexSessionFailure(execution)) return 'session'
+  if (/codex_models_manager::(?:cache|manager): failed to (?:load models cache|renew cache TTL): missing field [`']base_instructions/i
+    .test(`${execution.stderr}\n${execution.stdout}`)) return 'models-cache'
+  return ''
+}
+
 function safeTaskSlug(taskId) {
   return taskId.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-|-$/g, '')
 }
@@ -1170,13 +1178,16 @@ export class CodexWorker {
     }
 
     let execution = await invokeCodex(run.codexSessionId)
+    const retryableFailureKind = codexRetryableInfrastructureFailureKind(execution)
     if (
       !stopControl
       && !this.stopping
-      && isMissingCodexSessionFailure(execution)
+      && retryableFailureKind
     ) {
-      const sessionKind = run.codexSessionId ? 'попередню' : 'поточну'
-      console.log(`[Codex worker] ${task.id}: ${sessionKind} Codex-сесію втрачено, запускаємо одну нову спробу з тим самим контекстом`)
+      const failureLabel = retryableFailureKind === 'models-cache'
+        ? 'пошкоджено кеш моделей Codex'
+        : `${run.codexSessionId ? 'попередню' : 'поточну'} Codex-сесію втрачено`
+      console.log(`[Codex worker] ${task.id}: ${failureLabel}, запускаємо одну нову спробу з тим самим контекстом`)
       this.store.updateAgentRun(run.id, { codexSessionId: '' })
       await rm(resultPath, { force: true })
       execution = await invokeCodex('')
