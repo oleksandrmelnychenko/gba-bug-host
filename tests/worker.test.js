@@ -85,6 +85,11 @@ test('worker image має локальні інструменти для код�
   }
 })
 
+test('worker image не використовує Codex, несумісний зі спільним host models cache', async () => {
+  const dockerfile = await readFile(new URL('../Dockerfile', import.meta.url), 'utf8')
+  assert.match(dockerfile, /ARG CODEX_VERSION=0\.150\.1\b/)
+})
+
 test('server worker отримує обов’язковий RTK proxy лише для читання', async () => {
   const compose = await readFile(new URL('../docker-compose.yml', import.meta.url), 'utf8')
   assert.match(compose, /\$\{RTK_HOST_PATH:\?Set RTK_HOST_PATH\}:\/usr\/local\/bin\/rtk:ro/)
