@@ -764,6 +764,27 @@ test('HTML live-check звіряє текст без хибного падінн
   assert.equal(result.evidence[0].passed, true)
 })
 
+test('HTML live-check слідує канонічному redirect і звіряє видимий React SSR текст', async () => {
+  const worker = new ReleaseWorker({
+    processRunner: async (command, args) => {
+      assert.equal(command, 'curl')
+      assert.equal(args.includes('-L'), true)
+      assert.deepEqual(args.slice(args.indexOf('--max-redirs'), args.indexOf('--max-redirs') + 2), ['--max-redirs', '3'])
+      return { code: 0, output: '<p>0<!-- -->/<!-- -->450</p>\n200' }
+    },
+  })
+
+  const result = await worker.verifyPostDeployChecks([{
+    label: 'shop comment limit',
+    url: 'https://shop-dev.85.17.167.167.nip.io/uk/fast-delivery/example',
+    expectedStatus: 200,
+    contains: '0/450',
+  }])
+
+  assert.equal(result.ok, true)
+  assert.equal(result.evidence[0].passed, true)
+})
+
 test('live-check нормалізує старий публічний nip.io vhost до актуального DEV https без довільного redirect', async () => {
   let requestedUrl = ''
   const worker = new ReleaseWorker({

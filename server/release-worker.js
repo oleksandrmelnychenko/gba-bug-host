@@ -1147,16 +1147,17 @@ export class ReleaseWorker {
       const resolvedUrl = requestUrl.toString()
       const result = await this.runProcess(
         'curl',
-        ['-sS', '--max-time', '20', '--retry', '2', '--retry-delay', '2', '-w', '\n%{http_code}', resolvedUrl],
+        ['-sS', '-L', '--max-redirs', '3', '--max-time', '20', '--retry', '2', '--retry-delay', '2', '-w', '\n%{http_code}', resolvedUrl],
         { timeoutMs: 60_000 },
       )
       const split = result.output.lastIndexOf('\n')
       const body = split >= 0 ? result.output.slice(0, split) : ''
+      const visibleBody = body.replace(/<!--[\s\S]*?-->/g, '')
       const status = Number.parseInt(split >= 0 ? result.output.slice(split + 1).trim() : '', 10)
       const expectedContent = check.contains?.toLocaleLowerCase() ?? ''
       const passed = result.code === 0
         && status === check.expectedStatus
-        && (!expectedContent || body.toLocaleLowerCase().includes(expectedContent))
+        && (!expectedContent || visibleBody.toLocaleLowerCase().includes(expectedContent))
       evidence.push({
         label: check.label,
         url: check.url,
