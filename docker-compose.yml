@@ -48,6 +48,9 @@ services:
       CODEX_HOME: /app/codex-home
       CODEX_NETWORK_ACCESS: "${CODEX_NETWORK_ACCESS:-false}"
       CODEX_JOB_TIMEOUT_MS: "${CODEX_JOB_TIMEOUT_MS:-2700000}"
+      # Keep audits deep without inheriting a host-wide max/ultra setting that
+      # can spend the whole job timeout before the first repository check.
+      CODEX_REASONING_EFFORT: "${CODEX_REASONING_EFFORT:-high}"
       # Coding mutations are deliberately serialized. Parallel max-reasoning
       # runs caused timeout/resource contention and weaker cross-task isolation.
       CODEX_CONCURRENCY: "1"

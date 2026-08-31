@@ -296,6 +296,18 @@ export function normalizeWorkerConcurrency() {
   return 1
 }
 
+const supportedReasoningEfforts = new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra'])
+
+export function normalizeCodexReasoningEffort(value) {
+  const normalized = String(value ?? '').trim().toLowerCase()
+  if (!supportedReasoningEfforts.has(normalized)) {
+    throw new Error(
+      'CODEX_REASONING_EFFORT має бути одним із: low, medium, high, xhigh, max, ultra.',
+    )
+  }
+  return normalized
+}
+
 const globalToolingFilePattern = /(?:^|\/)(?:Dockerfile|docker-compose[^/]*\.ya?ml|eslint\.config\.[^/]+|package(?:-lock)?\.json|playwright\.config\.[^/]+|tsconfig(?:\.[^/]+)?\.json|vite\.config\.[^/]+|vitest\.config\.[^/]+)$/i
 const toolingTaskPattern = /\b(?:build|ci|docker|eslint|npm|playwright|test|testing|tsconfig|vite|vitest)\b|збірк|конфіг|тест|інфраструктур|залежност/i
 
@@ -582,6 +594,7 @@ export class CodexWorker {
     worktreesDirectory = process.env.CODEX_WORKTREES_DIR ?? path.join(dataDirectory, 'agent-worktrees'),
     codexBinary = process.env.CODEX_BIN ?? 'codex',
     model = process.env.CODEX_MODEL ?? '',
+    reasoningEffort = process.env.CODEX_REASONING_EFFORT ?? 'high',
     buildNumber = process.env.APP_BUILD_NUMBER ?? '0.1.0-local',
     pollIntervalMs = Number.parseInt(process.env.CODEX_POLL_INTERVAL_MS ?? '1500', 10),
     timeoutMs = Number.parseInt(process.env.CODEX_JOB_TIMEOUT_MS ?? String(45 * 60 * 1000), 10),
@@ -613,6 +626,7 @@ export class CodexWorker {
     this.worktreesDirectory = path.resolve(worktreesDirectory)
     this.codexBinary = codexBinary
     this.model = model
+    this.reasoningEffort = normalizeCodexReasoningEffort(reasoningEffort)
     this.buildNumber = buildNumber
     this.pollIntervalMs = requirePositiveMilliseconds('CODEX_POLL_INTERVAL_MS', pollIntervalMs)
     this.timeoutMs = requirePositiveMilliseconds('CODEX_JOB_TIMEOUT_MS', timeoutMs)
@@ -1084,6 +1098,7 @@ export class CodexWorker {
         '--skip-git-repo-check',
         '-c', 'approval_policy="never"',
         '-c', `sandbox_workspace_write.network_access=${this.networkAccess}`,
+        '-c', `model_reasoning_effort="${this.reasoningEffort}"`,
         '--output-schema', schemaPath,
         '--output-last-message', resultPath,
         ...(this.model ? ['--model', this.model] : []),

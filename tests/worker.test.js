@@ -9,6 +9,7 @@ import {
   codexExecutionFailureReason,
   collectWorktreeChanges,
   fixedResultQualityFailures,
+  normalizeCodexReasoningEffort,
   normalizeWorkerConcurrency,
   terminateProcessTree,
 } from '../server/codex-worker.js'
@@ -33,6 +34,20 @@ test('Codex worker примусово нормалізує будь-яку ко�
   assert.equal(normalizeWorkerConcurrency('3'), 1)
   assert.equal(normalizeWorkerConcurrency('20'), 1)
   assert.equal(normalizeWorkerConcurrency('invalid'), 1)
+})
+
+test('Codex worker використовує лише явний підтримуваний reasoning effort', () => {
+  assert.equal(normalizeCodexReasoningEffort(' HIGH '), 'high')
+  assert.equal(normalizeCodexReasoningEffort('xhigh'), 'xhigh')
+  assert.equal(normalizeCodexReasoningEffort('max'), 'max')
+  assert.throws(
+    () => normalizeCodexReasoningEffort(''),
+    /CODEX_REASONING_EFFORT/,
+  )
+  assert.throws(
+    () => normalizeCodexReasoningEffort('unbounded'),
+    /CODEX_REASONING_EFFORT/,
+  )
 })
 
 test('worker image має локальні інструменти для коду й усіх дозволених форматів доказів', async () => {
