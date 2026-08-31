@@ -9,6 +9,7 @@ import {
   codexExecutionFailureReason,
   collectWorktreeChanges,
   fixedResultQualityFailures,
+  isMissingCodexSessionFailure,
   normalizeCodexReasoningEffort,
   normalizeWorkerConcurrency,
   terminateProcessTree,
@@ -48,6 +49,14 @@ test('Codex worker використовує лише явний підтриму
     () => normalizeCodexReasoningEffort('unbounded'),
     /CODEX_REASONING_EFFORT/,
   )
+})
+
+test('Codex worker розпізнає лише retryable втрату сесії', () => {
+  assert.equal(isMissingCodexSessionFailure({ code: 1, stderr: 'thread 123 not found', stdout: '' }), true)
+  assert.equal(isMissingCodexSessionFailure({ code: 1, stderr: '', stdout: 'No rollout found for session' }), true)
+  assert.equal(isMissingCodexSessionFailure({ code: 1, stderr: 'tests failed', stdout: '' }), false)
+  assert.equal(isMissingCodexSessionFailure({ code: 0, stderr: 'thread not found', stdout: '' }), false)
+  assert.equal(isMissingCodexSessionFailure({ code: 1, timedOut: true, stderr: 'thread not found', stdout: '' }), false)
 })
 
 test('worker image має локальні інструменти для коду й усіх дозволених форматів доказів', async () => {
@@ -766,6 +775,10 @@ for await (const chunk of process.stdin) prompt += chunk
 appendFileSync(historyPath, JSON.stringify(args) + '\\n', 'utf8')
 writeFileSync(\`prompt-\${count}.txt\`, prompt, 'utf8')
 process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: '${sessionId}' }) + '\\n')
+if (count === 3) {
+  process.stderr.write('thread ${sessionId} not found\\n')
+  process.exit(1)
+}
 writeFileSync(outputPath, JSON.stringify({
   outcome: 'fixed',
   summary: \`Виправлення \${count} готове.\`,
@@ -856,6 +869,18 @@ writeFileSync(outputPath, JSON.stringify({
       'review_again',
     )
     assert.equal(cleanSessionRun.run.codexSessionId, '')
+    await worker.processRun(store.claimNextAgentRun())
+
+    const retriedRun = store.findAgentRun('RUN-CONTEXT-3')
+    assert.notEqual(retriedRun.status, 'failed')
+    assert.equal(retriedRun.codexSessionId, sessionId)
+    const retriedInvocations = (await readFile(path.join(jobDirectory, 'codex-invocations.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line))
+    assert.equal(retriedInvocations.length, 4)
+    assert.equal(retriedInvocations[2].includes('resume'), false)
+    assert.equal(retriedInvocations[3].includes('resume'), false)
   } finally {
     store.close()
     await rm(root, { recursive: true, force: true })

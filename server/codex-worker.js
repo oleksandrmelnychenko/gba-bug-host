@@ -125,6 +125,12 @@ export function codexExecutionFailureReason(execution, timeoutMs) {
     `Codex завершився з кодом ${execution?.code ?? 'невідомо'}.`
 }
 
+export function isMissingCodexSessionFailure(execution) {
+  if (!execution || execution.timedOut || execution.code === 0) return false
+  return /(?:session|thread).*(?:not found|missing|does not exist)|no rollout found/i
+    .test(`${execution.stderr}\n${execution.stdout}`)
+}
+
 function safeTaskSlug(taskId) {
   return taskId.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-|-$/g, '')
 }
@@ -1164,14 +1170,14 @@ export class CodexWorker {
 
     let execution = await invokeCodex(run.codexSessionId)
     if (
-      run.codexSessionId
-      && !stopControl
+      !stopControl
       && !this.stopping
-      && execution.code !== 0
-      && /(?:session|thread).*(?:not found|missing|does not exist)|no rollout found/i.test(`${execution.stderr}\n${execution.stdout}`)
+      && isMissingCodexSessionFailure(execution)
     ) {
-      console.log(`[Codex worker] ${task.id}: попередню Codex-сесію не знайдено, запускаємо нову з тим самим контекстом`)
+      const sessionKind = run.codexSessionId ? 'попередню' : 'поточну'
+      console.log(`[Codex worker] ${task.id}: ${sessionKind} Codex-сесію втрачено, запускаємо одну нову спробу з тим самим контекстом`)
       this.store.updateAgentRun(run.id, { codexSessionId: '' })
+      await rm(resultPath, { force: true })
       execution = await invokeCodex('')
     }
 
