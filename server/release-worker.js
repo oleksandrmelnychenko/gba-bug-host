@@ -353,6 +353,9 @@ function validateSmokeCheck(check) {
   const allowedHost = ['127.0.0.1', 'localhost'].includes(url.hostname)
     || url.hostname.endsWith('.85.17.167.167.nip.io')
   if (!allowedHost) return `${check.label}: host не входить до DEV allowlist`
+  if (/00000000-0000-0000-0000-000000000000/i.test(url.href)) {
+    return `${check.label}: placeholder UUID заборонений у live-check, бо може викликати помилку прикладного API`
+  }
   return ''
 }
 

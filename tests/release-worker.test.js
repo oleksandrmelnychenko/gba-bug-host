@@ -672,6 +672,20 @@ test('release handoff звіряє repo/services/migrations і дозволяє 
   }, ['gba-server'], ['data-concord', 'data-analytics'], evidence, defaultRepoPlan)
   assert.equal(external.ok, false)
   assert.match(external.reason, /allowlist/)
+
+  const placeholderId = validateReleaseHandoff({
+    repositories: ['gba-server'],
+    services: ['data-concord', 'data-analytics'],
+    migrationFiles: [`gba-server:${migration}`],
+    postDeployChecks: [{
+      label: 'placeholder record',
+      url: 'https://shop-dev.85.17.167.167.nip.io/fast-delivery/00000000-0000-0000-0000-000000000000',
+      expectedStatus: 200,
+      contains: '',
+    }],
+  }, ['gba-server'], ['data-concord', 'data-analytics'], evidence, defaultRepoPlan)
+  assert.equal(placeholderId.ok, false)
+  assert.match(placeholderId.reason, /placeholder UUID/)
 })
 
 test('невалідний release handoff зупиняє задачу до тестів і merge', async () => {
