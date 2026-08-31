@@ -749,6 +749,7 @@ writeFileSync(outputPath, JSON.stringify({
     assert.match(prompt, /один ізольований повтор падіння достатній/)
     assert.match(prompt, /\/api\/v1\/\{culture\}\/\.\.\./)
     assert.match(prompt, /\/api\/v1\/uk\/clients\/get\/top/)
+    assert.match(prompt, /shop-dev.*БЕЗ префікса.*\/uk.*redirect 308/)
     assert.match(prompt, /Внутрішній legacy-коментар команди/)
     assert.match(prompt, /Окремо перевір очищення поля пошуку/)
     assert.doesNotMatch(prompt, /Це новіший коментар, який не належить RUN-TEST-1/)
