@@ -941,9 +941,9 @@ export class ReleaseWorker {
       evidence,
     })
     const stamp = new Date().toISOString()
-    const originalStatus = task.agentRun?.inputSnapshot?.status
-    const taskStatus = releaseStatusFor(task)
-      ?? (originalStatus === 'done' ? 'done' : 'ready_for_retest')
+    // Повторний доказовий аудит не підміняє людський QA навіть тоді, коли
+    // задача була закрита до кампанії. Автоматично закриваємо лише sentinel.
+    const taskStatus = releaseStatusFor(task) ?? 'ready_for_retest'
     const cleanupErrors = await this.cleanupReleasedWorktrees(task)
     await this.annotate(task, [
       `[released:${stamp}] audit-only: current main, тести й live-сценарій підтверджені; зміни коду, міграції та rebuild не знадобилися`,

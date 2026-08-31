@@ -103,7 +103,7 @@ test('після релізу закривається лише лог-зада�
   assert.equal(releaseStatusFor({ title: 'Кошик губить позицію', notes: '' }), undefined)
 })
 
-test('verified-аудит перевіряє live-сценарій без merge/rebuild і відновлює done', async () => {
+test('verified-аудит перевіряє live-сценарій без merge/rebuild і повертає людську задачу в ретест', async () => {
   const task = {
     id: 'BUG-AUDIT',
     title: 'Уже виправлений сценарій',
@@ -152,7 +152,7 @@ test('verified-аудит перевіряє live-сценарій без merge/
 
   assert.equal(task.agentRun.releaseStatus, 'released')
   assert.equal(task.agentRun.releasePhase, 'released')
-  assert.equal(task.status, 'done')
+  assert.equal(task.status, 'ready_for_retest')
   assert.equal(scenarioChecks[0].label, 'verified dev scenario')
   assert.equal(task.agentRun.releaseEvidence.auditOnly.outcome, 'verified')
   assert.deepEqual(task.agentRun.releaseEvidence.deployment.services, {})
