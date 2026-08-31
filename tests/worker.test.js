@@ -714,6 +714,8 @@ writeFileSync(outputPath, JSON.stringify({
     assert.match(prompt, /XLS читай.*xlrd/)
     assert.match(prompt, /XLSX.*openpyxl/)
     assert.match(prompt, /ffprobe.*ffmpeg/)
+    assert.match(prompt, /Не запускай одночасно кілька dotnet build\/test/)
+    assert.match(prompt, /точні тести послідовно з --no-build\/--no-restore/)
     assert.match(prompt, /Acceptance contract/)
     assert.match(prompt, /Схожий чи сусідній екран не вважається виправленням/)
     assert.match(prompt, /переглянь повний git diff/)
