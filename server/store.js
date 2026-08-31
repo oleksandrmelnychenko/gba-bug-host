@@ -941,6 +941,9 @@ export class TaskStore {
   enqueueAgentRun(id, taskId, trigger = 'manual') {
     const task = this.find(taskId)
     if (!task) return { status: 'task_not_found', run: null, created: false }
+    if (task.status === 'done') {
+      return { status: 'task_done', run: task.agentRun, created: false }
+    }
 
     // A substantive needs_review result has no releasable artifact. A new
     // evidence run supersedes that still-pending release marker atomically
@@ -1081,7 +1084,15 @@ export class TaskStore {
       if (releaseInFlight) return null
 
       const row = this.database
-        .prepare("SELECT * FROM agent_runs WHERE status = 'queued' ORDER BY queue_priority DESC, created_at ASC LIMIT 1")
+        .prepare(`
+          SELECT run.*
+          FROM agent_runs AS run
+          JOIN tasks AS task ON task.id = run.task_id
+          WHERE run.status = 'queued'
+            AND task.status <> 'done'
+          ORDER BY run.queue_priority DESC, run.created_at ASC
+          LIMIT 1
+        `)
         .get()
       if (!row) return null
 

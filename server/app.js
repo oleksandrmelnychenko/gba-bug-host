@@ -768,6 +768,10 @@ export async function createApp(options = {}) {
         response.status(404).json({ message: 'Задачу не знайдено.' })
         return
       }
+      if (result.status === 'task_done') {
+        response.status(409).json({ message: 'Закриту задачу не запускаємо повторно. Спочатку відкрийте її на повторну перевірку.' })
+        return
+      }
       if (result.status === 'release_active') {
         response.status(409).json({ message: 'Задача вже проходить release. Дочекайтеся ретесту або помилки release.' })
         return
@@ -843,6 +847,10 @@ export async function createApp(options = {}) {
       const result = await store.enqueueAgentRun(randomUUID(), request.params.id, 'manual')
       if (result.status === 'task_not_found') {
         response.status(404).json({ message: 'Задачу не знайдено.' })
+        return
+      }
+      if (result.status === 'task_done') {
+        response.status(409).json({ message: 'Закриту задачу не запускаємо повторно. Спочатку відкрийте її на повторну перевірку.' })
         return
       }
       if (result.status === 'release_active') {

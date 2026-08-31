@@ -773,7 +773,7 @@ test('coding-черга чекає фінального release-state попер
   })
 })
 
-test('ручний done завершує старий release і не блокує новий доказовий аудит', async () => {
+test('ручний done не запускає новий аудит поверх завершеної задачі', async () => {
   await withTestApp(async ({ app, store }) => {
     const created = await request(app).post('/api/tasks').field('title', 'Повторний аудит done').expect(201)
     const first = store.claimNextAgentRun('worker-old-release')
@@ -783,11 +783,11 @@ test('ручний done завершує старий release і не блоку
     })
     store.patch(created.body.id, { status: 'done' })
 
-    const response = await request(app)
+    await request(app)
       .post(`/api/tasks/${created.body.id}/agent-runs`)
-      .expect(202)
-    assert.equal(response.body.agentRun.status, 'queued')
-    assert.equal(response.body.agentRun.attempt, 2)
+      .expect(409, { message: 'Закриту задачу не запускаємо повторно. Спочатку відкрийте її на повторну перевірку.' })
+    assert.equal(store.find(created.body.id).status, 'done')
+    assert.equal(store.agentRunsForTask(created.body.id).length, 1)
   })
 })
 
@@ -1064,6 +1064,27 @@ test('фінальний release-state відхиляється без узго�
       .set('Authorization', 'Bearer test-internal-token')
       .send({ status: 'blocked', leaseOwnerId: releaseOwner, taskStatus: 'done' })
       .expect(422)
+  })
+})
+
+test('закриту задачу не можна поставити у звичайну AI-чергу', async () => {
+  await withTestApp(async ({ app, store }) => {
+    const created = await request(app).post('/api/tasks').field('title', 'Closed task').expect(201)
+    const activeRun = store.find(created.body.id).agentRun
+    store.requestStop(created.body.id)
+    await store.patch(created.body.id, { status: 'done' })
+
+    const queued = store.enqueueAgentRun('RUN-CLOSED', created.body.id, 'manual')
+    assert.equal(queued.status, 'task_done')
+    assert.equal(queued.created, false)
+    assert.equal(store.findAgentRun('RUN-CLOSED'), null)
+    assert.equal(store.claimNextAgentRun(), null)
+
+    await request(app)
+      .post(`/api/tasks/${created.body.id}/agent-runs`)
+      .expect(409, { message: 'Закриту задачу не запускаємо повторно. Спочатку відкрийте її на повторну перевірку.' })
+    assert.equal(store.find(created.body.id).status, 'done')
+    assert.equal(activeRun.id, created.body.agentRun.id)
   })
 })
 

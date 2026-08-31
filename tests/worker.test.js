@@ -555,9 +555,9 @@ writeFileSync(outputPath, JSON.stringify({
     store.transaction(() => {
       for (const task of getSeedTasks()) store.insertTask(task)
     })
-    store.patch('BUG-1049', { status: 'done' })
+    store.patch('BUG-1049', { status: 'ready_for_retest' })
     const queued = store.enqueueAgentRun('RUN-VERIFIED-1', 'BUG-1049', 'manual')
-    assert.equal(queued.run.inputSnapshot.status, 'done')
+    assert.equal(queued.run.inputSnapshot.status, 'ready_for_retest')
 
     const worker = new CodexWorker({
       store,
