@@ -801,6 +801,24 @@ writeFileSync(outputPath, JSON.stringify({
     assert.equal(invocations[1][invocations[1].indexOf('resume') + 1], '--json')
     assert.equal(invocations[1].includes(sessionId), true)
     assert.match(await readFile(path.join(jobDirectory, 'prompt-2.txt'), 'utf8'), /Перевір виправлення ще раз/)
+
+    store.updateAgentRunRelease(secondRun.id, {
+      status: 'released',
+      attempts: 1,
+      repositories: ['target'],
+      releasedAt: new Date(Date.now() + 2_000).toISOString(),
+    }, 'done')
+    store.updateAgentRun(secondRun.id, { codexSessionId: '' })
+    store.patch('BUG-1051', {
+      status: 'review_again',
+      reviewComment: 'Почни чисту сесію після втрати rollout.',
+    })
+    const cleanSessionRun = store.enqueueAgentRun(
+      'RUN-CONTEXT-3',
+      'BUG-1051',
+      'review_again',
+    )
+    assert.equal(cleanSessionRun.run.codexSessionId, '')
   } finally {
     store.close()
     await rm(root, { recursive: true, force: true })

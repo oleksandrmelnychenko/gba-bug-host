@@ -980,7 +980,7 @@ export class TaskStore {
     const previousSession = this.database
       .prepare(`
         SELECT codex_session_id FROM agent_runs
-        WHERE task_id = ? AND codex_session_id <> ''
+        WHERE task_id = ?
         ORDER BY created_at DESC LIMIT 1
       `)
       .get(taskId)
