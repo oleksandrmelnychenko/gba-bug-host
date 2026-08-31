@@ -1071,8 +1071,15 @@ test('закриту задачу не можна поставити у звич
   await withTestApp(async ({ app, store }) => {
     const created = await request(app).post('/api/tasks').field('title', 'Closed task').expect(201)
     const activeRun = store.find(created.body.id).agentRun
-    store.requestStop(created.body.id)
-    await store.patch(created.body.id, { status: 'done' })
+    await request(app)
+      .patch(`/api/tasks/${created.body.id}`)
+      .send({ status: 'done' })
+      .expect(200)
+
+    const stoppedRun = store.findAgentRun(activeRun.id)
+    assert.equal(stoppedRun.status, 'blocked')
+    assert.equal(stoppedRun.releaseStatus, 'blocked')
+    assert.equal(stoppedRun.error, 'Знято з черги, бо задачу закрито.')
 
     const queued = store.enqueueAgentRun('RUN-CLOSED', created.body.id, 'manual')
     assert.equal(queued.status, 'task_done')
@@ -1084,7 +1091,6 @@ test('закриту задачу не можна поставити у звич
       .post(`/api/tasks/${created.body.id}/agent-runs`)
       .expect(409, { message: 'Закриту задачу не запускаємо повторно. Спочатку відкрийте її на повторну перевірку.' })
     assert.equal(store.find(created.body.id).status, 'done')
-    assert.equal(activeRun.id, created.body.agentRun.id)
   })
 })
 

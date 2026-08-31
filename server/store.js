@@ -877,6 +877,17 @@ export class TaskStore {
         .run(...fields.map((field) => values[field]), updatedAt, id)
     }
 
+    if (values.status === 'done') {
+      const reason = 'Знято з черги, бо задачу закрито.'
+      this.database.prepare(`
+        UPDATE agent_runs
+        SET status = 'blocked', control = 'stop', error = ?,
+            release_status = 'blocked', release_error = ?, release_phase = 'failed',
+            finished_at = ?, updated_at = ?
+        WHERE task_id = ? AND status = 'queued'
+      `).run(reason, reason, updatedAt, updatedAt, id)
+    }
+
     return this.find(id)
   }
 
