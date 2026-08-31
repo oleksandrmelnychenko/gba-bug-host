@@ -438,6 +438,43 @@ test('quality gate дозволяє доказаний verified лише з по
   }).some((failure) => /verified забороняє зміни/.test(failure)))
 })
 
+test('quality gate окремо зараховує вкладення з однаковими назвами', () => {
+  const result = {
+    outcome: 'verified',
+    rootCause: 'Поточний main вже містить виправлення точного сценарію.',
+    acceptanceEvidence: [{ criterion: 'Сценарій працює', evidence: 'PASS regression test', status: 'met' }],
+    referenceEvidence: ['src/form.tsx — current contract'],
+    tests: ['PASS targeted regression test'],
+    changedFiles: [],
+    reviewedAttachments: ['screen.png', 'screen.png'],
+    attachmentEvidence: [
+      { name: 'screen.png (attachment 1)', observation: 'Перший файл показує стан до refresh' },
+      { name: 'screen.png (attachment 2)', observation: 'Другий файл показує стан після refresh' },
+    ],
+    reviewedComments: [],
+    commentEvidence: [],
+    scopeReview: { diffReviewed: true, unrelatedFiles: [] },
+    releasePlan: { repositories: [], migrationFiles: [], services: [], postDeployChecks: [] },
+  }
+  const context = {
+    task: { title: 'Перевірити refresh', description: 'Два скріни з однаковою назвою' },
+    mediaPaths: [{ name: 'screen.png' }, { name: 'screen.png' }],
+    actualChangedFiles: [],
+    actualRepositories: [],
+  }
+
+  assert.deepEqual(fixedResultQualityFailures(result, context), [])
+
+  const incomplete = {
+    ...result,
+    reviewedAttachments: ['screen.png'],
+    attachmentEvidence: result.attachmentEvidence.slice(0, 1),
+  }
+  const failures = fixedResultQualityFailures(incomplete, context)
+  assert.ok(failures.some((failure) => /вкладення не зафіксовано/.test(failure)))
+  assert.ok(failures.some((failure) => /немає конкретного спостереження/.test(failure)))
+})
+
 test('Codex worker зберігає verified як completed без штучного diff', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'gba-codex-verified-'))
   const targetRepository = path.join(root, 'target')

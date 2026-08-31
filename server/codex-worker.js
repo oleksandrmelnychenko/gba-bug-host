@@ -422,14 +422,26 @@ export function fixedResultQualityFailures(result, {
   const attachmentEvidence = Array.isArray(result.attachmentEvidence)
     ? result.attachmentEvidence
     : []
+  const remainingReviewedAttachments = [...reviewedAttachments]
+  const remainingAttachmentEvidence = [...attachmentEvidence]
+  const matchesAttachmentName = (candidate, name) => {
+    const value = String(candidate ?? '')
+    return value === name || value.startsWith(`${name} —`) || value.startsWith(`${name} (`)
+  }
   for (const media of mediaPaths) {
     const name = String(media.name || 'без назви')
-    if (!reviewedAttachments.some((item) => item === name || item.startsWith(`${name} —`))) {
+    const reviewedIndex = remainingReviewedAttachments.findIndex((item) => matchesAttachmentName(item, name))
+    if (reviewedIndex === -1) {
       failures.push(`вкладення не зафіксовано як переглянуте: ${name}`)
+    } else {
+      remainingReviewedAttachments.splice(reviewedIndex, 1)
     }
-    const evidence = attachmentEvidence.find((item) => item?.name === name)
-    if (!evidence || String(evidence.observation ?? '').trim().length < 3) {
+    const evidenceIndex = remainingAttachmentEvidence.findIndex((item) =>
+      matchesAttachmentName(item?.name, name) && String(item?.observation ?? '').trim().length >= 3)
+    if (evidenceIndex === -1) {
       failures.push(`немає конкретного спостереження по вкладенню: ${name}`)
+    } else {
+      remainingAttachmentEvidence.splice(evidenceIndex, 1)
     }
   }
 
