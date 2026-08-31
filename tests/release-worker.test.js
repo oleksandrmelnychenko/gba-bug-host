@@ -948,7 +948,7 @@ test('deploy failure лишає задачу retrying, а наступний у�
   assert.ok(calls[deployCallIndex].includes(' --no-deps '))
 })
 
-test('retry з уже точним healthy image не пересоздає контейнер повторно', async () => {
+test('retry з уже точним healthy image не пересоздає контейнер і віддає людську задачу в ретест', async () => {
   const task = {
     id: 'BUG-2098',
     title: 'Scenario retry without downtime',
@@ -1004,7 +1004,7 @@ test('retry з уже точним healthy image не пересоздає ко�
   await worker.releaseBatch([task])
 
   assert.equal(task.agentRun.releaseStatus, 'released')
-  assert.equal(task.status, 'in_progress')
+  assert.equal(task.status, 'ready_for_retest')
   assert.equal(calls.some((call) => call.includes(' compose ') && call.includes(' up ')), false)
 })
 

@@ -849,7 +849,11 @@ export class ReleaseWorker {
 
     const stamp = new Date().toISOString()
     const releaseTaskStatus = releaseStatusFor(task)
-    const taskStatus = releaseTaskStatus ?? task.status
+    // A successful human-task release always needs a real QA pass. The coding
+    // worker temporarily moves every claimed task to in_progress, so carrying
+    // task.status through here would strand fixed tasks there after deploy.
+    // Only sentinel/AUTO tasks are allowed to close automatically.
+    const taskStatus = releaseTaskStatus ?? 'ready_for_retest'
     const closing = releaseTaskStatus === 'done'
     const cleanupErrors = await this.cleanupReleasedWorktrees(task)
     await this.annotate(task, [
