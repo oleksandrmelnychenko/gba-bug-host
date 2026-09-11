@@ -56,7 +56,7 @@ export const defaultRepoPlan = {
     ],
   },
   'gba-server': {
-    branch: 'development',
+    branch: 'main',
     root: '/root/projects/gba-server',
     services: ['data-concord', 'data-analytics'],
     checks: [

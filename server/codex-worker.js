@@ -121,7 +121,37 @@ export function codexExecutionFailureReason(execution, timeoutMs) {
   if (execution?.timedOut) {
     return `Codex перевищив таймаут ${Math.round(timeoutMs / 60_000)} хв.`
   }
-  return execution?.stderr || execution?.stdout ||
+  // With --json, the actual API failure is on stdout; stderr can contain only
+  // "Reading prompt from stdin...". Prefer the terminal structured failure.
+  let eventError = ''
+  let turnFailure = ''
+  for (const line of `${execution?.stdout ?? ''}\n${execution?.stderr ?? ''}`.split('\n')) {
+    try {
+      const event = JSON.parse(line)
+      if (!event || !['error', 'turn.failed'].includes(event.type)) continue
+      let message = event.error?.message ?? event.message ?? event.error
+      if (typeof message !== 'string' || !message.trim()) continue
+      // Transport failures can embed a serialized API error inside message.
+      for (let depth = 0; depth < 3; depth += 1) {
+        try {
+          const nested = JSON.parse(message)
+          const detail = nested?.error?.message ?? nested?.message
+          if (typeof detail !== 'string' || !detail.trim()) break
+          message = detail
+        } catch {
+          break
+        }
+      }
+      if (event.type === 'turn.failed') turnFailure = message.trim()
+      else eventError = message.trim()
+    } catch {
+      // Non-JSON diagnostics remain available in the fallback and full log.
+    }
+  }
+  if (turnFailure || eventError) return turnFailure || eventError
+  const diagnostics = (execution?.stderr ?? '').split('\n')
+    .filter((line) => line.trim() !== 'Reading prompt from stdin...').join('\n').trim()
+  return diagnostics || execution?.stdout?.trim() ||
     `Codex завершився з кодом ${execution?.code ?? 'невідомо'}.`
 }
 
@@ -874,6 +904,9 @@ export class CodexWorker {
       if (repositoryCheck.code !== 0 || repositoryCheck.stdout.trim() !== 'true') {
         throw new Error(`Шлях не є git-репозиторієм: ${repository.repositoryPath}`)
       }
+      // Resolve once, before creating a branch, so a checkout of development in
+      // the shared repository cannot silently change the console/server baseline.
+      const baselineCommit = await this.resolveBaselineCommit(repository)
 
       if (!(await pathExists(path.join(worktreePath, '.git')))) {
         if (await pathExists(worktreePath)) {
@@ -883,12 +916,12 @@ export class CodexWorker {
         const branchCheck = await runProcess('git', ['-C', repository.repositoryPath, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`])
         const args = branchCheck.code === 0
           ? ['-C', repository.repositoryPath, 'worktree', 'add', worktreePath, branch]
-          : ['-C', repository.repositoryPath, 'worktree', 'add', '-b', branch, worktreePath, 'HEAD']
+          : ['-C', repository.repositoryPath, 'worktree', 'add', '-b', branch, worktreePath, baselineCommit]
         const added = await runProcess('git', args)
         if (added.code !== 0) throw new Error(`Не вдалося створити worktree для ${repository.name}: ${added.stderr || added.stdout}`)
       }
 
-      const baseline = await this.synchronizeWorktreeBaseline(repository, worktreePath, taskId)
+      const baseline = await this.synchronizeWorktreeBaseline(repository, worktreePath, taskId, baselineCommit)
       await materializeInstalledDependencies(repository.repositoryPath, worktreePath)
       worktrees.push({ ...repository, worktreePath, ...baseline })
     }
@@ -896,12 +929,22 @@ export class CodexWorker {
     return { branch, jobDirectory, worktrees }
   }
 
-  async synchronizeWorktreeBaseline(repository, worktreePath, taskId) {
-    const authoritative = await runProcess('git', ['-C', repository.repositoryPath, 'rev-parse', 'HEAD'])
+  async resolveBaselineCommit(repository) {
+    // Keep other project stacks unchanged; console and server share the release
+    // worker's canonical branch policy, and never fall back if main is missing.
+    const branch = ['gba_console', 'gba-server'].includes(repository.name)
+      ? defaultRepoPlan[repository.name].branch
+      : undefined
+    const ref = branch ? `refs/heads/${branch}` : 'HEAD'
+    const authoritative = await runProcess('git', ['-C', repository.repositoryPath, 'rev-parse', '--verify', `${ref}^{commit}`])
     if (authoritative.code !== 0 || !/^[0-9a-f]{40}$/i.test(authoritative.stdout.trim())) {
-      throw new Error(`Не вдалося визначити authoritative HEAD для ${repository.name}`)
+      throw new Error(`Не вдалося визначити authoritative ${ref} для ${repository.name}`)
     }
-    const baselineCommit = authoritative.stdout.trim()
+    return authoritative.stdout.trim()
+  }
+
+  async synchronizeWorktreeBaseline(repository, worktreePath, taskId, baselineCommit = undefined) {
+    baselineCommit ??= await this.resolveBaselineCommit(repository)
     const status = await runProcess('git', ['-C', worktreePath, 'status', '--porcelain'])
     if (status.code !== 0) throw new Error(`Не вдалося перевірити worktree ${repository.name}`)
     const hasWip = Boolean(status.stdout.trim())

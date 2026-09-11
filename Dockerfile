@@ -19,8 +19,8 @@ VOLUME ["/app/data", "/app/public/uploads"]
 FROM app-runtime AS worker
 # docker-compose.override.yml intentionally shares the host CODEX_HOME so
 # sessions survive worker recreates. Keep the CLI schema compatible with the
-# host cache; older 0.145.0 cannot read the cache produced by 0.150.1.
-ARG CODEX_VERSION=0.150.1
+# host cache and configured model. 0.150.1 is rejected by GPT-6 Astra.
+ARG CODEX_VERSION=0.154.0
 ARG DOTNET_CHANNEL=10.0
 ENV DOTNET_ROOT=/usr/share/dotnet
 ENV PATH=$PATH:/usr/share/dotnet

@@ -87,13 +87,52 @@ test('worker image має локальні інструменти для код�
 
 test('worker image не використовує Codex, несумісний зі спільним host models cache', async () => {
   const dockerfile = await readFile(new URL('../Dockerfile', import.meta.url), 'utf8')
-  assert.match(dockerfile, /ARG CODEX_VERSION=0\.150\.1\b/)
+  assert.match(dockerfile, /ARG CODEX_VERSION=0\.154\.0\b/)
 })
 
 test('server worker отримує обов’язковий RTK proxy лише для читання', async () => {
   const compose = await readFile(new URL('../docker-compose.yml', import.meta.url), 'utf8')
   assert.match(compose, /\$\{RTK_HOST_PATH:\?Set RTK_HOST_PATH\}:\/usr\/local\/bin\/rtk:ro/)
 })
+
+for (const name of ['gba_console', 'gba-server']) {
+  test(`${name}: нові й повторні задачі базуються на main, навіть коли checkout на development`, async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'gba-worker-main-'))
+    const repository = path.join(root, name)
+    await mkdir(repository)
+    git(repository, 'init', '-b', 'main')
+    git(repository, 'config', 'user.email', 'worker-test@example.com')
+    git(repository, 'config', 'user.name', 'Worker Test')
+    await writeFile(path.join(repository, 'app.txt'), 'main\n')
+    git(repository, 'add', '.')
+    git(repository, 'commit', '-m', 'Main fixture')
+    const main = git(repository, 'rev-parse', 'HEAD')
+    git(repository, 'switch', '-c', 'development')
+    await writeFile(path.join(repository, 'dev-only.txt'), 'not a task baseline\n')
+    git(repository, 'add', '.')
+    git(repository, 'commit', '-m', 'Development fixture')
+    const development = git(repository, 'rev-parse', 'HEAD')
+    const worker = new CodexWorker({ store: {}, rootDirectory: root, dataDirectory: root,
+      uploadsDirectory: root, targetRepository: repository, worktreesDirectory: path.join(root, 'tasks') })
+    const stack = [{ name, repositoryPath: repository }]
+    try {
+      const first = await worker.ensureWorktrees('BUG-MAIN', stack)
+      assert.equal(first.worktrees[0].baselineCommit, main)
+      assert.equal(git(first.worktrees[0].worktreePath, 'rev-parse', 'HEAD'), main)
+      await assert.rejects(stat(path.join(first.worktrees[0].worktreePath, 'dev-only.txt')), { code: 'ENOENT' })
+      const second = await worker.ensureWorktrees('BUG-MAIN', stack)
+      assert.equal(second.worktrees[0].baselineCommit, main)
+      assert.equal(git(second.worktrees[0].worktreePath, 'rev-parse', 'HEAD'), main)
+      assert.equal(git(repository, 'branch', '--show-current'), 'development')
+      assert.equal(git(repository, 'rev-parse', 'HEAD'), development)
+      git(repository, 'branch', '-m', 'main', 'archived-main')
+      await assert.rejects(worker.ensureWorktrees('BUG-NO-MAIN', stack), /refs\/heads\/main/)
+      await assert.rejects(stat(path.join(root, 'tasks', 'bug-no-main', name)), { code: 'ENOENT' })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+}
 
 test('повторний аудит fast-forward-ить чистий task-worktree до authoritative HEAD', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'gba-codex-baseline-ff-'))
@@ -327,6 +366,33 @@ test('Codex worker не маскує timeout успішним exit code без r
     codexExecutionFailureReason({ code: 0, timedOut: false, stdout: '', stderr: '' }, 90 * 60_000),
     null,
   )
+})
+
+test('Codex worker показує terminal JSON error замість stdin notice', () => {
+  const message = "The 'gpt-6-astra' model requires a newer version of Codex."
+  assert.equal(codexExecutionFailureReason({
+    code: 1,
+    stderr: 'Reading prompt from stdin...\n',
+    stdout: [
+      JSON.stringify({ type: 'thread.started', thread_id: 'test-thread' }),
+      JSON.stringify({ type: 'error', message: 'Retrying connection' }),
+      JSON.stringify({ type: 'turn.failed', error: { message } }),
+      JSON.stringify({ type: 'error', message: 'Cleanup diagnostic' }),
+    ].join('\n'),
+  }, 1000), message)
+})
+
+test('Codex worker handles JSON error-only output and plain diagnostic fallbacks', () => {
+  for (const [stdout, stderr, expected] of [
+    [JSON.stringify({ type: 'error', message: 'Model unavailable' }), 'Reading prompt from stdin...\n', 'Model unavailable'],
+    [JSON.stringify({ type: 'turn.failed', error: { message: JSON.stringify({ type: 'error', status: 400, error: { message: 'Please upgrade Codex.' } }) } }), 'Reading prompt from stdin...\n', 'Please upgrade Codex.'],
+    ['Malformed JSON\nnull\n{}', 'Reading prompt from stdin...\nCLI failed\n', 'CLI failed'],
+    ['API failed', 'Reading prompt from stdin...\n', 'API failed'],
+    ['', 'Reading prompt from stdin...\n', 'Codex завершився з кодом 1.'],
+    [JSON.stringify({ type: 'turn.failed', error: { message: {} } }), 'fallback', 'fallback'],
+  ]) {
+    assert.equal(codexExecutionFailureReason({ code: 1, stdout, stderr }, 1000), expected)
+  }
 })
 
 test('зупинка detached Codex надсилає сигнал усій process group', () => {
@@ -1013,7 +1079,7 @@ test('Codex worker ізолює залежності у worktree і диктує
   await mkdir(repository, { recursive: true })
   await mkdir(uploadsDirectory, { recursive: true })
 
-  git(repository, 'init')
+  git(repository, 'init', '-b', 'main')
   git(repository, 'config', 'user.email', 'worker-test@example.com')
   git(repository, 'config', 'user.name', 'Worker Test')
   await writeFile(path.join(repository, 'app.txt'), 'before\n', 'utf8')
