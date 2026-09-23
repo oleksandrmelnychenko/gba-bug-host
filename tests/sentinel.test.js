@@ -6,6 +6,7 @@ import {
   fingerprintGroup,
   isBelowErrorLevel,
   isContinuationLine,
+  isRecordStart,
   normalizeForFingerprint,
   parseContainerSpec,
   parseIgnorePatterns,
@@ -67,6 +68,41 @@ test('колектор поважає ignore-патерни', async () => {
 
   assert.equal(groups.length, 1)
   assert.match(groups[0][0], /справжня/)
+})
+
+test('колектор зберігає деталі винятку без стандартного префікса продовження', () => {
+  const groups = []
+  const collector = new ErrorGroupCollector({
+    matcher: /\bERROR\b/,
+    quietMs: 5,
+    onGroup: (group) => groups.push(group),
+  })
+
+  collector.feed('16:43:01.782 ERROR [5c81e9ce] SearchSyncHealthProbe | Elasticsearch product readiness probe failed ')
+  collector.feed('System.Net.Http.HttpRequestException')
+  collector.feed('Connection refused (elasticsearch:9200)')
+  collector.feed('Void MoveNext()')
+  collector.feed('16:43:02.043 ERROR [5c81e9ce] DefaultHealthCheckService | Health check search-index failed')
+  collector.flush()
+  collector.feed('[ERROR][21.09.2026 16:49:49][Thread 0003][akka://MainSystem/user/TaxFrees] TaxFree document publication recovery failed.')
+  collector.feed('Cause: Microsoft.Data.SqlClient.SqlException (0x80131904): A network-related error occurred')
+  collector.feed('[INFO][21.09.2026 16:49:50][Thread 0004][akka://MainSystem/user] ok')
+  collector.flush()
+
+  assert.equal(groups.length, 3)
+  assert.deepEqual(groups[0].slice(2), ['Connection refused (elasticsearch:9200)', 'Void MoveNext()'])
+  assert.equal(groups[1].length, 1)
+  assert.match(groups[2][1], /^Cause: .*SqlException/)
+  assert.equal(groups[2].length, 2)
+})
+
+test('початок нового запису логу розпізнається', () => {
+  assert.equal(isRecordStart('12:00:00.000 ERROR Boom'), true)
+  assert.equal(isRecordStart('[ERROR][21.09.2026 16:49:49][Thread 0003] x'), true)
+  assert.equal(isRecordStart('2026-09-21T16:43:00.755Z INFO ok'), true)
+  assert.equal(isRecordStart('ERROR справжня нова помилка'), true)
+  assert.equal(isRecordStart('Connection refused (elasticsearch:9200)'), false)
+  assert.equal(isRecordStart('Cause: System.InvalidOperationException: x'), false)
 })
 
 test('продовження стеку розпізнається', () => {

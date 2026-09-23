@@ -33,6 +33,12 @@ export function isContinuationLine(line) {
   return /^(at |Caused by|--->?|System\.|Microsoft\.|GBA\.|Global\.|Akka\.|Npgsql\.|Elastic|[})\]]|\.{3}|Error:|TypeError|ReferenceError|Object |innerException)/i.test(line)
 }
 
+const RECORD_START_PATTERN = /^(?:\[?\d[\d:.,\-/TZ ]*\]?\s*)?\[?(?:ERROR|FATAL|CRITICAL|WARN|WARNING|INFO|DEBUG|TRACE|VERBOSE|FAIL|DBUG|TRCE|CRIT)\b/i
+
+export function isRecordStart(line) {
+  return RECORD_START_PATTERN.test(line)
+}
+
 const NON_ERROR_LEVEL_PATTERN = /(?:^|[|\]\s])(?:WARN|WARNING|INFO|DEBUG|TRACE|VERBOSE)(?:\b|\s)/
 
 export function isBelowErrorLevel(line) {
@@ -53,7 +59,7 @@ export class ErrorGroupCollector {
 
   feed(line) {
     if (this.pending) {
-      if (this.pending.length < this.maxLines && isContinuationLine(line)) {
+      if (this.pending.length < this.maxLines && (isContinuationLine(line) || !isRecordStart(line))) {
         this.pending.push(line)
         this.armTimer()
         return
