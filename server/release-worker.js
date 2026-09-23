@@ -11,6 +11,12 @@ const SENTINEL_MARKER = /\[sentinel:[0-9a-f]{12}\]/
 const MAX_RELEASE_ATTEMPTS = 3
 const DEFAULT_PROCESS_TIMEOUT_MS = 45 * 60 * 1000
 const COMPOSE_ARGS = ['compose', '-p', 'gba-dev', '-f', 'docker-compose.yml', '-f', 'docker-compose.dev.yml', '--env-file', '.env.dev']
+const REPOSITORY_BUILD_CONTEXT_ENV = {
+  gba_console: 'GBA_CONSOLE_BUILD_CONTEXT',
+  'gba-server': 'GBA_SERVER_BUILD_CONTEXT',
+  gba_ecommerce: 'GBA_ECOMMERCE_BUILD_CONTEXT',
+  'gba-ecommerce-api': 'GBA_ECOMMERCE_API_BUILD_CONTEXT',
+}
 const REPOSITORY_SHA_ENV = {
   gba_console: 'GBA_CONSOLE_GIT_SHA',
   'gba-server': 'GBA_SERVER_GIT_SHA',
@@ -490,6 +496,8 @@ export class ReleaseWorker {
     processRunner = runProcess,
     internalApiToken = process.env.QA_DESK_INTERNAL_API_TOKEN ?? '',
     probes = serviceProbes,
+    mainlineSource = process.env.RELEASE_MAINLINE_SOURCE ?? 'local',
+    buildWorktreesDirectory = process.env.RELEASE_BUILD_WORKTREES_DIR ?? '/root/projects/gba-release-worktrees/build',
   } = {}) {
     this.deskBaseUrl = deskBaseUrl.replace(/\/$/, '')
     this.worktreesDirectory = worktreesDirectory
@@ -504,12 +512,64 @@ export class ReleaseWorker {
     this.runProcess = processRunner
     this.internalApiToken = internalApiToken
     this.probes = probes
+    this.originMainline = mainlineSource === 'origin'
+    this.buildWorktreesDirectory = buildWorktreesDirectory
+    this.lastOriginFetchAt = 0
     this.busy = false
     this.leaseStarted = false
     this.leaseHeld = false
     this.activeMutationChild = null
     this.stopped = false
     this.firstSeenAt = new Map()
+  }
+
+  mainlineRef(plan) {
+    return this.originMainline ? `refs/remotes/origin/${plan.branch}` : plan.branch
+  }
+
+  buildRoot(repo) {
+    return this.originMainline ? path.join(this.buildWorktreesDirectory, repo) : this.repoPlan[repo].root
+  }
+
+  async fetchMainlines({ force = false } = {}) {
+    if (!this.originMainline) return { ok: true }
+    if (!force && Date.now() - this.lastOriginFetchAt < 60_000) return { ok: true }
+    for (const [repo, plan] of Object.entries(this.repoPlan)) {
+      const fetched = await this.runMutation('git', ['-C', plan.root, 'fetch', '--quiet', 'origin', `+refs/heads/${plan.branch}:refs/remotes/origin/${plan.branch}`], {})
+      if (fetched.code !== 0) return { ok: false, reason: `${repo}: git fetch origin ${plan.branch} не вдався: ${fetched.output.slice(-300)}` }
+    }
+    this.lastOriginFetchAt = Date.now()
+    return { ok: true }
+  }
+
+  async resolveMainlineCommit(plan) {
+    const head = await this.runProcess('git', ['-C', plan.root, 'rev-parse', this.originMainline ? this.mainlineRef(plan) : 'HEAD'], {})
+    return /\b[0-9a-f]{40}\b/.exec(head.output)?.[0]
+  }
+
+  async ensureBuildWorktree(repo, commit) {
+    const plan = this.repoPlan[repo]
+    const root = this.buildRoot(repo)
+    if (!(await pathExists(path.join(root, '.git')))) {
+      await this.runMutation('git', ['-C', plan.root, 'worktree', 'prune'], {})
+      const added = await this.runMutation('git', ['-C', plan.root, 'worktree', 'add', '--detach', '--force', root, commit], {})
+      if (added.code !== 0) return { ok: false, reason: `${repo}: не вдалося створити build worktree: ${added.output.slice(-300)}` }
+    } else {
+      const checkedOut = await this.runMutation('git', ['-C', root, 'checkout', '--quiet', '--detach', '--force', commit], {})
+      if (checkedOut.code !== 0) return { ok: false, reason: `${repo}: build worktree не перейшов на ${commit}: ${checkedOut.output.slice(-300)}` }
+      const cleaned = await this.runMutation('git', ['-C', root, 'clean', '-fdq'], {})
+      if (cleaned.code !== 0) return { ok: false, reason: `${repo}: build worktree не очищено` }
+    }
+    return { ok: true, root }
+  }
+
+  async fastForwardMainCheckout(item) {
+    if (!this.originMainline) return
+    const checkedOut = await this.runProcess('git', ['-C', item.plan.root, 'symbolic-ref', '--quiet', '--short', 'HEAD'], {})
+    if (checkedOut.code !== 0 || checkedOut.output.trim() !== item.plan.branch) return
+    const dirty = await this.runProcess('git', ['-C', item.plan.root, 'status', '--porcelain', '--untracked-files=no'], {})
+    if (dirty.code !== 0 || dirty.output.split('\n').some((line) => line.trim())) return
+    await this.runMutation('git', ['-C', item.plan.root, 'merge', '--ff-only', '--quiet', item.commit], {})
   }
 
   requestHeaders(additional = {}) {
@@ -644,6 +704,8 @@ export class ReleaseWorker {
       if (!response.ok) throw new Error(`desk → ${response.status}`)
       const tasks = await response.json()
       await this.recoverReleasedWorktreeCleanup(tasks)
+      const fetched = await this.fetchMainlines()
+      if (!fetched.ok) console.error(`[release] ${fetched.reason}`)
       const candidates = selectReleasableTasks(tasks)
       if (candidates.length === 0) {
         this.firstSeenAt.clear()
@@ -1007,7 +1069,7 @@ export class ReleaseWorker {
       // могли reset/restore/replace. Повторно використовуємо лише green test
       // gate, але ніколи не mutation proof БД.
       const result = await this.runMutation(migration.command, migration.args, {
-        cwd: this.repoPlan[repo].root,
+        cwd: this.buildRoot(repo),
         timeoutMs: migration.timeoutMs,
       })
       migrationEvidence.applied[repo] = {
@@ -1034,6 +1096,7 @@ export class ReleaseWorker {
     for (const [repo, variable] of Object.entries(REPOSITORY_SHA_ENV)) {
       const commit = repositoryEvidence?.[repo]?.commit
       if (commit) env[variable] = commit
+      if (commit && this.originMainline) env[REPOSITORY_BUILD_CONTEXT_ENV[repo]] = this.buildRoot(repo)
     }
     return env
   }
@@ -1043,6 +1106,18 @@ export class ReleaseWorker {
       const plan = this.repoPlan[repo]
       const expectedCommit = repositoryEvidence?.[repo]?.commit ?? ''
       if (!plan || !expectedCommit) return { ok: false, reason: `${repo}: немає published SHA для build context` }
+      if (this.originMainline) {
+        const build = await this.ensureBuildWorktree(repo, expectedCommit)
+        if (!build.ok) return { ok: false, reason: build.reason }
+        const buildHead = await this.runProcess('git', ['-C', build.root, 'rev-parse', 'HEAD'], {})
+        const buildCommit = /\b[0-9a-f]{40}\b/.exec(buildHead.output)?.[0] ?? ''
+        if (buildCommit !== expectedCommit) return { ok: false, reason: `${repo}: build context ${buildCommit || 'unknown'} не дорівнює published ${expectedCommit}` }
+        const buildDirty = await this.runProcess('git', ['-C', build.root, 'status', '--porcelain'], {})
+        if (buildDirty.code !== 0 || buildDirty.output.split('\n').some((line) => line.trim())) {
+          return { ok: false, reason: `${repo}: build context має незакомічені/невідомі зміни` }
+        }
+        continue
+      }
       const checkedOut = await this.runProcess('git', ['-C', plan.root, 'symbolic-ref', '--quiet', '--short', 'HEAD'], {})
       if (checkedOut.code !== 0 || checkedOut.output.trim() !== plan.branch) {
         return { ok: false, reason: `${repo}: build context не на ${plan.branch}` }
@@ -1189,6 +1264,8 @@ export class ReleaseWorker {
     const persistedRepos = new Set(task.agentRun?.releaseRepositories ?? [])
     const selected = new Map()
     let evidence = task.agentRun?.releaseEvidence ?? {}
+    const fetched = await this.fetchMainlines({ force: true })
+    if (!fetched.ok) return { ok: false, kind: 'transient', phase: 'preflight', reason: fetched.reason }
 
     for (const [repo, plan] of Object.entries(this.repoPlan)) {
       const worktree = path.join(jobDirectory, repo)
@@ -1197,7 +1274,7 @@ export class ReleaseWorker {
         if (!persistedRepos.has(repo)) continue
         const branchExists = await this.runProcess('git', ['-C', plan.root, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`], {})
         if (branchExists.code === 0) {
-          const ancestor = await this.runProcess('git', ['-C', plan.root, 'merge-base', '--is-ancestor', branch, plan.branch], {})
+          const ancestor = await this.runProcess('git', ['-C', plan.root, 'merge-base', '--is-ancestor', branch, this.mainlineRef(plan)], {})
           if (ancestor.code === 0) {
             selected.set(repo, { mode: 'already', worktree, files: evidence?.repositories?.[repo]?.files ?? [] })
             continue
@@ -1205,7 +1282,7 @@ export class ReleaseWorker {
         }
         const recordedCommit = evidence?.repositories?.[repo]?.commit
         if (recordedCommit) {
-          const recorded = await this.runProcess('git', ['-C', plan.root, 'merge-base', '--is-ancestor', recordedCommit, plan.branch], {})
+          const recorded = await this.runProcess('git', ['-C', plan.root, 'merge-base', '--is-ancestor', recordedCommit, this.mainlineRef(plan)], {})
           if (recorded.code === 0) {
             selected.set(repo, { mode: 'already', worktree, files: evidence?.repositories?.[repo]?.files ?? [] })
             continue
@@ -1224,12 +1301,12 @@ export class ReleaseWorker {
 
       const unique = await this.runProcess(
         'git',
-        ['-C', plan.root, 'log', '--cherry-pick', '--right-only', '--no-merges', '--format=%H', `${plan.branch}...${branch}`],
+        ['-C', plan.root, 'log', '--cherry-pick', '--right-only', '--no-merges', '--format=%H', `${this.mainlineRef(plan)}...${branch}`],
         {},
       )
       if (unique.code !== 0) return { ok: false, kind: 'repository', reason: `${repo}: не вдалося порівняти ${branch} із ${plan.branch}` }
       if (unique.output.trim()) {
-        const base = await this.runProcess('git', ['-C', plan.root, 'merge-base', plan.branch, branch], {})
+        const base = await this.runProcess('git', ['-C', plan.root, 'merge-base', this.mainlineRef(plan), branch], {})
         const files = base.code === 0
           ? await this.runProcess('git', ['-C', plan.root, 'diff', '--name-only', base.output.trim(), branch], {})
           : { code: 1, output: '' }
@@ -1243,7 +1320,7 @@ export class ReleaseWorker {
 
       const alreadyMerged = await this.runProcess(
         'git',
-        ['-C', plan.root, 'merge-base', '--is-ancestor', branch, plan.branch],
+        ['-C', plan.root, 'merge-base', '--is-ancestor', branch, this.mainlineRef(plan)],
         {},
       )
       if (alreadyMerged.code === 0 && persistedRepos.has(repo)) {
@@ -1257,7 +1334,7 @@ export class ReleaseWorker {
       // Patch-equivalent cherry-pick не є git-ancestor. Доводимо, що task-гілка
       // справді мала власні коміти; гілка, створена й покинута без змін, не може
       // перетворитися на false-positive release.
-      const mergeBase = await this.runProcess('git', ['-C', plan.root, 'merge-base', plan.branch, branch], {})
+      const mergeBase = await this.runProcess('git', ['-C', plan.root, 'merge-base', this.mainlineRef(plan), branch], {})
       if (mergeBase.code === 0 && mergeBase.output.trim()) {
         const count = await this.runProcess('git', ['-C', plan.root, 'rev-list', '--count', `${mergeBase.output.trim()}..${branch}`], {})
         const changed = await this.runProcess('git', ['-C', plan.root, 'diff', '--name-only', mergeBase.output.trim(), branch], {})
@@ -1328,26 +1405,37 @@ export class ReleaseWorker {
       const selection = selected.get(repo)
       const worktree = selection.worktree
 
-      const checkedOut = await this.runProcess('git', ['-C', plan.root, 'symbolic-ref', '--quiet', '--short', 'HEAD'], {})
-      if (checkedOut.code !== 0 || checkedOut.output.trim() !== plan.branch) {
-        return {
-          ok: false,
-          kind: 'repository',
-          phase: 'preflight',
-          reason: `${repo}: main worktree має бути на ${plan.branch}, зараз ${checkedOut.output.trim() || 'detached/unknown'}`,
+      if (!this.originMainline) {
+        const checkedOut = await this.runProcess('git', ['-C', plan.root, 'symbolic-ref', '--quiet', '--short', 'HEAD'], {})
+        if (checkedOut.code !== 0 || checkedOut.output.trim() !== plan.branch) {
+          return {
+            ok: false,
+            kind: 'repository',
+            phase: 'preflight',
+            reason: `${repo}: main worktree має бути на ${plan.branch}, зараз ${checkedOut.output.trim() || 'detached/unknown'}`,
+          }
+        }
+        const dirty = await this.runProcess('git', ['-C', plan.root, 'status', '--porcelain'], {})
+        if (dirty.output.split('\n').some((line) => line.trim())) {
+          return { ok: false, kind: 'transient', reason: `${repo}: у робочому дереві є незакомічені зміни — відкладено` }
         }
       }
-      const dirty = await this.runProcess('git', ['-C', plan.root, 'status', '--porcelain'], {})
-      if (dirty.output.split('\n').some((line) => line.trim())) {
-        return { ok: false, kind: 'transient', reason: `${repo}: у робочому дереві є незакомічені зміни — відкладено` }
-      }
 
-      const baseline = await this.runProcess('git', ['-C', plan.root, 'rev-parse', 'HEAD'], {})
-      const baselineCommit = /\b[0-9a-f]{40}\b/.exec(baseline.output)?.[0]
+      const baselineCommit = await this.resolveMainlineCommit(plan)
       if (!baselineCommit) return { ok: false, kind: 'repository', reason: `${repo}: не вдалося зафіксувати HEAD перед мерджем` }
 
       const needsPublish = selection.mode === 'candidate'
       let validationDirectory = plan.root
+      if (!needsPublish && this.originMainline) {
+        const build = await this.ensureBuildWorktree(repo, baselineCommit)
+        if (!build.ok) return { ok: false, kind: 'repository', reason: build.reason }
+        try {
+          await materializeInstalledDependencies(plan.root, build.root, { forceRefresh: true })
+        } catch (error) {
+          return { ok: false, kind: 'repository', reason: `${repo}: ${error.message}` }
+        }
+        validationDirectory = build.root
+      }
       let validatedCommit = baselineCommit
       if (needsPublish) {
         if (!(await pathExists(path.join(worktree, '.git')))) {
@@ -1368,7 +1456,7 @@ export class ReleaseWorker {
         // Спершу вливаємо актуальний mainline у task-worktree та перевіряємо
         // кандидата там. Mainline не змінюється до зелених тестів, тому crash
         // або рестарт release-worker не може лишити його на червоному мерджі.
-        const mergeMainline = await this.runMutation('git', ['-C', worktree, 'merge', '--no-edit', plan.branch], {})
+        const mergeMainline = await this.runMutation('git', ['-C', worktree, 'merge', '--no-edit', this.originMainline ? baselineCommit : plan.branch], {})
         if (mergeMainline.code !== 0) {
           await this.runMutation('git', ['-C', worktree, 'merge', '--abort'], {})
           return { ok: false, kind: 'conflict', reason: `${repo}: конфлікт мерджу з ${branch}` }
@@ -1428,9 +1516,10 @@ export class ReleaseWorker {
     // непомітно випустив би неперевірений HEAD.
     await this.updateRelease(task, { status: 'processing', phase: 'publishing', evidence })
     await this.assertLease()
+    const refetched = await this.fetchMainlines({ force: true })
+    if (!refetched.ok) return { ok: false, kind: 'transient', phase: 'publishing', reason: refetched.reason }
     for (const item of prepared) {
-      const currentMainline = await this.runProcess('git', ['-C', item.plan.root, 'rev-parse', 'HEAD'], {})
-      const currentCommit = /\b[0-9a-f]{40}\b/.exec(currentMainline.output)?.[0]
+      const currentCommit = await this.resolveMainlineCommit(item.plan)
       if (currentCommit !== item.baselineCommit) {
         return { ok: false, kind: 'transient', phase: 'publishing', reason: `${item.repo}: mainline змінився після validation` }
       }
@@ -1451,6 +1540,10 @@ export class ReleaseWorker {
     // Усі репозиторії перевірені й pin-нуті. Рухаємо mainline лише на точні
     // SHA, що пройшли gate, а не на mutable branch refs.
     for (const item of prepared) {
+      if (this.originMainline) {
+        item.commit = item.selection.mode === 'candidate' ? item.validatedCommit : item.baselineCommit
+        continue
+      }
       if (item.selection.mode === 'candidate') {
         const publish = await this.runMutation('git', ['-C', item.plan.root, 'merge', '--ff-only', item.validatedCommit], {})
         if (publish.code !== 0) {
@@ -1501,6 +1594,7 @@ export class ReleaseWorker {
         },
       })
       await this.updateRelease(task, { status: 'processing', phase: 'publishing', evidence })
+      await this.fastForwardMainCheckout(item)
     }
 
     return {
@@ -1555,7 +1649,7 @@ export class ReleaseWorker {
         errors.push(`${repo}: не вдалося перевірити локальну гілку`)
         continue
       }
-      const merged = await this.runProcess('git', ['-C', plan.root, 'merge-base', '--is-ancestor', branch, plan.branch], {})
+      const merged = await this.runProcess('git', ['-C', plan.root, 'merge-base', '--is-ancestor', branch, this.mainlineRef(plan)], {})
       if (merged.code !== 0) {
         errors.push(`${repo}: локальна гілка не є частиною ${plan.branch}`)
         continue

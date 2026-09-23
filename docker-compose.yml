@@ -49,6 +49,7 @@ services:
       CODEX_NETWORK_ACCESS: "${CODEX_NETWORK_ACCESS:-false}"
       CODEX_JOB_TIMEOUT_MS: "${CODEX_JOB_TIMEOUT_MS:-2700000}"
       CODEX_MODEL: "${CODEX_MODEL:-gpt-6-sol}"
+      CODEX_BASELINE_SOURCE: "${CODEX_BASELINE_SOURCE:-origin}"
       # Pinned explicitly so a host-wide max/ultra setting cannot spend the
       # whole job timeout before the first repository check.
       CODEX_REASONING_EFFORT: "${CODEX_REASONING_EFFORT:-medium}"

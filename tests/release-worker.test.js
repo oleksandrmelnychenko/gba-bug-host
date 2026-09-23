@@ -1097,3 +1097,75 @@ test('release-тести frontend обмежують кількість Vitest w
     assert.equal(vitest.includes('--maxWorkers=8'), true, repo)
   }
 })
+
+test('origin-режим релізить поверх origin/main навіть коли основний checkout брудний', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-release-main-'))
+  const worktrees = await mkdtemp(path.join(tmpdir(), 'gba-release-worktrees-'))
+  const task = {
+    id: 'BUG-2190',
+    title: 'Origin mainline publish',
+    agentRun: { id: 'RUN-2190', releaseRepositories: [], details: releasePlanDetails() },
+  }
+  const worktree = path.join(worktrees, 'bug-2190', 'repo')
+  await mkdir(worktree, { recursive: true })
+  await writeFile(path.join(worktree, '.git'), 'gitdir fixture', 'utf8')
+  const calls = []
+  const baseline = 'd'.repeat(40)
+  const candidate = 'e'.repeat(40)
+  const worker = new ReleaseWorker({
+    worktreesDirectory: worktrees,
+    mainlineSource: 'origin',
+    buildWorktreesDirectory: path.join(worktrees, 'build'),
+    repoPlan: {
+      repo: {
+        branch: 'main',
+        root,
+        services: [],
+        checks: [['verify', 'candidate']],
+      },
+    },
+    processRunner: async (command, args, options = {}) => {
+      calls.push({ command, args, cwd: options.cwd })
+      const cwd = args[0] === '-C' ? args[1] : ''
+      if (args.includes('status')) return { code: 0, output: cwd === root ? ' M wip-from-someone-else.cs' : '' }
+      if (args.includes('symbolic-ref')) return { code: 0, output: 'main' }
+      if (args.includes('log')) return { code: 0, output: 'c'.repeat(40) }
+      if (args.includes('rev-parse')) return { code: 0, output: args.includes('refs/remotes/origin/main') ? baseline : candidate }
+      if (args.includes('merge-base')) return { code: 1, output: '' }
+      return { code: 0, output: '' }
+    },
+  })
+  worker.updateRelease = async () => {}
+
+  try {
+    const outcome = await worker.releaseTask(task)
+
+    assert.equal(outcome.ok, true, outcome.reason)
+    assert.ok(calls.some((call) => call.args.includes('fetch') && call.args[1] === root))
+    const mergeCall = calls.find((call) => call.args[1] === worktree && call.args.includes('merge'))
+    assert.equal(mergeCall.args.at(-1), baseline)
+    assert.equal(calls.some((call) => call.args[1] === root && call.args.includes('--ff-only')), false,
+      'брудний основний checkout не можна рухати')
+    assert.ok(calls.some((call) => call.args[1] === root
+      && call.args.includes('push')
+      && call.args.includes(`${candidate}:refs/heads/main`)))
+    assert.equal(outcome.repositoryEvidence.repo.commit, candidate)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    await rm(worktrees, { recursive: true, force: true })
+  }
+})
+
+test('origin-режим збирає й мігрує з окремого build worktree', () => {
+  const worker = new ReleaseWorker({
+    mainlineSource: 'origin',
+    buildWorktreesDirectory: '/srv/release-build',
+  })
+  const env = worker.deploymentEnvironment({ 'gba-server': { commit: 'f'.repeat(40) } })
+
+  assert.equal(env.GBA_SERVER_GIT_SHA, 'f'.repeat(40))
+  assert.equal(env.GBA_SERVER_BUILD_CONTEXT, '/srv/release-build/gba-server')
+  assert.equal(env.GBA_CONSOLE_BUILD_CONTEXT, undefined)
+  assert.equal(worker.buildRoot('gba-server'), '/srv/release-build/gba-server')
+  assert.equal(new ReleaseWorker({ mainlineSource: 'local' }).buildRoot('gba-server'), '/root/projects/gba-server')
+})

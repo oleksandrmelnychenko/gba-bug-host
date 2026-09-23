@@ -515,7 +515,7 @@ function requirePositiveMilliseconds(name, value) {
   return value
 }
 
-function buildPrompt(task, run, mediaPaths, worktrees, referenceRepositories, persistentContext) {
+export function buildPrompt(task, run, mediaPaths, worktrees, referenceRepositories, persistentContext, { networkAccess = false } = {}) {
   const media = mediaPaths.length
     ? mediaPaths.map((item, index) => [
         `- ${index + 1}. ${item.kind}`,
@@ -541,6 +541,20 @@ function buildPrompt(task, run, mediaPaths, worktrees, referenceRepositories, pe
         .map((repository) => `- ${repository.name}: ${repository.repositoryPath} (ЛИШЕ ЧИТАННЯ; не включати в changedFiles/releasePlan)`)
         .join('\n')
     : '- Окремого legacy-репозиторію немає; перевір git history/стабільні гілки поточного стека та серверний контракт.'
+
+  const environmentHeader = networkAccess
+    ? 'Середовище перевірок (мережа sandbox увімкнена — лише для restore залежностей і локальних перевірок; не додавай нові пакети й не оновлюй версії):'
+    : 'Середовище перевірок (мережі немає — нічого не встановлюй і не оновлюй):'
+  const environmentNet = networkAccess
+    ? [
+        '- .NET SDK 10 стоїть у /usr/share/dotnet і доступний як dotnet; кеш NuGet прогрітий, а restore за потреби працює через мережу — не обходь помилки restore через --no-restore, якщо obj/project.assets.json відсутній.',
+        '- dotnet test, VSTest/testhost, vitest і next build у цьому sandbox працюють повноцінно: запускай точні тести зачеплених репозиторіїв і став PASS/FAIL за їхнім фактичним результатом. Помилка socket/port тепер є реальним сигналом, а не обмеженням середовища.',
+        '- До DEV-сервісів (*.85.17.167.167.nip.io, localhost) звертайся лише read-only GET-запитами для відтворення; ніяких mutation-запитів, логінів чи змін даних.',
+      ].join('\n')
+    : [
+        '- .NET SDK 10 стоїть у /usr/share/dotnet і доступний як dotnet; кеш NuGet прогрітий, тож dotnet build працює офлайн (якщо restore лізе в мережу, додай --no-restore).',
+        '- Спочатку пробуй точні dotnet test: у поточному sandbox VSTest/testhost зазвичай працює. Якщо саме sandbox заборонить socket/process, зафіксуй дослівну інфраструктурну помилку, але не видавай її за regression.',
+      ].join('\n')
 
   return `Ти працюєш як автономний coding agent для GBA QA Desk.
 
@@ -580,10 +594,9 @@ Acceptance contract — виконай ДО першої зміни:
 - відео досліджуй через ffprobe і витягни репрезентативні кадри через ffmpeg у локальну теку поточного job, після чого переглянь кадри візуально;
 - не вважай файл переглянутим лише за назвою, MIME або розміром.
 
-Середовище перевірок (мережі немає — нічого не встановлюй і не оновлюй):
+${environmentHeader}
 - node_modules у JS-worktree-ах уже локально підготовлені з основного репозиторію, тож npx-команди працюють одразу.
-- .NET SDK 10 стоїть у /usr/share/dotnet і доступний як dotnet; кеш NuGet прогрітий, тож dotnet build працює офлайн (якщо restore лізе в мережу, додай --no-restore).
-- Спочатку пробуй точні dotnet test: у поточному sandbox VSTest/testhost зазвичай працює. Якщо саме sandbox заборонить socket/process, зафіксуй дослівну інфраструктурну помилку, але не видавай її за regression.
+${environmentNet}
 - Не запускай одночасно кілька dotnet build/test в одному worktree: вони ділять bin/obj і дають file-lock або зайві 2-хвилинні recompilation. Спочатку один build, потім точні тести послідовно з --no-build/--no-restore, коли це сумісно з проєктом.
 - Кожну команду запускай усередині відповідного worktree, наприклад: cd ./gba_console && npx tsc --noEmit
 - Release-воркер повторить визначені гейти перед мерджем на хості. Став outcome=fixed, коли доступні перевірки зачепленого репозиторію пройшли, і перелічи в полі tests як пройдені, так і ті, що середовище справді не дало запустити.
@@ -656,6 +669,7 @@ export class CodexWorker {
     pollIntervalMs = Number.parseInt(process.env.CODEX_POLL_INTERVAL_MS ?? '1500', 10),
     timeoutMs = Number.parseInt(process.env.CODEX_JOB_TIMEOUT_MS ?? String(45 * 60 * 1000), 10),
     networkAccess = process.env.CODEX_NETWORK_ACCESS === 'true',
+    baselineSource = process.env.CODEX_BASELINE_SOURCE ?? 'local',
     concurrency = normalizeWorkerConcurrency(process.env.CODEX_CONCURRENCY),
     workerId = randomUUID(),
     leaseName = process.env.CODEX_WORKER_LEASE_NAME ?? 'codex-worker',
@@ -688,6 +702,7 @@ export class CodexWorker {
     this.pollIntervalMs = requirePositiveMilliseconds('CODEX_POLL_INTERVAL_MS', pollIntervalMs)
     this.timeoutMs = requirePositiveMilliseconds('CODEX_JOB_TIMEOUT_MS', timeoutMs)
     this.networkAccess = networkAccess
+    this.baselineSource = baselineSource
     this.concurrency = normalizeWorkerConcurrency(concurrency)
     this.workerId = workerId
     this.leaseName = leaseName
@@ -930,6 +945,11 @@ export class CodexWorker {
   }
 
   async resolveBaselineCommit(repository) {
+    const planBranch = defaultRepoPlan[repository.name]?.branch
+    if (this.baselineSource === 'origin' && planBranch) {
+      const origin = await runProcess('git', ['-C', repository.repositoryPath, 'rev-parse', '--verify', `refs/remotes/origin/${planBranch}^{commit}`])
+      if (origin.code === 0 && /^[0-9a-f]{40}$/i.test(origin.stdout.trim())) return origin.stdout.trim()
+    }
     // Keep other project stacks unchanged; console and server share the release
     // worker's canonical branch policy, and never fall back if main is missing.
     const branch = ['gba_console', 'gba-server'].includes(repository.name)
@@ -1158,6 +1178,7 @@ export class CodexWorker {
       worktrees,
       referenceRepositories,
       persistentContext,
+      { networkAccess: this.networkAccess },
     )
     const invokeCodex = async (sessionId = '') => {
       const tracker = createCodexSessionTracker((detectedSessionId) => {

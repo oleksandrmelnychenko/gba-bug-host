@@ -6,6 +6,7 @@ import path from 'node:path'
 import test from 'node:test'
 import {
   CodexWorker,
+  buildPrompt,
   codexRetryableInfrastructureFailureKind,
   codexExecutionFailureReason,
   collectWorktreeChanges,
@@ -93,6 +94,44 @@ test('worker image не використовує Codex, несумісний з�
 test('server worker отримує обов’язковий RTK proxy лише для читання', async () => {
   const compose = await readFile(new URL('../docker-compose.yml', import.meta.url), 'utf8')
   assert.match(compose, /\$\{RTK_HOST_PATH:\?Set RTK_HOST_PATH\}:\/usr\/local\/bin\/rtk:ro/)
+})
+
+test('origin-baseline: нова задача стартує з origin/main, а не з відсталого чи брудного локального main', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-worker-origin-'))
+  const upstream = path.join(root, 'upstream.git')
+  const repository = path.join(root, 'gba-server')
+  const other = path.join(root, 'other')
+  git(root, 'init', '--bare', '-b', 'main', upstream)
+  git(root, 'clone', upstream, repository)
+  for (const dir of [repository]) {
+    git(dir, 'config', 'user.email', 'worker-test@example.com')
+    git(dir, 'config', 'user.name', 'Worker Test')
+  }
+  await writeFile(path.join(repository, 'app.txt'), 'v1\n')
+  git(repository, 'add', '.')
+  git(repository, 'commit', '-m', 'v1')
+  git(repository, 'push', 'origin', 'main')
+  git(root, 'clone', upstream, other)
+  git(other, 'config', 'user.email', 'worker-test@example.com')
+  git(other, 'config', 'user.name', 'Worker Test')
+  await writeFile(path.join(other, 'app.txt'), 'v2\n')
+  git(other, 'commit', '-am', 'v2 pushed elsewhere')
+  git(other, 'push', 'origin', 'main')
+  git(repository, 'fetch', 'origin')
+  const originMain = git(repository, 'rev-parse', 'refs/remotes/origin/main')
+  await writeFile(path.join(repository, 'wip.txt'), 'someone else WIP\n')
+  const worker = new CodexWorker({ store: {}, rootDirectory: root, dataDirectory: root,
+    uploadsDirectory: root, targetRepository: repository, worktreesDirectory: path.join(root, 'tasks'),
+    baselineSource: 'origin' })
+  try {
+    const { worktrees } = await worker.ensureWorktrees('BUG-ORIGIN', [{ name: 'gba-server', repositoryPath: repository }])
+    assert.equal(worktrees[0].baselineCommit, originMain)
+    assert.equal(git(worktrees[0].worktreePath, 'rev-parse', 'HEAD'), originMain)
+    assert.equal(await readFile(path.join(worktrees[0].worktreePath, 'app.txt'), 'utf8'), 'v2\n')
+    await assert.rejects(stat(path.join(worktrees[0].worktreePath, 'wip.txt')), { code: 'ENOENT' })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 for (const name of ['gba_console', 'gba-server']) {
@@ -1191,4 +1230,18 @@ writeFileSync(outputPath, JSON.stringify({
     store.close()
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('промпт воркера описує середовище відповідно до мережі sandbox', () => {
+  const task = { id: 'BUG-1', project: 'console', title: 't', description: 'd', siteUrl: '', area: 'a', priority: 'high', status: 'new', notes: '', comments: [] }
+  const run = { attempt: 1, trigger: 'manual' }
+  const offline = buildPrompt(task, run, [], [], [], '')
+  const online = buildPrompt(task, run, [], [], [], '', { networkAccess: true })
+
+  assert.match(offline, /мережі немає/)
+  assert.match(offline, /додай --no-restore/)
+  assert.doesNotMatch(online, /мережі немає/)
+  assert.match(online, /мережа sandbox увімкнена/)
+  assert.match(online, /Помилка socket\/port тепер є реальним сигналом/)
+  assert.match(online, /лише read-only GET/)
 })
