@@ -214,6 +214,7 @@ export function releaseStatusFor(task) {
 export function selectReleasableTasks(tasks) {
   const priority = { processing: 0, retrying: 1, pending: 2, '': 3 }
   return tasks.filter((task) =>
+    task.aiMode !== 'off' &&
     (task.agentRun?.status === 'completed' || isSandboxLimitedReview(task)) &&
     (task.agentRun?.releaseStatus
       ? ['pending', 'processing', 'retrying'].includes(task.agentRun.releaseStatus)

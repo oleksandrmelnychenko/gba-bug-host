@@ -15,7 +15,7 @@ import {
   verifyPassword,
 } from './auth.js'
 import { BuildNumberSource } from './build-source.js'
-import { TaskStore } from './store.js'
+import { TaskStore, isTestingTaskTitle } from './store.js'
 import { TopologyService } from './topology.js'
 import { TranscriptionError, transcribeAudioWithShell } from './transcription.js'
 
@@ -150,6 +150,8 @@ function getMediaValidationError(files = []) {
   return null
 }
 
+const allowedAiModes = new Set(['auto', 'off'])
+
 function validateTaskInput(body, { partial = false } = {}) {
   const errors = []
   const title = cleanText(body.title)
@@ -162,6 +164,7 @@ function validateTaskInput(body, { partial = false } = {}) {
   const project = cleanText(body.project)
   const status = cleanText(body.status)
   const qaStatus = cleanText(body.qaStatus)
+  const aiMode = cleanText(body.aiMode)
   const priority = cleanText(body.priority)
   const assignee = cleanText(body.assignee)
 
@@ -179,10 +182,11 @@ function validateTaskInput(body, { partial = false } = {}) {
   if (status && !allowedStatuses.has(status)) errors.push('Невідомий статус задачі.')
   if (priority && !allowedPriorities.has(priority)) errors.push('Невідомий пріоритет задачі.')
   if (project && !allowedProjects.has(project)) errors.push('Невідомий проєкт задачі.')
+  if (Object.hasOwn(body ?? {}, 'aiMode') && !allowedAiModes.has(aiMode)) errors.push('Невідомий режим AI для задачі.')
 
   return {
     errors,
-    values: { title, description, siteUrl, notes, staffComments, reviewComment, area, project, status, qaStatus, priority, assignee },
+    values: { title, description, siteUrl, notes, staffComments, reviewComment, area, project, status, qaStatus, aiMode, priority, assignee },
   }
 }
 
@@ -481,6 +485,7 @@ export async function createApp(options = {}) {
         project: values.project || 'console',
         status: values.status || 'new',
         qaStatus: values.qaStatus,
+        aiMode: Object.hasOwn(request.body, 'aiMode') ? values.aiMode : isTestingTaskTitle(values.title) ? 'off' : 'auto',
         priority: values.priority || 'medium',
         assignee: values.assignee || 'Не призначено',
         createdByUserId: request.user?.internal ? null : request.user?.id ?? null,
@@ -490,7 +495,7 @@ export async function createApp(options = {}) {
       if (['ready_for_retest', 'done'].includes(task.status)) {
         store.markTaskProcessed(task.id, 'manual')
       }
-      store.enqueueAgentRun(randomUUID(), task.id, 'manual')
+      if (task.aiMode !== 'off') store.enqueueAgentRun(randomUUID(), task.id, 'manual')
 
       response.status(201).json(await store.find(task.id))
     } catch (error) {
@@ -511,7 +516,14 @@ export async function createApp(options = {}) {
         response.status(404).json({ message: 'Задачу не знайдено.' })
         return
       }
+      const nextAiMode = Object.hasOwn(request.body, 'aiMode')
+        ? values.aiMode
+        : Object.hasOwn(request.body, 'title') && isTestingTaskTitle(values.title) ? 'off' : existingTask.aiMode
       const startsReviewRun = values.status === 'review_again' && existingTask.status !== 'review_again'
+      if (startsReviewRun && nextAiMode === 'off') {
+        response.status(409).json({ message: 'Для цієї задачі AI вимкнено (задача для тестування).' })
+        return
+      }
       if (startsReviewRun && store.hasActiveRelease(request.params.id)) {
         response.status(409).json({ message: 'Задача вже проходить release. Дочекайтеся ретесту або помилки release.' })
         return
@@ -525,6 +537,7 @@ export async function createApp(options = {}) {
       for (const key of ['title', 'description', 'siteUrl', 'notes', 'staffComments', 'reviewComment', 'area', 'project', 'status', 'qaStatus', 'priority', 'assignee']) {
         if (Object.hasOwn(request.body, key)) patch[key] = values[key]
       }
+      if (nextAiMode !== existingTask.aiMode) patch.aiMode = nextAiMode
       if (Object.hasOwn(patch, 'project') && !patch.project) delete patch.project
       await store.patch(request.params.id, patch)
 
@@ -619,6 +632,11 @@ export async function createApp(options = {}) {
       if (result.status === 'task_not_found') {
         await removeUploadedFiles(request.files)
         response.status(404).json({ message: 'Задачу не знайдено.' })
+        return
+      }
+      if (result.status === 'ai_off') {
+        await removeUploadedFiles(request.files)
+        response.status(409).json({ message: 'Для цієї задачі AI вимкнено (задача для тестування).' })
         return
       }
       if (result.status === 'release_active') {
@@ -772,6 +790,10 @@ export async function createApp(options = {}) {
         response.status(409).json({ message: 'Закриту задачу не запускаємо повторно. Спочатку відкрийте її на повторну перевірку.' })
         return
       }
+      if (result.status === 'ai_off') {
+        response.status(409).json({ message: 'Для цієї задачі AI вимкнено (задача для тестування).' })
+        return
+      }
       if (result.status === 'release_active') {
         response.status(409).json({ message: 'Задача вже проходить release. Дочекайтеся ретесту або помилки release.' })
         return
@@ -851,6 +873,10 @@ export async function createApp(options = {}) {
       }
       if (result.status === 'task_done') {
         response.status(409).json({ message: 'Закриту задачу не запускаємо повторно. Спочатку відкрийте її на повторну перевірку.' })
+        return
+      }
+      if (result.status === 'ai_off') {
+        response.status(409).json({ message: 'Для цієї задачі AI вимкнено (задача для тестування).' })
         return
       }
       if (result.status === 'release_active') {

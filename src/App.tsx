@@ -2,6 +2,7 @@ import {
   Bell,
   BellOff,
   Bot,
+  BotOff,
   Bug,
   CalendarDays,
   Check,
@@ -103,6 +104,11 @@ const emptyDraft: TaskDraft = {
   project: 'console',
   status: 'new',
   priority: 'medium',
+  aiMode: 'auto',
+}
+
+function isTestingTaskTitle(title: string) {
+  return title.trim().toLocaleLowerCase('uk-UA').startsWith('для тестування')
 }
 
 const statusOrder: TaskStatus[] = ['new', 'in_progress', 'review_again', 'ready_for_retest', 'blocked', 'done']
@@ -266,6 +272,7 @@ function taskToDraft(task: Task): TaskDraft {
     project: task.project ?? 'console',
     status: task.status,
     priority: task.priority,
+    aiMode: task.aiMode ?? 'auto',
   }
 }
 
@@ -518,6 +525,13 @@ function AttachmentStack({
 }
 
 function AgentRunChip({ task }: { task: Task }) {
+  if (task.aiMode === 'off') {
+    return (
+      <span className="agent-table-state agent-run-off" title="Задача для тестування: Codex її не бере">
+        <BotOff size={10} /> Без AI
+      </span>
+    )
+  }
   const run = task.agentRun
   if (!run) return null
 
@@ -691,7 +705,8 @@ function TaskTable({
                   <td><AttachmentStack task={task} onOpen={onOpenAttachment} /></td>
                   <td onClick={(event) => event.stopPropagation()}>
                     <div className="row-actions">
-                      <button
+                      {task.aiMode !== 'off' && (
+                        <button
                         className="row-arrow row-arrow-queue"
                         disabled={isTaskQueuedOrRunning(task) || queueingId === task.id}
                         onClick={() => onEnqueue(task)}
@@ -700,6 +715,7 @@ function TaskTable({
                       >
                         {queueingId === task.id ? <LoaderCircle className="spin" size={15} /> : <Play size={15} />}
                       </button>
+                      )}
                       <button className="row-arrow" onClick={() => onOpenTask(task)} aria-label={`Редагувати ${task.id}`} title="Редагувати"><Pencil size={15} /></button>
                     </div>
                   </td>
@@ -717,7 +733,7 @@ function TaskTable({
               <PriorityBadge priority={task.priority} />
             </div>
             <h3>{task.title}</h3>
-            {(task.agentRun || task.createdByName.trim()) && (
+            {(task.agentRun || task.aiMode === 'off' || task.createdByName.trim()) && (
               <div className="task-card-state-line">
                 <AgentRunChip task={task} />
                 <TaskCreatorChip name={task.createdByName} />
@@ -738,7 +754,8 @@ function TaskTable({
             )}
             {task.notes && <pre className="task-card-notes">{task.notes}</pre>}
             <div className="task-card-footer" onClick={(event) => event.stopPropagation()}>
-              <button
+              {task.aiMode !== 'off' && (
+                <button
                 className="row-arrow row-arrow-queue"
                 disabled={isTaskQueuedOrRunning(task) || queueingId === task.id}
                 onClick={() => onEnqueue(task)}
@@ -747,6 +764,7 @@ function TaskTable({
               >
                 {queueingId === task.id ? <LoaderCircle className="spin" size={15} /> : <Play size={15} />}
               </button>
+              )}
               <StatusSelect
                 value={task.status}
                 compact
@@ -1072,6 +1090,7 @@ function CreateTaskDialog({
   onCreated: (task: Task) => void
 }) {
   const [draft, setDraft] = useState<TaskDraft>(emptyDraft)
+  const [aiModeTouched, setAiModeTouched] = useState(false)
   const [files, setFiles] = useState<File[]>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -1091,14 +1110,17 @@ function CreateTaskDialog({
     setDraft((current) => ({ ...current, [key]: value }))
   }
 
+  const effectiveAiMode = aiModeTouched ? draft.aiMode : isTestingTaskTitle(draft.title) ? 'off' : draft.aiMode
+
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault()
     setSaving(true)
     setError('')
     try {
-      const task = await createTask({ ...draft, project }, files)
+      const task = await createTask({ ...draft, aiMode: effectiveAiMode, project }, files)
       onCreated(task)
       setDraft(emptyDraft)
+      setAiModeTouched(false)
       setFiles([])
       onClose()
     } catch (caughtError) {
@@ -1217,6 +1239,19 @@ function CreateTaskDialog({
               </div>
             </div>
           </div>
+
+          <label className="form-toggle" htmlFor="new-ai-off">
+            <input
+              id="new-ai-off"
+              type="checkbox"
+              checked={effectiveAiMode === 'off'}
+              onChange={(event) => {
+                setAiModeTouched(true)
+                setField('aiMode', event.target.checked ? 'off' : 'auto')
+              }}
+            />
+            <span><BotOff size={14} /> Без AI (задача для тестування)</span>
+          </label>
 
           <div className="form-field form-field-wide">
             <label>Фото, відео та документи</label>
@@ -1459,6 +1494,7 @@ function EditTaskDialog({
   onOpenAttachment: (attachment: TaskAttachment) => void
 }) {
   const [draft, setDraft] = useState<TaskDraft>(emptyDraft)
+  const [aiModeTouched, setAiModeTouched] = useState(false)
   const [saving, setSaving] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState('')
@@ -1467,6 +1503,7 @@ function EditTaskDialog({
   useEffect(() => {
     if (task) {
       setDraft(taskToDraft(task))
+      setAiModeTouched(false)
       setError('')
     }
   }, [task?.id, task?.updatedAt])
@@ -1482,16 +1519,24 @@ function EditTaskDialog({
 
   if (!task) return null
 
+  const effectiveAiMode = aiModeTouched || draft.title === task.title
+    ? draft.aiMode
+    : isTestingTaskTitle(draft.title) ? 'off' : draft.aiMode
+
   const save = async (event: FormEvent) => {
     event.preventDefault()
     if (draft.status === 'review_again' && task.status !== 'review_again') {
+      if (effectiveAiMode === 'off') {
+        setError('Для цієї задачі AI вимкнено (задача для тестування).')
+        return
+      }
       onReviewAgain(task, draft)
       return
     }
     setSaving(true)
     setError('')
     try {
-      onUpdated(await updateTask(task.id, draft))
+      onUpdated(await updateTask(task.id, { ...draft, aiMode: effectiveAiMode }))
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : 'Не вдалося зберегти зміни.')
     } finally {
@@ -1618,8 +1663,20 @@ function EditTaskDialog({
               </div>
             </div>
           </div>
+          <label className="form-toggle" htmlFor="detail-ai-off">
+            <input
+              id="detail-ai-off"
+              type="checkbox"
+              checked={effectiveAiMode === 'off'}
+              onChange={(event) => {
+                setAiModeTouched(true)
+                setDraft({ ...draft, aiMode: event.target.checked ? 'off' : 'auto' })
+              }}
+            />
+            <span><BotOff size={14} /> Без AI (задача для тестування)</span>
+          </label>
 
-          <AgentRunHistory task={task} />
+          {task.aiMode !== 'off' && <AgentRunHistory task={task} />}
 
           <div className="evidence-section">
             <div className="section-heading">
@@ -2843,6 +2900,10 @@ function DeskApp({ user, onLogout }: { user: AuthUser; onLogout: () => void }) {
 
   const changeStatus = async (task: Task, status: TaskStatus) => {
     if (task.status === status) return
+    if (status === 'review_again' && task.aiMode === 'off') {
+      setToast(`${task.id}: для цієї задачі AI вимкнено`)
+      return
+    }
     if (status === 'review_again') {
       setReviewAgainRequest({ task, patch: { status } })
       return

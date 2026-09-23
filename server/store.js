@@ -75,6 +75,10 @@ const seedTasks = [
   },
 ]
 
+export function isTestingTaskTitle(title) {
+  return String(title ?? '').trim().toLocaleLowerCase('uk-UA').startsWith('для тестування')
+}
+
 const PENDING_BUILD = '__pending__'
 
 function mapBuildTask(row) {
@@ -196,6 +200,7 @@ function taskFromRow(row, attachments = [], agentRun = null) {
     project: row.project ?? 'console',
     status: row.status,
     qaStatus: row.qa_status ?? '',
+    aiMode: row.ai_mode === 'off' ? 'off' : 'auto',
     priority: row.priority,
     assignee: row.assignee,
     createdByUserId: row.created_by_user_id ?? null,
@@ -418,6 +423,13 @@ export class TaskStore {
       if (!taskColumns.has('qa_status')) {
         this.database.exec("ALTER TABLE tasks ADD COLUMN qa_status TEXT NOT NULL DEFAULT ''")
       }
+      if (!taskColumns.has('ai_mode')) {
+        this.database.exec("ALTER TABLE tasks ADD COLUMN ai_mode TEXT NOT NULL DEFAULT 'auto'")
+        const markOff = this.database.prepare("UPDATE tasks SET ai_mode = 'off' WHERE id = ?")
+        for (const row of this.database.prepare('SELECT id, title FROM tasks').all()) {
+          if (isTestingTaskTitle(row.title)) markOff.run(row.id)
+        }
+      }
       if (!taskColumns.has('created_by_user_id')) {
         this.database.exec('ALTER TABLE tasks ADD COLUMN created_by_user_id TEXT')
       }
@@ -575,9 +587,9 @@ export class TaskStore {
     this.database.prepare(`
       INSERT INTO tasks (
         id, title, description, site_url, notes, staff_comments, review_comment, area, project,
-        status, qa_status, priority, assignee, created_by_user_id, created_by_name, created_at, updated_at
+        status, qa_status, ai_mode, priority, assignee, created_by_user_id, created_by_name, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       task.id,
       task.title,
@@ -590,6 +602,7 @@ export class TaskStore {
       task.project ?? 'console',
       task.status,
       task.qaStatus ?? '',
+      task.aiMode === 'off' ? 'off' : 'auto',
       task.priority,
       task.assignee,
       task.createdByUserId ?? null,
@@ -852,7 +865,7 @@ export class TaskStore {
     const existingTask = this.find(id)
     if (!existingTask) return null
 
-    const allowedFields = ['title', 'description', 'siteUrl', 'notes', 'staffComments', 'reviewComment', 'area', 'project', 'status', 'qaStatus', 'priority', 'assignee']
+    const allowedFields = ['title', 'description', 'siteUrl', 'notes', 'staffComments', 'reviewComment', 'area', 'project', 'status', 'qaStatus', 'aiMode', 'priority', 'assignee']
     const fields = allowedFields.filter((field) => Object.hasOwn(values, field))
     const updatedAt = new Date().toISOString()
 
@@ -868,6 +881,7 @@ export class TaskStore {
         project: 'project',
         status: 'status',
         qaStatus: 'qa_status',
+        aiMode: 'ai_mode',
         priority: 'priority',
         assignee: 'assignee',
       }
@@ -875,6 +889,21 @@ export class TaskStore {
       this.database
         .prepare(`UPDATE tasks SET ${assignments}, updated_at = ? WHERE id = ?`)
         .run(...fields.map((field) => values[field]), updatedAt, id)
+    }
+
+    if (values.aiMode === 'off' && existingTask.aiMode !== 'off') {
+      const reason = 'Знято з черги: для задачі вимкнено AI.'
+      this.database.prepare(`
+        UPDATE agent_runs
+        SET status = 'blocked', control = 'stop', error = ?,
+            release_status = 'blocked', release_error = ?, release_phase = 'failed',
+            finished_at = ?, updated_at = ?
+        WHERE task_id = ? AND status = 'queued'
+      `).run(reason, reason, updatedAt, updatedAt, id)
+      this.database.prepare(`
+        UPDATE agent_runs SET control = 'stop', updated_at = ?
+        WHERE task_id = ? AND status = 'running' AND control = ''
+      `).run(updatedAt, id)
     }
 
     if (values.status === 'done') {
@@ -905,6 +934,9 @@ export class TaskStore {
     return this.transaction(() => {
       const existingTask = this.find(taskId)
       if (!existingTask) return { status: 'task_not_found', task: null, run: null }
+      if (existingTask.aiMode === 'off') {
+        return { status: 'ai_off', task: existingTask, run: existingTask.agentRun }
+      }
       if (this.hasActiveRelease(taskId)) {
         return { status: 'release_active', task: existingTask, run: existingTask.agentRun }
       }
@@ -954,6 +986,9 @@ export class TaskStore {
     if (!task) return { status: 'task_not_found', run: null, created: false }
     if (task.status === 'done') {
       return { status: 'task_done', run: task.agentRun, created: false }
+    }
+    if (task.aiMode === 'off') {
+      return { status: 'ai_off', run: task.agentRun, created: false }
     }
 
     // A substantive needs_review result has no releasable artifact. A new
@@ -1101,6 +1136,7 @@ export class TaskStore {
           JOIN tasks AS task ON task.id = run.task_id
           WHERE run.status = 'queued'
             AND task.status <> 'done'
+            AND task.ai_mode <> 'off'
           ORDER BY run.queue_priority DESC, run.created_at ASC
           LIMIT 1
         `)

@@ -113,6 +113,7 @@ export interface Task {
   project: TaskProject
   status: TaskStatus
   qaStatus: string
+  aiMode: TaskAiMode
   priority: TaskPriority
   createdByUserId: string | null
   createdByName: string
@@ -121,6 +122,8 @@ export interface Task {
   attachments: TaskAttachment[]
   agentRun: AgentRun | null
 }
+
+export type TaskAiMode = 'auto' | 'off'
 
 export interface TaskDraft {
   title: string
@@ -133,6 +136,7 @@ export interface TaskDraft {
   project: TaskProject
   status: TaskStatus
   priority: TaskPriority
+  aiMode: TaskAiMode
 }
 
 export type NodeStatus = 'ok' | 'warn' | 'down' | 'unknown'

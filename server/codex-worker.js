@@ -654,6 +654,10 @@ ${media}
 Поверни структурований результат за наданою JSON-схемою. Summary напиши українською: що зроблено або що саме завадило завершити задачу (і в якому репозиторії стека).`
 }
 
+export function restorableTaskStatus(status) {
+  return ['new', 'in_progress', 'ready_for_retest', 'blocked'].includes(status) ? status : 'new'
+}
+
 export class CodexWorker {
   constructor({
     store,
@@ -1145,6 +1149,12 @@ export class CodexWorker {
         }
       : { ...currentTask, comments: currentComments }
 
+    if (currentTask.aiMode === 'off') {
+      this.store.markStopped(run.id)
+      console.log(`[Codex worker] ${currentTask.id}: AI вимкнено для задачі, запуск пропущено`)
+      return
+    }
+    const statusBeforeRun = restorableTaskStatus(run.inputSnapshot?.status ?? currentTask.status)
     this.store.patch(currentTask.id, { status: 'in_progress' })
     const stack = this.resolveProjectStack(task.project)
     const referenceRepositories = this.resolveProjectReferences(task.project)
@@ -1266,7 +1276,7 @@ export class CodexWorker {
       const reverted = stopControl === 'stop_revert'
       if (reverted) await this.revertTaskWork(task.id, worktrees)
       this.store.markStopped(run.id, { reverted })
-      this.store.patch(task.id, { status: 'new' })
+      if (this.store.find(task.id)?.aiMode !== 'off') this.store.patch(task.id, { status: statusBeforeRun })
       console.log(`[Codex worker] ${task.id}: зупинено оператором${reverted ? ' з відкатом' : ''}`)
       return
     }
@@ -1350,6 +1360,7 @@ export class CodexWorker {
       })
     }
 
+    if (this.store.find(currentTask.id)?.aiMode === 'off') return
     if (runStatus === 'completed') {
       // У бакет білда задача потрапляє НЕ тут: вердикт Codex ще не означає, що
       // код у мейнлайні. Мітку ставить реліз-воркер після успішного мерджу й

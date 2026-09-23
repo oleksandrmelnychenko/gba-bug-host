@@ -1134,3 +1134,113 @@ test('очищення worktree чекає, поки задача звільни
     assert.equal(cleanup?.id, first.id, 'після звільнення задачі прибирання відпрацьовує')
   })
 })
+
+test('задача «Для тестування» створюється без AI і не стає в чергу Codex', async () => {
+  await withTestApp(async ({ app, store }) => {
+    const created = await request(app)
+      .post('/api/tasks')
+      .field('title', 'Для тестування !! Перевірка звітів')
+      .field('area', 'Звіти')
+      .expect(201)
+
+    assert.equal(created.body.aiMode, 'off')
+    assert.equal(created.body.agentRun, null)
+    assert.equal(store.claimNextAgentRun('worker-test'), null)
+
+    const refused = await request(app).post(`/api/tasks/${created.body.id}/agent-runs`).expect(409)
+    assert.match(refused.body.message, /AI вимкнено/)
+    await request(app).post(`/api/tasks/${created.body.id}/agent-runs/resume`).expect(409)
+    await request(app)
+      .patch(`/api/tasks/${created.body.id}`)
+      .send({ status: 'review_again', reviewComment: 'Перевір ще раз, будь ласка.' })
+      .expect(409)
+    await request(app)
+      .post(`/api/tasks/${created.body.id}/review-again`)
+      .field('reviewComment', 'Перевір ще раз, будь ласка.')
+      .expect(409)
+    assert.equal(store.enqueueAgentRun('RUN-OFF', created.body.id).status, 'ai_off')
+    assert.equal(store.find(created.body.id).status, 'new')
+  })
+})
+
+test('явний aiMode=auto перекриває автовизначення за назвою', async () => {
+  await withTestApp(async ({ app }) => {
+    const created = await request(app)
+      .post('/api/tasks')
+      .field('title', 'Для тестування, але AI потрібен')
+      .field('aiMode', 'auto')
+      .expect(201)
+
+    assert.equal(created.body.aiMode, 'auto')
+    assert.equal(created.body.agentRun.status, 'queued')
+    await request(app).post('/api/tasks').field('title', 'Некоректний режим').field('aiMode', 'maybe').expect(400)
+  })
+})
+
+test('вимкнення AI знімає задачу з черги, не змінюючи її статус, і claim її пропускає', async () => {
+  await withTestApp(async ({ app, store }) => {
+    const queued = await request(app).post('/api/tasks/BUG-1051/agent-runs').expect(202)
+    assert.equal(queued.body.agentRun.status, 'queued')
+    const statusBefore = store.find('BUG-1051').status
+
+    const switched = await request(app)
+      .patch('/api/tasks/BUG-1051')
+      .send({ aiMode: 'off' })
+      .expect(200)
+
+    assert.equal(switched.body.aiMode, 'off')
+    assert.equal(switched.body.status, statusBefore)
+    assert.equal(store.findAgentRun(queued.body.agentRun.id).status, 'blocked')
+    assert.equal(store.claimNextAgentRun('worker-test'), null)
+  })
+})
+
+test('перейменування на «Для тестування» вимикає AI, а claim пропускає вже чергові запуски', async () => {
+  await withTestApp(async ({ app, store }) => {
+    const renamed = await request(app)
+      .patch('/api/tasks/BUG-1049')
+      .send({ title: '  для ТЕСТУВАННЯ: чекліст продажів' })
+      .expect(200)
+    assert.equal(renamed.body.aiMode, 'off')
+
+    store.database.prepare("UPDATE tasks SET ai_mode = 'auto' WHERE id = 'BUG-1049'").run()
+    store.enqueueAgentRun('RUN-RACE', 'BUG-1049')
+    store.database.prepare("UPDATE tasks SET ai_mode = 'off' WHERE id = 'BUG-1049'").run()
+    assert.equal(store.claimNextAgentRun('worker-test'), null)
+  })
+})
+
+test('міграція ai_mode вимикає AI для наявних задач «Для тестування» з кирилицею в будь-якому регістрі', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-bug-host-ai-mode-'))
+  const dataDirectory = path.join(root, 'data')
+  await mkdir(dataDirectory, { recursive: true })
+  const legacy = new DatabaseSync(path.join(dataDirectory, 'gba-qa.sqlite'))
+  legacy.exec(`
+    CREATE TABLE tasks (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      area TEXT NOT NULL,
+      status TEXT NOT NULL,
+      priority TEXT NOT NULL,
+      assignee TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    INSERT INTO tasks VALUES ('BUG-2001', 'Для тестування!! Кейси', '', 'QA', 'ready_for_retest', 'medium', 'QA', '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z');
+    INSERT INTO tasks VALUES ('BUG-2002', '  ДЛЯ ТЕСТУВАННЯ перевірка', '', 'QA', 'new', 'medium', 'QA', '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z');
+    INSERT INTO tasks VALUES ('BUG-2003', 'Звичайний баг для тестування', '', 'QA', 'new', 'medium', 'QA', '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z');
+  `)
+  legacy.close()
+  const store = new TaskStore(dataDirectory)
+  try {
+    await store.ensureReady()
+    assert.equal(store.find('BUG-2001').aiMode, 'off')
+    assert.equal(store.find('BUG-2002').aiMode, 'off')
+    assert.equal(store.find('BUG-2003').aiMode, 'auto')
+    assert.equal(store.find('BUG-2001').status, 'ready_for_retest')
+  } finally {
+    store.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})

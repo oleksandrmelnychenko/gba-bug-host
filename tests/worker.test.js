@@ -1245,3 +1245,62 @@ test('промпт воркера описує середовище відпов
   assert.match(online, /Помилка socket\/port тепер є реальним сигналом/)
   assert.match(online, /лише read-only GET/)
 })
+
+test('зупинка оператором повертає задачі статус, який був до запуску, а не blocked', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-codex-stop-'))
+  const repository = path.join(root, 'gba_console')
+  const dataDirectory = path.join(root, 'data')
+  const uploadsDirectory = path.join(root, 'uploads')
+  const worktreesDirectory = path.join(root, 'worktrees')
+  const fakeCodex = path.join(root, 'fake-codex.mjs')
+  await mkdir(repository, { recursive: true })
+  await mkdir(uploadsDirectory, { recursive: true })
+  git(repository, 'init', '-b', 'main')
+  git(repository, 'config', 'user.email', 'worker-test@example.com')
+  git(repository, 'config', 'user.name', 'Worker Test')
+  await writeFile(path.join(repository, 'app.txt'), 'before\n', 'utf8')
+  git(repository, 'add', 'app.txt')
+  git(repository, 'commit', '-m', 'Initial fixture')
+  await writeFile(fakeCodex, `#!/usr/bin/env node
+for await (const chunk of process.stdin) void chunk
+await new Promise((resolve) => setTimeout(resolve, 20000))
+`, 'utf8')
+  await chmod(fakeCodex, 0o755)
+
+  const previousStack = process.env.CODEX_REPOS_CONSOLE
+  process.env.CODEX_REPOS_CONSOLE = repository
+  const store = new TaskStore(dataDirectory)
+  try {
+    await store.ensureReady()
+    store.transaction(() => {
+      for (const task of getSeedTasks()) store.insertTask(task)
+    })
+    store.patch('BUG-1049', { status: 'ready_for_retest' })
+    store.enqueueAgentRun('RUN-STOP-1', 'BUG-1049', 'manual')
+    const run = store.claimNextAgentRun()
+    const worker = new CodexWorker({
+      store,
+      rootDirectory: root,
+      dataDirectory,
+      uploadsDirectory,
+      targetRepository: repository,
+      worktreesDirectory,
+      codexBinary: fakeCodex,
+      buildNumber: 'stop-test-build',
+      timeoutMs: 30_000,
+    })
+    const processing = worker.processRun(run)
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    assert.equal(store.find('BUG-1049').status, 'in_progress')
+    store.requestStop('BUG-1049')
+    await processing
+
+    assert.equal(store.findAgentRun(run.id).status, 'blocked')
+    assert.equal(store.find('BUG-1049').status, 'ready_for_retest')
+  } finally {
+    if (previousStack === undefined) delete process.env.CODEX_REPOS_CONSOLE
+    else process.env.CODEX_REPOS_CONSOLE = previousStack
+    store.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})

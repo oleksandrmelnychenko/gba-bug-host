@@ -2438,6 +2438,11 @@ main {
   --agent-bg: #fffaeb;
   --agent-border: #fedf89;
 }
+.agent-run-off {
+  --agent-color: #475467;
+  --agent-bg: #f2f4f7;
+  --agent-border: #d0d5dd;
+}
 .agent-run-blocked,
 .agent-run-failed {
   --agent-color: #b42318;
@@ -4585,4 +4590,25 @@ main {
   color: var(--brand-700);
   background: var(--brand-50);
   border: 1px solid var(--brand-200);
+}
+
+.form-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin: 2px 0 4px;
+  font-size: 14px;
+  color: #344054;
+  cursor: pointer;
+}
+.form-toggle input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: #475467;
+}
+.form-toggle span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }

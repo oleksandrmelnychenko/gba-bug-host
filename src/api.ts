@@ -10,6 +10,10 @@ class ApiError extends Error {
   }
 }
 
+function presentTask(task: Task): Task {
+  return task.aiMode === 'off' ? { ...task, agentRun: null } : task
+}
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   let response: Response
   try {
@@ -31,7 +35,7 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 }
 
 export function getTasks() {
-  return request<Task[]>('/api/tasks')
+  return request<Task[]>('/api/tasks').then((tasks) => tasks.map(presentTask))
 }
 
 export function getCurrentUser() {
@@ -114,7 +118,7 @@ export function createTask(draft: TaskDraft, attachments: File[]) {
   const body = new FormData()
   for (const [key, value] of Object.entries(draft)) body.append(key, value)
   for (const attachment of attachments) body.append('attachments', attachment)
-  return request<Task>('/api/tasks', { method: 'POST', body })
+  return request<Task>('/api/tasks', { method: 'POST', body }).then(presentTask)
 }
 
 export function updateTask(id: string, patch: Partial<TaskDraft & Pick<Task, 'qaStatus'>>) {
@@ -122,7 +126,7 @@ export function updateTask(id: string, patch: Partial<TaskDraft & Pick<Task, 'qa
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(patch),
-  })
+  }).then(presentTask)
 }
 
 export function reviewTaskAgain(id: string, patch: Partial<TaskDraft>, reviewComment: string, attachments: File[]) {
@@ -138,11 +142,11 @@ export function reviewTaskAgain(id: string, patch: Partial<TaskDraft>, reviewCom
 export function addTaskAttachments(id: string, attachments: File[]) {
   const body = new FormData()
   for (const attachment of attachments) body.append('attachments', attachment)
-  return request<Task>(`/api/tasks/${id}/attachments`, { method: 'POST', body })
+  return request<Task>(`/api/tasks/${id}/attachments`, { method: 'POST', body }).then(presentTask)
 }
 
 export function deleteTaskAttachment(taskId: string, attachmentId: string) {
-  return request<Task>(`/api/tasks/${taskId}/attachments/${attachmentId}`, { method: 'DELETE' })
+  return request<Task>(`/api/tasks/${taskId}/attachments/${attachmentId}`, { method: 'DELETE' }).then(presentTask)
 }
 
 export function deleteTask(id: string) {
@@ -162,7 +166,7 @@ export function stopAgentRun(id: string, revert = false) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ revert }),
-  })
+  }).then(presentTask)
 }
 
 export function resumeAgentRun(id: string) {
