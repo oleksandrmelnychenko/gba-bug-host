@@ -110,7 +110,7 @@ export const defaultRepoPlan = {
     },
   },
   gba_ecommerce: {
-    branch: 'development',
+    branch: 'main',
     root: '/root/projects/gba_ecommerce',
     services: ['gba-ecommerce'],
     checks: [
@@ -119,7 +119,7 @@ export const defaultRepoPlan = {
     ],
   },
   'gba-ecommerce-api': {
-    branch: 'development',
+    branch: 'main',
     root: '/root/projects/gba-ecommerce-api',
     services: ['gba-ecommerce-api'],
     checks: [

@@ -6,9 +6,11 @@ import test from 'node:test'
 import { ReleaseWorker, branchName, classifyGitPushFailure, classifyPostDeployCheckFailure, defaultRepoPlan, hasWorkNewerThanGate, isMigrationFile, isReleased, isRetryableValidation, isSandboxLimitedReview, isSentinelTask, lastGateAt, parseComposePs, releaseStatusFor, selectReleasableTasks, selectRepositoryChecks, taskSlug, validateReleaseHandoff, validationGateFingerprint } from '../server/release-worker.js'
 import { materializeInstalledDependencies } from '../server/worktree-dependencies.js'
 
-test('console and server releases target the canonical main branches', () => {
+test('every release targets the canonical main branch', () => {
   assert.equal(defaultRepoPlan.gba_console.branch, 'main')
   assert.equal(defaultRepoPlan['gba-server'].branch, 'main')
+  assert.equal(defaultRepoPlan.gba_ecommerce.branch, 'main')
+  assert.equal(defaultRepoPlan['gba-ecommerce-api'].branch, 'main')
 })
 
 function releasePlanDetails(repositories = ['repo'], services = []) {
