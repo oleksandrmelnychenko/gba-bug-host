@@ -9,7 +9,10 @@ const MARKER_PATTERN = /\[sentinel:([0-9a-f]{12})\]/
 export function normalizeForFingerprint(text) {
   return text
     .replace(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}[.,:0-9Z+-]*/g, '<ts>')
+    .replace(/\b\d{1,2}[./]\d{1,2}[./]\d{4}\b/g, '<date>')
     .replace(/\b\d{2}:\d{2}:\d{2}[.,]\d+\b/g, '<ts>')
+    .replace(/\b\d{1,2}:\d{2}:\d{2}\b/g, '<ts>')
+    .replace(/\/\$[A-Za-z0-9]+(?=[\]/\s]|$)/g, '/$<id>')
     .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<guid>')
     .replace(/\b[0-9a-f]{16,}\b/gi, '<hex>')
     .replace(/0x[0-9A-Fa-f]+/g, '<hex>')
@@ -39,7 +42,7 @@ export function isRecordStart(line) {
   return RECORD_START_PATTERN.test(line)
 }
 
-const NON_ERROR_LEVEL_PATTERN = /(?:^|[|\]\s])(?:WARN|WARNING|INFO|DEBUG|TRACE|VERBOSE)(?:\b|\s)/
+const NON_ERROR_LEVEL_PATTERN = /(?:^|[|[\]\s])(?:WARN|WARNING|INFO|DEBUG|TRACE|VERBOSE)(?:\b|\s)/
 
 export function isBelowErrorLevel(line) {
   if (/\b(?:ERROR|FATAL|CRITICAL)\b/.test(line)) return false
@@ -116,6 +119,60 @@ export function parseIgnorePatterns(value) {
     .map((pattern) => new RegExp(pattern))
 }
 
+export function parseContainerList(value) {
+  return (value ?? '')
+    .split('~~')
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+export function parseMaintenanceEnvRules(value) {
+  return parseContainerList(value)
+    .map((item) => {
+      const separator = item.indexOf(':')
+      const assignment = separator > 0 ? item.slice(separator + 1) : ''
+      const equals = assignment.indexOf('=')
+      return {
+        container: separator > 0 ? item.slice(0, separator).trim() : '',
+        key: equals > 0 ? assignment.slice(0, equals).trim() : '',
+        value: equals > 0 ? assignment.slice(equals + 1).trim() : '',
+      }
+    })
+    .filter((rule) => rule.container && rule.key)
+}
+
+function containerEnv(info) {
+  const env = new Map()
+  for (const entry of info?.Config?.Env ?? []) {
+    const equals = entry.indexOf('=')
+    if (equals > 0) env.set(entry.slice(0, equals), entry.slice(equals + 1))
+  }
+  return env
+}
+
+export function evaluateMaintenance({ envRules = [], fences = [], dependencies = [], graceMs = 0, now = Date.now(), inspected }) {
+  for (const rule of envRules) {
+    const info = inspected.get(rule.container)
+    if (!info) continue
+    const actual = containerEnv(info).get(rule.key)
+    if (actual !== undefined && actual.toLowerCase() === rule.value.toLowerCase()) {
+      return `${rule.container}: ${rule.key}=${actual}`
+    }
+  }
+  for (const name of [...fences, ...dependencies]) {
+    const info = inspected.get(name)
+    if (!info) return `${name}: контейнер відсутній`
+    if (info.State?.Running !== true) return `${name}: контейнер зупинено`
+  }
+  for (const name of dependencies) {
+    const startedAt = Date.parse(inspected.get(name)?.State?.StartedAt ?? '')
+    if (Number.isFinite(startedAt) && now - startedAt < graceMs) {
+      return `${name}: перезапущено ${Math.max(0, Math.round((now - startedAt) / 1000))} с тому`
+    }
+  }
+  return null
+}
+
 export function buildTaskDraft(container, lines, fingerprint, buildTag) {
   const firstLine = lines.find((line) => line.trim()) ?? 'Невідома помилка'
   const compact = normalizeForFingerprint(firstLine).slice(0, 96)
@@ -183,6 +240,11 @@ export class LogSentinel {
     suppressBackoffMs = Number.parseInt(process.env.SENTINEL_SUPPRESS_BACKOFF_MS ?? String(15 * 60 * 1000), 10),
     buildTag = process.env.APP_BUILD_NUMBER ?? 'local',
     internalApiToken = process.env.QA_DESK_INTERNAL_API_TOKEN ?? '',
+    maintenanceEnv = parseMaintenanceEnvRules(process.env.SENTINEL_MAINTENANCE_ENV),
+    maintenanceFences = parseContainerList(process.env.SENTINEL_MAINTENANCE_FENCES),
+    maintenanceDependencies = parseContainerList(process.env.SENTINEL_MAINTENANCE_DEPENDENCIES),
+    maintenanceGraceMs = Number.parseInt(process.env.SENTINEL_MAINTENANCE_GRACE_MS ?? '120000', 10),
+    maintenanceCacheMs = 5000,
   } = {}) {
     this.dockerSocket = dockerSocket
     this.deskBaseUrl = deskBaseUrl.replace(/\/$/, '')
@@ -195,8 +257,64 @@ export class LogSentinel {
     this.suppressBackoffMs = suppressBackoffMs
     this.buildTag = buildTag
     this.internalApiToken = internalApiToken
+    this.maintenanceEnv = maintenanceEnv
+    this.maintenanceFences = maintenanceFences
+    this.maintenanceDependencies = maintenanceDependencies
+    this.maintenanceGraceMs = maintenanceGraceMs
+    this.maintenanceCacheMs = maintenanceCacheMs
+    this.maintenanceCache = null
+    this.maintenanceSkipped = 0
+    this.lastMaintenanceLog = null
     this.state = { fingerprints: {}, created: [] }
     this.queue = Promise.resolve()
+  }
+
+  async maintenanceReason(now = Date.now()) {
+    const names = new Set([
+      ...this.maintenanceEnv.map((rule) => rule.container),
+      ...this.maintenanceFences,
+      ...this.maintenanceDependencies,
+    ])
+    if (names.size === 0) return null
+    if (this.maintenanceCache && now - this.maintenanceCache.at < this.maintenanceCacheMs) return this.maintenanceCache.reason
+
+    const inspected = new Map()
+    try {
+      for (const name of names) {
+        const info = await this.inspectContainer(name)
+        if (info) inspected.set(name, info)
+      }
+    } catch (error) {
+      console.error(`[sentinel] перевірка обслуговування DEV: ${error.message}`)
+      return null
+    }
+
+    const reason = evaluateMaintenance({
+      envRules: this.maintenanceEnv,
+      fences: this.maintenanceFences,
+      dependencies: this.maintenanceDependencies,
+      graceMs: this.maintenanceGraceMs,
+      now,
+      inspected,
+    })
+    this.maintenanceCache = { at: now, reason }
+    return reason
+  }
+
+  async inspectContainer(name) {
+    try {
+      return await this.dockerJson(`/containers/${encodeURIComponent(name)}/json`)
+    } catch (error) {
+      if (/docker API 404\b/.test(error.message)) return null
+      throw error
+    }
+  }
+
+  reportMaintenanceSkip(container, reason, now = Date.now()) {
+    this.maintenanceSkipped += 1
+    if (this.lastMaintenanceLog?.reason === reason && now - this.lastMaintenanceLog.at < 60_000) return
+    console.log(`[sentinel] ${container.name}: обслуговування DEV (${reason}) — помилки не заводжу, пропущено ${this.maintenanceSkipped}`)
+    this.lastMaintenanceLog = { reason, at: now }
   }
 
   requestHeaders() {
@@ -215,6 +333,12 @@ export class LogSentinel {
       this.superviseContainer(container)
       console.log(`[sentinel] стежу за ${container.name} → проєкт ${container.project}`)
     }
+    const fences = [
+      ...this.maintenanceEnv.map((rule) => `${rule.container}:${rule.key}=${rule.value}`),
+      ...this.maintenanceFences.map((name) => `${name} зупинено`),
+      ...this.maintenanceDependencies.map((name) => `${name} зупинено/перезапущено`),
+    ]
+    if (fences.length > 0) console.log(`[sentinel] пауза на обслуговування DEV: ${fences.join('; ')}`)
   }
 
   superviseContainer(container) {
@@ -285,6 +409,12 @@ export class LogSentinel {
   }
 
   async handleGroup(container, lines) {
+    const maintenance = await this.maintenanceReason()
+    if (maintenance) {
+      this.reportMaintenanceSkip(container, maintenance)
+      return
+    }
+
     const fingerprint = fingerprintGroup(container.name, lines)
     const now = Date.now()
     const known = this.state.fingerprints[fingerprint]
