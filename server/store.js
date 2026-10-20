@@ -182,6 +182,11 @@ function agentRunInputFromTask(task, comments = []) {
     project: task.project ?? 'console',
     status: task.status,
     priority: task.priority,
+    entityKind: task.entityKind ?? '',
+    entityCode: task.entityCode ?? '',
+    expectedResult: task.expectedResult ?? '',
+    actualResult: task.actualResult ?? '',
+    intakeEvidence: task.intakeEvidence ?? {},
     attachments: (task.attachments ?? []).map((attachment) => ({
       id: attachment.id,
       name: attachment.name,
@@ -203,6 +208,15 @@ function agentRunInputFromTask(task, comments = []) {
   }
 }
 
+function parseIntakeEvidence(value) {
+  try {
+    const parsed = JSON.parse(value ?? '{}')
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
 function taskFromRow(row, attachments = [], agentRun = null) {
   return {
     id: row.id,
@@ -221,6 +235,11 @@ function taskFromRow(row, attachments = [], agentRun = null) {
     assignee: row.assignee,
     createdByUserId: row.created_by_user_id ?? null,
     createdByName: row.created_by_name === 'Імпорт' ? '' : row.created_by_name ?? '',
+    entityKind: row.entity_kind ?? '',
+    entityCode: row.entity_code ?? '',
+    expectedResult: row.expected_result ?? '',
+    actualResult: row.actual_result ?? '',
+    intakeEvidence: parseIntakeEvidence(row.intake_evidence),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     attachments,
@@ -284,6 +303,11 @@ export class TaskStore {
         assignee TEXT NOT NULL,
         created_by_user_id TEXT,
         created_by_name TEXT NOT NULL DEFAULT '',
+        entity_kind TEXT NOT NULL DEFAULT '',
+        entity_code TEXT NOT NULL DEFAULT '',
+        expected_result TEXT NOT NULL DEFAULT '',
+        actual_result TEXT NOT NULL DEFAULT '',
+        intake_evidence TEXT NOT NULL DEFAULT '{}',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -460,6 +484,15 @@ export class TaskStore {
       if (!taskColumns.has('created_by_name')) {
         this.database.exec("ALTER TABLE tasks ADD COLUMN created_by_name TEXT NOT NULL DEFAULT ''")
       }
+      for (const [column, definition] of [
+        ['entity_kind', "TEXT NOT NULL DEFAULT ''"],
+        ['entity_code', "TEXT NOT NULL DEFAULT ''"],
+        ['expected_result', "TEXT NOT NULL DEFAULT ''"],
+        ['actual_result', "TEXT NOT NULL DEFAULT ''"],
+        ['intake_evidence', "TEXT NOT NULL DEFAULT '{}'"],
+      ]) {
+        if (!taskColumns.has(column)) this.database.exec(`ALTER TABLE tasks ADD COLUMN ${column} ${definition}`)
+      }
 
       const commentColumns = new Set(
         this.database.prepare('PRAGMA table_info(task_comments)').all().map((column) => column.name),
@@ -623,9 +656,10 @@ export class TaskStore {
     this.database.prepare(`
       INSERT INTO tasks (
         id, title, description, site_url, notes, staff_comments, review_comment, area, project,
-        status, qa_status, ai_mode, priority, assignee, created_by_user_id, created_by_name, created_at, updated_at
+        status, qa_status, ai_mode, priority, assignee, created_by_user_id, created_by_name,
+        entity_kind, entity_code, expected_result, actual_result, intake_evidence, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       task.id,
       task.title,
@@ -643,6 +677,11 @@ export class TaskStore {
       task.assignee,
       task.createdByUserId ?? null,
       task.createdByName ?? '',
+      task.entityKind ?? '',
+      task.entityCode ?? '',
+      task.expectedResult ?? '',
+      task.actualResult ?? '',
+      JSON.stringify(task.intakeEvidence && typeof task.intakeEvidence === 'object' ? task.intakeEvidence : {}),
       task.createdAt,
       task.updatedAt,
     )
@@ -901,12 +940,16 @@ export class TaskStore {
     const existingTask = this.find(id)
     if (!existingTask) return null
 
-    const allowedFields = ['title', 'description', 'siteUrl', 'notes', 'staffComments', 'reviewComment', 'area', 'project', 'status', 'qaStatus', 'aiMode', 'priority', 'assignee']
+    const allowedFields = ['title', 'description', 'siteUrl', 'notes', 'staffComments', 'reviewComment', 'area', 'project', 'status', 'qaStatus', 'aiMode', 'priority', 'assignee', 'entityKind', 'entityCode', 'expectedResult', 'actualResult']
     const fields = allowedFields.filter((field) => Object.hasOwn(values, field))
     const updatedAt = new Date().toISOString()
 
     if (fields.length > 0) {
       const columnNames = {
+        entityKind: 'entity_kind',
+        entityCode: 'entity_code',
+        expectedResult: 'expected_result',
+        actualResult: 'actual_result',
         title: 'title',
         description: 'description',
         siteUrl: 'site_url',
@@ -954,6 +997,14 @@ export class TaskStore {
     }
 
     return this.find(id)
+  }
+
+  saveIntakeEvidence(id, evidence) {
+    const serialized = JSON.stringify(evidence && typeof evidence === 'object' && !Array.isArray(evidence) ? evidence : {})
+    const changed = this.database
+      .prepare('UPDATE tasks SET intake_evidence = ? WHERE id = ?')
+      .run(serialized, id).changes
+    return changed === 1 ? this.find(id) : null
   }
 
   addAttachments(id, attachments) {

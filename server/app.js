@@ -15,6 +15,7 @@ import {
   verifyPassword,
 } from './auth.js'
 import { BuildNumberSource } from './build-source.js'
+import { INTAKE_ENTITY_KINDS, createIntakeCapture } from './intake-capture.js'
 import { TaskStore, isTestingTaskTitle } from './store.js'
 import { TopologyService } from './topology.js'
 import { computeMetrics } from './metrics.js'
@@ -169,6 +170,10 @@ function validateTaskInput(body, { partial = false } = {}) {
   const aiMode = cleanText(body.aiMode)
   const priority = cleanText(body.priority)
   const assignee = cleanText(body.assignee)
+  const entityKind = cleanText(body.entityKind)
+  const entityCode = cleanText(body.entityCode)
+  const expectedResult = cleanText(body.expectedResult)
+  const actualResult = cleanText(body.actualResult)
 
   if ((!partial || Object.hasOwn(body, 'title')) && title.length < 3) {
     errors.push('Назва задачі має містити щонайменше 3 символи.')
@@ -185,10 +190,34 @@ function validateTaskInput(body, { partial = false } = {}) {
   if (priority && !allowedPriorities.has(priority)) errors.push('Невідомий пріоритет задачі.')
   if (project && !allowedProjects.has(project)) errors.push('Невідомий проєкт задачі.')
   if (Object.hasOwn(body ?? {}, 'aiMode') && !allowedAiModes.has(aiMode)) errors.push('Невідомий режим AI для задачі.')
+  if (entityKind && !INTAKE_ENTITY_KINDS.includes(entityKind)) errors.push('Тип сутності має бути клієнт, товар або документ.')
+  if (entityCode.length > 120) errors.push('Код сутності має бути коротшим за 120 символів.')
+  if (entityKind && !entityCode && (!partial || Object.hasOwn(body ?? {}, 'entityCode'))) errors.push('Вкажіть код для обраного типу сутності.')
+  if (entityCode && !entityKind && (!partial || Object.hasOwn(body ?? {}, 'entityKind'))) errors.push('Оберіть, до чого належить код: клієнт, товар чи документ.')
+  if (expectedResult.length > 4000) errors.push('Поле «Очікувано» має бути коротшим за 4000 символів.')
+  if (actualResult.length > 4000) errors.push('Поле «Фактично» має бути коротшим за 4000 символів.')
 
   return {
     errors,
-    values: { title, description, siteUrl, notes, staffComments, reviewComment, area, project, status, qaStatus, aiMode, priority, assignee },
+    values: {
+      title,
+      description,
+      siteUrl,
+      notes,
+      staffComments,
+      reviewComment,
+      area,
+      project,
+      status,
+      qaStatus,
+      aiMode,
+      priority,
+      assignee,
+      entityKind,
+      entityCode,
+      expectedResult,
+      actualResult,
+    },
   }
 }
 
@@ -241,6 +270,11 @@ export async function createApp(options = {}) {
   const internalApiToken = options.internalApiToken ?? process.env.QA_DESK_INTERNAL_API_TOKEN ?? ''
   const secureCookies = options.secureCookies ?? process.env.NODE_ENV === 'production'
   const loginAttempts = new Map()
+  const intakeCapture = options.intakeCapture !== undefined
+    ? options.intakeCapture
+    : process.env.NODE_ENV === 'production' && process.env.QA_INTAKE_CAPTURE !== 'false'
+      ? createIntakeCapture({ store })
+      : null
 
   await mkdir(uploadsDirectory, { recursive: true })
   await store.ensureReady()
@@ -504,14 +538,34 @@ export async function createApp(options = {}) {
         assignee: values.assignee || 'Не призначено',
         createdByUserId: request.user?.internal ? null : request.user?.id ?? null,
         createdByName: request.user?.displayName ?? 'Команда',
+        entityKind: values.entityKind,
+        entityCode: values.entityKind ? values.entityCode : '',
+        expectedResult: values.expectedResult,
+        actualResult: values.actualResult,
       }, request.files.map(serializeAttachment))
 
       if (['ready_for_retest', 'done'].includes(task.status)) {
         store.markTaskProcessed(task.id, 'manual')
       }
-      if (task.aiMode !== 'off') store.enqueueAgentRun(randomUUID(), task.id, 'manual')
+      const captureFirst = Boolean(intakeCapture && task.entityKind && task.entityCode)
+      if (task.aiMode !== 'off' && !captureFirst) store.enqueueAgentRun(randomUUID(), task.id, 'manual')
 
       response.status(201).json(await store.find(task.id))
+
+      if (captureFirst) {
+        setImmediate(async () => {
+          try {
+            await intakeCapture(task.id)
+          } catch (error) {
+            console.error(`[intake] ${task.id}: ${error?.message ?? error}`)
+          }
+          try {
+            if (task.aiMode !== 'off') store.enqueueAgentRun(randomUUID(), task.id, 'manual')
+          } catch (error) {
+            console.error(`[intake] ${task.id}: не вдалося поставити AI-запуск після фіксації «до»: ${error?.message ?? error}`)
+          }
+        })
+      }
     } catch (error) {
       await removeUploadedFiles(request.files)
       next(error)
@@ -548,7 +602,7 @@ export async function createApp(options = {}) {
       }
 
       const patch = {}
-      for (const key of ['title', 'description', 'siteUrl', 'notes', 'staffComments', 'reviewComment', 'area', 'project', 'status', 'qaStatus', 'priority', 'assignee']) {
+      for (const key of ['title', 'description', 'siteUrl', 'notes', 'staffComments', 'reviewComment', 'area', 'project', 'status', 'qaStatus', 'priority', 'assignee', 'entityKind', 'entityCode', 'expectedResult', 'actualResult']) {
         if (Object.hasOwn(request.body, key)) patch[key] = values[key]
       }
       if (nextAiMode !== existingTask.aiMode) patch.aiMode = nextAiMode

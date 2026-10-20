@@ -1364,3 +1364,16 @@ test('паралельні Codex-запуски беруть лише незал
     assert.equal(store.claimNextAgentRun('worker-a').taskId, salesB.body.id)
   })
 })
+
+test('кожна задача в API має intake-поля навіть без заповнених даних', async () => {
+  await withTestApp(async ({ app }) => {
+    const response = await request(app).get('/api/tasks').expect(200)
+    for (const task of response.body) {
+      assert.equal(task.entityKind, '')
+      assert.equal(task.entityCode, '')
+      assert.equal(task.expectedResult, '')
+      assert.equal(task.actualResult, '')
+      assert.deepEqual(task.intakeEvidence, {})
+    }
+  })
+})

@@ -123,6 +123,11 @@ export interface Task {
   priority: TaskPriority
   createdByUserId: string | null
   createdByName: string
+  entityKind: TaskEntityKind
+  entityCode: string
+  expectedResult: string
+  actualResult: string
+  intakeEvidence: IntakeEvidence
   createdAt: string
   updatedAt: string
   attachments: TaskAttachment[]
@@ -130,6 +135,29 @@ export interface Task {
 }
 
 export type TaskAiMode = 'auto' | 'off'
+export type TaskEntityKind = '' | 'client' | 'product' | 'document'
+
+export interface IntakeEvidenceRequest {
+  label: string
+  path: string
+  status: number | null
+  ok: boolean
+  itemCount: number | null
+  items?: Record<string, unknown>[]
+  error?: string
+  proxyError?: string
+  durationMs?: number
+}
+
+export interface IntakeEvidence {
+  version?: number
+  capturedAt?: string
+  proxy?: string
+  entity?: { kind: TaskEntityKind; code: string }
+  requests?: IntakeEvidenceRequest[]
+  truncated?: boolean
+  error?: string
+}
 
 export interface TaskDraft {
   title: string
@@ -143,6 +171,10 @@ export interface TaskDraft {
   status: TaskStatus
   priority: TaskPriority
   aiMode: TaskAiMode
+  entityKind: TaskEntityKind
+  entityCode: string
+  expectedResult: string
+  actualResult: string
 }
 
 export type NodeStatus = 'ok' | 'warn' | 'down' | 'unknown'

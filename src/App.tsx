@@ -84,6 +84,7 @@ import {
   type TaskAttachment,
   type TaskComment,
   type TaskDraft,
+  type TaskEntityKind,
   type TaskPriority,
   type TaskProject,
   type TaskStatus,
@@ -106,6 +107,50 @@ const emptyDraft: TaskDraft = {
   status: 'new',
   priority: 'medium',
   aiMode: 'auto',
+  entityKind: '',
+  entityCode: '',
+  expectedResult: '',
+  actualResult: '',
+}
+
+const entityKindOptions: { value: TaskEntityKind; label: string; placeholder: string }[] = [
+  { value: '', label: 'Не вказано', placeholder: 'Спершу оберіть тип' },
+  { value: 'client', label: 'Клієнт', placeholder: 'Код, ЄДРПОУ або назва клієнта' },
+  { value: 'product', label: 'Товар', placeholder: 'Артикул товару' },
+  { value: 'document', label: 'Документ', placeholder: 'Номер накладної' },
+]
+
+function entityKindLabel(kind: TaskEntityKind) {
+  return entityKindOptions.find((option) => option.value === kind)?.label ?? kind
+}
+
+function IntakeSummary({ task }: { task: Task }) {
+  const requests = task.intakeEvidence?.requests ?? []
+  if (!task.entityKind && !task.expectedResult && !task.actualResult) return null
+  return (
+    <section className="form-field form-field-wide intake-summary">
+      <label>Вхідні дані QA</label>
+      <dl className="conclusion-meta">
+        {task.entityKind && <div><dt>{entityKindLabel(task.entityKind)}</dt><dd><code>{task.entityCode}</code></dd></div>}
+        {task.expectedResult && <div><dt>Очікувано</dt><dd>{task.expectedResult}</dd></div>}
+        {task.actualResult && <div><dt>Фактично</dt><dd>{task.actualResult}</dd></div>}
+        {task.entityKind && (
+          <div>
+            <dt>Стан «до» на DEV</dt>
+            <dd>
+              {requests.length === 0
+                ? task.intakeEvidence?.error ?? 'Фіксується…'
+                : requests.map((request) => (
+                  <div key={request.path}>
+                    {request.label}: {request.ok ? `${request.status}, знайдено ${request.itemCount}` : `${request.status ?? 'немає відповіді'} — ${request.error ?? 'помилка'}`}
+                  </div>
+                ))}
+            </dd>
+          </div>
+        )}
+      </dl>
+    </section>
+  )
 }
 
 function isTestingTaskTitle(title: string) {
@@ -309,6 +354,10 @@ function taskToDraft(task: Task): TaskDraft {
     status: task.status,
     priority: task.priority,
     aiMode: task.aiMode ?? 'auto',
+    entityKind: task.entityKind ?? '',
+    entityCode: task.entityCode ?? '',
+    expectedResult: task.expectedResult ?? '',
+    actualResult: task.actualResult ?? '',
   }
 }
 
@@ -1228,6 +1277,61 @@ function CreateTaskDialog({
               />
             </div>
           </div>
+          <div className="form-grid">
+            <div className="form-field">
+              <label htmlFor="new-entity-kind">Що саме зачеплено</label>
+              <div className="native-select">
+                <select
+                  id="new-entity-kind"
+                  value={draft.entityKind}
+                  onChange={(event) => setDraft((current) => ({
+                    ...current,
+                    entityKind: event.target.value as TaskEntityKind,
+                    entityCode: event.target.value ? current.entityCode : '',
+                  }))}
+                >
+                  {entityKindOptions.map((option) => <option value={option.value} key={option.value || 'none'}>{option.label}</option>)}
+                </select>
+                <ChevronDown size={15} />
+              </div>
+            </div>
+            <div className="form-field">
+              <label htmlFor="new-entity-code">Код</label>
+              <input
+                id="new-entity-code"
+                maxLength={120}
+                disabled={!draft.entityKind}
+                required={Boolean(draft.entityKind)}
+                value={draft.entityCode}
+                onChange={(event) => setField('entityCode', event.target.value)}
+                placeholder={entityKindOptions.find((option) => option.value === draft.entityKind)?.placeholder}
+              />
+            </div>
+          </div>
+          <div className="form-grid">
+            <div className="form-field">
+              <label htmlFor="new-expected">Очікувано</label>
+              <textarea
+                id="new-expected"
+                rows={2}
+                maxLength={4000}
+                value={draft.expectedResult}
+                onChange={(event) => setField('expectedResult', event.target.value)}
+                placeholder="Що мало б бути на екрані"
+              />
+            </div>
+            <div className="form-field">
+              <label htmlFor="new-actual">Фактично</label>
+              <textarea
+                id="new-actual"
+                rows={2}
+                maxLength={4000}
+                value={draft.actualResult}
+                onChange={(event) => setField('actualResult', event.target.value)}
+                placeholder="Що є насправді"
+              />
+            </div>
+          </div>
           <div className="form-field form-field-wide">
             <label htmlFor="new-notes">Нотатки</label>
             <textarea
@@ -1656,6 +1760,7 @@ function EditTaskDialog({
               <input id="detail-site-url" type="text" inputMode="url" maxLength={2048} value={draft.siteUrl} onChange={(event) => setDraft({ ...draft, siteUrl: event.target.value })} placeholder="https://example.com/problem-page" />
             </div>
           </div>
+          <IntakeSummary task={task} />
           <div className="form-field form-field-wide">
             <label htmlFor="detail-notes">Нотатки</label>
             <textarea id="detail-notes" className="technical-notes" rows={5} maxLength={10000} value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} placeholder="HTTP request, payload, response — без паролів і токенів" />
