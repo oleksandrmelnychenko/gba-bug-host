@@ -11,6 +11,7 @@ import {
   validateVerificationSpec,
 } from './verification-spec.js'
 import { affectedDotnetTestProjects, dotnetFastFilter, dotnetTestCommand, readDotnetProjectGraph } from './dotnet-tests.js'
+import { HostGateLimiter, classifyGateOutput, gateKind, reducedWorkersCommand } from './host-gates.js'
 import { materializeInstalledDependencies } from './worktree-dependencies.js'
 
 const RELEASE_MARKER = /\[released:([^\]]+)\]/g
@@ -624,6 +625,9 @@ export class ReleaseWorker {
     guardianAiMode = process.env.RELEASE_GUARDIAN_AI_MODE === 'auto' ? 'auto' : 'off',
     guardianPreemptPollMs = Number.parseInt(process.env.RELEASE_GUARDIAN_PREEMPT_POLL_MS ?? '20000', 10),
     guardianRedGraceMs = Number.parseInt(process.env.RELEASE_GUARDIAN_RED_GRACE_MS ?? String(30 * 60 * 1000), 10),
+    gateLimiter = null,
+    guardianEnvironmentRetryMs = Number.parseInt(process.env.RELEASE_GUARDIAN_ENVIRONMENT_RETRY_MS ?? String(10 * 60 * 1000), 10),
+    gateMaxWaitMs = Number.parseInt(process.env.RELEASE_GATE_MAX_WAIT_MS ?? String(30 * 60 * 1000), 10),
   } = {}) {
     this.deskBaseUrl = deskBaseUrl.replace(/\/$/, '')
     this.worktreesDirectory = worktreesDirectory
@@ -653,6 +657,9 @@ export class ReleaseWorker {
     this.guardianAiMode = guardianAiMode
     this.guardianPreemptPollMs = Number.isInteger(guardianPreemptPollMs) && guardianPreemptPollMs > 0 ? guardianPreemptPollMs : 20_000
     this.guardianState = new Map()
+    this.gateLimiter = gateLimiter
+    this.guardianEnvironmentRetryMs = Number.isInteger(guardianEnvironmentRetryMs) && guardianEnvironmentRetryMs >= 0 ? guardianEnvironmentRetryMs : 10 * 60 * 1000
+    this.gateMaxWaitMs = Number.isInteger(gateMaxWaitMs) && gateMaxWaitMs >= 0 ? gateMaxWaitMs : 30 * 60 * 1000
     this.guardianRedGraceMs = Number.isInteger(guardianRedGraceMs) && guardianRedGraceMs >= 0 ? guardianRedGraceMs : 30 * 60 * 1000
     this.batching = batching
     this.uiVerifyRunner = uiVerifyRunner
@@ -1156,6 +1163,7 @@ export class ReleaseWorker {
       const gate = await this.resolveRepositoryGate(repo, root, files)
       for (const quick of gate.fast) {
         const result = await this.runReleaseCheck(repo, quick.command, root)
+        if (result.code !== 0 && result.environment) return { ok: false, kind: 'environment', reason: `${repo}: швидкий прогін пакета впав через середовище (${(result.environmentReasons ?? []).join('; ')})` }
         if (result.code !== 0) {
           return {
             ok: false,
@@ -1167,6 +1175,7 @@ export class ReleaseWorker {
       }
       for (const check of gate.full) {
         const result = await this.runReleaseCheck(repo, check, root)
+        if (result.code !== 0 && result.environment) return { ok: false, kind: 'environment', reason: `${repo}: «${check.join(' ')}» у пакеті впав через середовище (${(result.environmentReasons ?? []).join('; ')})` }
         if (result.code !== 0) {
           return {
             ok: false,
@@ -1258,6 +1267,12 @@ export class ReleaseWorker {
       return
     }
     const gated = await this.gateGroup(integration, included, repos)
+    if (!gated.ok && gated.kind === 'environment') {
+      for (const entry of included) {
+        await this.handleReleaseFailure(entry.task, { kind: 'environment', phase: 'validating', reason: gated.reason, evidence: entry.prepared.evidence })
+      }
+      return
+    }
     if (!gated.ok) {
       const probe = await this.probeMainlineGate(gated.failedGate.repo, gated.failedGate.baselineCommit, gated.failedGate.check)
       if (probe.status === 'red') {
@@ -1438,13 +1453,34 @@ export class ReleaseWorker {
     console.log(`[release] ${task.id}: audit-only перевірку завершено, DEV-сценарій підтверджено`)
   }
 
+  async deferForEnvironment(task, outcome) {
+    await this.updateRelease(task, {
+      status: 'retrying',
+      phase: 'failed',
+      error: outcome.reason,
+      evidence: mergeEvidence(outcome.evidence ?? task.agentRun?.releaseEvidence, {
+        failure: { phase: outcome.phase ?? 'validating', reason: outcome.reason, environment: true, at: new Date().toISOString() },
+      }),
+    })
+    await this.annotate(task, `[release-retry] середовище, спробу не зараховано: ${outcome.reason}`.slice(0, 700))
+    console.error(`[release] ${task.id}: середовище — ${outcome.reason.slice(0, 200)}`)
+  }
+
   async handleReleaseFailure(task, incoming) {
     let outcome = incoming
+    if (outcome.kind === 'environment') {
+      await this.deferForEnvironment(task, outcome)
+      return
+    }
     if (outcome.kind === 'validation' && outcome.failedGate) {
       const { repo, baselineCommit, check } = outcome.failedGate
       const probe = await this.probeMainlineGate(repo, baselineCommit, check)
       if (probe.status === 'red') {
         await this.holdForMainline(task, outcome, probe)
+        return
+      }
+      if (['environment', 'deferred'].includes(probe.status)) {
+        await this.deferForEnvironment(task, { ...outcome, reason: `${outcome.reason}; перевірка чистого mainline: ${probe.reason}` })
         return
       }
       const branch = this.repoPlan[repo]?.branch ?? 'main'
@@ -1941,6 +1977,9 @@ export class ReleaseWorker {
         })
         for (const quick of needsPublish ? gate.fast : []) {
           const result = await this.runReleaseCheck(repo, quick.command, validationDirectory)
+          if (result.code !== 0 && result.environment) {
+            return { ok: false, kind: 'environment', phase: 'validating', reason: `${repo}: «${quick.command.slice(0, 4).join(' ')}…» впав через середовище (${(result.environmentReasons ?? []).join('; ')})`, evidence }
+          }
           if (result.code !== 0) {
             return {
               ok: false,
@@ -1954,6 +1993,9 @@ export class ReleaseWorker {
         }
         for (const check of selectedChecks) {
           const result = await this.runReleaseCheck(repo, check, validationDirectory)
+          if (result.code !== 0 && result.environment) {
+            return { ok: false, kind: 'environment', phase: 'validating', reason: `${repo}: «${check.join(' ')}» впав через середовище (${(result.environmentReasons ?? []).join('; ')})`, evidence }
+          }
           if (result.code !== 0) {
             return {
               ok: false,
@@ -2109,13 +2151,40 @@ export class ReleaseWorker {
     return present
   }
 
-  async runReleaseCheck(repo, check, cwd, { onChild } = {}) {
-    const run = () => this.runProcess(check[0], check.slice(1), { cwd, onChild })
-    const first = await run()
-    if (first.code === 0) return first
+  async withGateSlot(check, { background = false } = {}, operation) {
+    if (!this.gateLimiter) return operation()
+    const kind = gateKind(check)
+    const slot = await this.gateLimiter.acquire(kind, { maxWaitMs: background ? 0 : this.gateMaxWaitMs })
+    if (!slot.release && background) {
+      return { code: null, deferred: true, output: slot.reason ?? 'хост зайнятий' }
+    }
+    if (!slot.release) console.warn(`[release] «${check.join(' ')}»: хост зайнятий ${Math.round(slot.waitedMs / 60_000)} хв (${slot.reason}); запускаю з обмеженням воркерів`)
+    try {
+      return await operation(slot)
+    } finally {
+      await slot.release?.()
+    }
+  }
+
+  async runReleaseCheck(repo, check, cwd, { onChild, background = false } = {}) {
+    const run = (command) => this.runProcess(command[0], command.slice(1), { cwd, onChild })
+    const first = await this.withGateSlot(check, { background }, (slot) => run(slot && !slot.release ? reducedWorkersCommand(check) : check))
+    if (first.deferred || first.code === 0) return first
+    const classification = classifyGateOutput(first.output)
+    if (classification.environment) {
+      console.warn(`[release] ${repo}: «${check.join(' ')}» впав через середовище (${classification.reasons.join('; ')}); повторюю з меншою кількістю воркерів, коли хост звільниться`)
+      const reduced = reducedWorkersCommand(check)
+      const second = await this.withGateSlot(check, { background }, () => run(reduced))
+      if (second.deferred) return { ...first, environment: true, environmentReasons: classification.reasons, deferred: true }
+      if (second.code === 0) return { ...second, retried: true, environmentRetry: true }
+      const again = classifyGateOutput(second.output)
+      return { ...second, retried: true, environment: again.environment, environmentReasons: again.environment ? again.reasons : [] }
+    }
     if (!isRetryableValidation(check, first)) return first
     console.warn(`[release] ${repo}: розпізнано flake у «${check.join(' ')}», повторюю один раз`)
-    return { ...await run(), retried: true }
+    const retried = await this.withGateSlot(check, { background }, () => run(check))
+    if (retried.deferred) return first
+    return { ...retried, retried: true }
   }
 
   async updateRelease(task, values) {
@@ -2449,12 +2518,13 @@ export class ReleaseWorker {
       .some((task) => task.agentRun?.releaseStatus !== 'waiting_mainline')
   }
 
-  async probeMainlineGate(repo, sha, check, { preemptible = false } = {}) {
+  async probeMainlineGate(repo, sha, check, { preemptible = false, fresh = false } = {}) {
     const plan = this.repoPlan[repo]
     if (!plan || !sha || !Array.isArray(check)) return { status: 'error', reason: 'невідомий repo/SHA/гейт для перевірки mainline' }
     const key = mainlineGateKey(repo, sha, check)
-    const cached = await this.mainlineGateCache.get(key)
-    if (cached && (cached.status === 'green' || (cached.status === 'red' && Date.now() - Date.parse(cached.at) < this.mainlineRedTtlMs))) {
+    const cached = fresh ? null : await this.mainlineGateCache.get(key)
+    const cachedEnvironment = cached?.status === 'red' && classifyGateOutput(cached.output).environment
+    if (cached && !cachedEnvironment && (cached.status === 'green' || (cached.status === 'red' && Date.now() - Date.parse(cached.at) < this.mainlineRedTtlMs))) {
       return { ...cached, check, cached: true }
     }
     const root = path.join(this.probeWorktreesDirectory, repo)
@@ -2480,11 +2550,21 @@ export class ReleaseWorker {
       : null
     let result
     try {
-      result = await this.runReleaseCheck(repo, check, root, { onChild: (spawned) => { child = spawned } })
+      result = await this.runReleaseCheck(repo, check, root, { onChild: (spawned) => { child = spawned }, background: preemptible })
     } finally {
       if (watcher) clearInterval(watcher)
     }
     if (preempted) return { status: 'aborted', reason: 'поступив реліз — фонову перевірку mainline відкладено', at: new Date().toISOString(), check }
+    if (result.deferred) return { status: 'deferred', reason: `хост зайнятий: ${result.output}`, at: new Date().toISOString(), check }
+    if (result.code !== 0 && result.environment) {
+      return {
+        status: 'environment',
+        reason: `середовище, а не код: ${(result.environmentReasons ?? []).join('; ')}`,
+        at: new Date().toISOString(),
+        check,
+        output: String(result.output ?? '').slice(-1500),
+      }
+    }
     const entry = {
       status: result.code === 0 ? 'green' : 'red',
       at: new Date().toISOString(),
@@ -2610,6 +2690,36 @@ export class ReleaseWorker {
     }
   }
 
+  async confirmMainRed(repo, sha, red) {
+    const check = Array.isArray(red.check) ? red.check : String(red.check ?? '').split(' ').filter(Boolean)
+    const again = await this.probeMainlineGate(repo, sha, check, { preemptible: true, fresh: true })
+    if (['aborted', 'deferred', 'error'].includes(again.status)) return { decided: false, probe: again }
+    if (again.status !== 'red') return { decided: true, confirmed: false, probe: again }
+    const before = new Set(red.failures ?? [])
+    const after = again.failures ?? []
+    const overlap = after.filter((failure) => before.has(failure)).length
+    const confirmed = before.size === 0 && after.length === 0
+      ? true
+      : overlap > 0 && overlap >= Math.min(before.size, after.length) * 0.5
+    return { decided: true, confirmed, probe: again }
+  }
+
+  async reportConfirmedMainRed(repo, plan, sha, state) {
+    const confirmation = await this.confirmMainRed(repo, sha, state.probe)
+    if (!confirmation.decided) return false
+    if (!confirmation.confirmed) {
+      const status = confirmation.probe.status === 'green' ? 'green' : 'environment'
+      this.guardianState.set(repo, { sha, status, at: new Date().toISOString() })
+      console.error(`[release] guardian ${repo}@${sha.slice(0, 12)}: повторний прогін не підтвердив падіння (${confirmation.probe.status}); MAIN RED не відкриваю`)
+      if (status === 'green') await this.reportMainGreen(repo, plan, sha)
+      return false
+    }
+    await this.reportMainRed(repo, plan, sha, confirmation.probe)
+    state.reported = true
+    state.probe = confirmation.probe
+    return true
+  }
+
   async guardMainlines() {
     if (!this.guardianEnabled) return
     for (const [repo, plan] of Object.entries(this.repoPlan)) {
@@ -2618,10 +2728,11 @@ export class ReleaseWorker {
       const state = this.guardianState.get(repo)
       if (state?.sha === sha) {
         if (state.status === 'red' && !state.reported && Date.now() - Date.parse(state.firstRedAt) >= this.guardianRedGraceMs) {
-          await this.reportMainRed(repo, plan, sha, state.probe)
-          state.reported = true
+          await this.reportConfirmedMainRed(repo, plan, sha, state)
+          return
         }
-        continue
+        const retryAfter = state.status === 'environment' ? this.guardianEnvironmentRetryMs : state.status === 'error' ? 3 * this.guardianEnvironmentRetryMs : null
+        if (retryAfter === null || Date.now() - Date.parse(state.at) < retryAfter) continue
       }
       let red = null
       let incomplete = null
@@ -2640,10 +2751,11 @@ export class ReleaseWorker {
           break
         }
       }
-      if (incomplete?.status === 'aborted') return
+      if (['aborted', 'deferred'].includes(incomplete?.status)) return
       const now = new Date().toISOString()
       if (incomplete) {
-        this.guardianState.set(repo, { ...(state ?? {}), sha, status: 'error', at: now })
+        const previous = state?.sha === sha ? state : {}
+        this.guardianState.set(repo, { ...previous, sha, status: incomplete.status === 'environment' ? 'environment' : 'error', at: now })
         console.error(`[release] guardian ${repo}@${sha.slice(0, 12)}: ${incomplete.reason ?? 'перевірка не відбулася'}`)
         return
       }
@@ -2665,12 +2777,15 @@ export class ReleaseWorker {
         reported: sameFailure && state.reported === true,
       }
       this.guardianState.set(repo, next)
-      const persisted = Date.now() - Date.parse(next.firstRedAt) >= this.guardianRedGraceMs
-      if (next.reported || next.consecutive >= 2 || persisted) {
+      if (next.reported) {
         await this.reportMainRed(repo, plan, sha, red)
-        next.reported = true
+        return
+      }
+      const persisted = Date.now() - Date.parse(next.firstRedAt) >= this.guardianRedGraceMs
+      if (next.consecutive >= 2 || persisted) {
+        await this.reportConfirmedMainRed(repo, plan, sha, next)
       } else {
-        console.error(`[release] guardian ${repo}@${sha.slice(0, 12)}: «${failedCheck}» червоний; задачу MAIN RED відкрию, якщо падіння повториться на наступному SHA або протримається ${Math.round(this.guardianRedGraceMs / 60_000)} хв`)
+        console.error(`[release] guardian ${repo}@${sha.slice(0, 12)}: «${failedCheck}» червоний; задачу MAIN RED відкрию лише після підтвердного прогону, якщо падіння повториться на наступному SHA або протримається ${Math.round(this.guardianRedGraceMs / 60_000)} хв`)
       }
       return
     }
@@ -2800,7 +2915,10 @@ export class ReleaseWorker {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const worker = new ReleaseWorker({ guardianEnabled: process.env.RELEASE_GUARDIAN !== 'off' })
+  const worker = new ReleaseWorker({
+    guardianEnabled: process.env.RELEASE_GUARDIAN !== 'off',
+    gateLimiter: process.env.RELEASE_GATE_LIMITER === 'off' ? null : new HostGateLimiter(),
+  })
   worker.start()
   const shutdown = async () => {
     await worker.stop()

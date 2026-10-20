@@ -691,3 +691,101 @@ test('UI spec від Codex не може дозволяти запис, ходи
   assert.match(validateUiSpec({ ...base, env: 'qa' }).errors.join(' '), /env=dev/)
   assert.match(validateUiSpec({ ...base, checks: [{ type: 'magic' }] }).errors.join(' '), /type/)
 })
+
+const starvedOutput = [
+  ...Array.from({ length: 8 }, (_, index) => ` FAIL  src/f${index}.test.tsx > s\nError: Hook timed out in 30000ms.`),
+  ' Test Files  462 failed | 623 passed (1085)',
+].join('\n')
+
+test('падіння гейта через голодування хоста не зараховує спробу і не ставить hold', async () => {
+  let calls = 0
+  await withWorker(async ({ worker, record }) => {
+    worker.runProcess = async (command) => {
+      if (command !== 'verify') return { code: 0, output: shaA }
+      calls += 1
+      return { code: 1, output: starvedOutput }
+    }
+    const result = await worker.runReleaseCheck('repo', ['verify', '--maxWorkers=8'], '/tmp')
+    assert.equal(result.environment, true)
+    assert.equal(calls, 2, 'один повтор зі зменшеними воркерами')
+
+    const task = humanTask()
+    await worker.handleReleaseFailure(task, { ok: false, kind: 'environment', phase: 'validating', reason: 'repo: «verify» впав через середовище' })
+    assert.equal(task.agentRun.releaseStatus, 'retrying')
+    assert.equal(task.agentRun.releaseAttempts, 1)
+    assert.match(record.annotations.at(-1), /середовище, спробу не зараховано/)
+
+    const probe = await worker.probeMainlineGate('repo', shaA, gate)
+    assert.equal(probe.status, 'environment')
+    assert.equal(await worker.mainlineGateCache.get(mainlineGateKey('repo', shaA, gate)), null)
+    const held = humanTask()
+    await worker.handleReleaseFailure(held, gateFailure())
+    assert.equal(held.agentRun.releaseStatus, 'retrying')
+    assert.equal(held.agentRun.releaseAttempts, 1)
+  })
+})
+
+test('повторний прогін зі зменшеними воркерами рятує гейт від голодування', async () => {
+  const seen = []
+  await withWorker(async ({ worker }) => {
+    worker.runProcess = async (command, args) => {
+      seen.push(args.join(' '))
+      return seen.length === 1 ? { code: 1, output: starvedOutput } : { code: 0, output: 'ok' }
+    }
+    const result = await worker.runReleaseCheck('repo', ['npx', 'vitest', 'run', '--maxWorkers=8'], '/tmp')
+    assert.equal(result.code, 0)
+    assert.equal(result.environmentRetry, true)
+    assert.deepEqual(seen, ['vitest run --maxWorkers=8', 'vitest run --maxWorkers=4'])
+  })
+})
+
+test('guardian не відкриває MAIN RED на голодуванні хоста та без підтвердного прогону', async () => {
+  const originalFetch = global.fetch
+  const posts = []
+  global.fetch = async (url, init = {}) => {
+    if (init.method === 'POST' && String(url).endsWith('/api/tasks')) {
+      posts.push(Object.fromEntries(init.body.entries()))
+      return { ok: true, json: async () => ({ id: 'BUG-MR' }) }
+    }
+    return { ok: true, json: async () => [] }
+  }
+  let mode = 'starved'
+  let current = shaA
+  try {
+    await withWorker(async ({ worker }) => {
+      worker.runProcess = async (command) => {
+        if (command === 'git') return { code: 0, output: current }
+        if (command !== 'verify') return { code: 0, output: '' }
+        if (mode === 'starved') return { code: 1, output: starvedOutput }
+        if (mode === 'flaky-red') {
+          mode = 'green'
+          return { code: 1, output: ' FAIL  src/a.test.ts > breaks' }
+        }
+        return { code: 0, output: '' }
+      }
+      await worker.guardMainlines()
+      assert.equal(worker.guardianState.get('repo').status, 'environment')
+      current = shaB
+      await worker.guardMainlines()
+      assert.equal(posts.length, 0, 'масові таймаути — не MAIN RED')
+
+      mode = 'flaky-red'
+      current = 'c'.repeat(40)
+      worker.guardianState.set('repo', { sha: shaB, status: 'red', failedCheck: gate.join(' '), firstRedAt: new Date().toISOString(), consecutive: 1, at: new Date().toISOString() })
+      await worker.guardMainlines()
+      assert.equal(posts.length, 0, 'підтвердний прогін зелений — задачі немає')
+      assert.equal(worker.guardianState.get('repo').status, 'green')
+    }, { guardianEnabled: true, guardianEnvironmentRetryMs: 0 })
+  } finally {
+    global.fetch = originalFetch
+  }
+})
+
+test('закешований «червоний» результат голодування не тримає релізи', async () => {
+  await withWorker(async ({ worker, calls }) => {
+    await worker.mainlineGateCache.set(mainlineGateKey('repo', shaA, gate), { status: 'red', at: new Date().toISOString(), output: starvedOutput })
+    const probe = await worker.probeMainlineGate('repo', shaA, gate)
+    assert.equal(probe.status, 'green')
+    assert.equal(calls.filter((call) => call.command === 'verify').length, 1)
+  }, { verifyCode: () => 0 })
+})
