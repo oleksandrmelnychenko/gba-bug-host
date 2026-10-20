@@ -63,6 +63,8 @@ export interface AgentRun {
   sessionMode?: '' | 'fresh' | 'resume'
   sessionReason?: string
   codexModel?: string
+  reasoningEffort?: string
+  reasoningReason?: string
   status: AgentRunStatus
   attempt: number
   reviewComment: string

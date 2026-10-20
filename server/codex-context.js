@@ -33,6 +33,7 @@ export function composePersistentContext({
   project,
   baseContext,
   releasedRuns = [],
+  lessons = '',
   generatedAt = new Date().toISOString(),
   maximumLength = 30_000,
 }) {
@@ -41,6 +42,8 @@ export function composePersistentContext({
     `Версійований постійний контекст GBA\nПроєкт: ${project}\nЗнімок сформовано: ${generatedAt}`,
     base || 'Базовий контекст не налаштовано.',
   ]
+
+  if (lessons) sections.push(compactText(lessons, 4_500))
 
   if (releasedRuns.length > 0) {
     const history = releasedRuns.map((run) => {
@@ -218,4 +221,73 @@ export function composePriorRunsContext({ runs = [], comments = [], maximumLengt
     block = `- (старіші спроби пропущено)\n${sections.join('\n')}`
   }
   return block.length > maximumLength ? `${block.slice(0, maximumLength - 1)}…` : block
+}
+
+const REASONING_ORDER = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']
+const SQL_PATTERN = /\bsql\b|dapper|stored\s+procedure|збережен\w*\s+процедур|\bmssql\b|база\s+даних|запит\w*\s+до\s+(?:бд|бази)|\bindex(?:es)?\b|індекс/i
+const SYNC_PATTERN = /синхрон|\bsync\b|datasync|\b1[сc]\b|fenix|\bamg\b|міграц|migration/i
+const MULTI_REPO_PATTERN = /фул-?стек|full-?stack|і\s+(?:бекенд|сервер)\w*\s+і\s+(?:фронт|консол)/i
+
+function strongerEffort(left, right) {
+  return REASONING_ORDER.indexOf(right) > REASONING_ORDER.indexOf(left) ? right : left
+}
+
+export function selectReasoningEffort({ task = {}, priorRuns = [], baseEffort = 'high', escalatedEffort = 'xhigh' } = {}) {
+  const comments = (task.comments ?? []).filter((comment) => !isPipelineComment(comment)).map((comment) => comment.body)
+  const text = [task.title, task.description, task.area, task.notes, task.reviewComment, ...comments].filter(Boolean).join(' ')
+  const reasons = []
+  if (SQL_PATTERN.test(text)) reasons.push('sql')
+  if (SYNC_PATTERN.test(text)) reasons.push('sync')
+  const multiRepo = MULTI_REPO_PATTERN.test(text) || priorRuns.some((run) => {
+    const files = parseObject(run.details).changedFiles
+    return Array.isArray(files) && new Set(files.map((file) => String(file).split('/')[0])).size > 1
+  })
+  if (multiRepo) reasons.push('multi-repo')
+  if (reasons.length === 0) return { effort: baseEffort, reason: 'default' }
+  return { effort: strongerEffort(baseEffort, escalatedEffort), reason: reasons.join('+') }
+}
+
+function lessonWords(text) {
+  return new Set(String(text ?? '').toLocaleLowerCase().replace(/[^\p{L}\p{N}\s]+/gu, ' ').split(/\s+/).filter((word) => word.length > 2))
+}
+
+export function isNewLesson(candidate, existing = [], threshold = 0.6) {
+  const words = lessonWords(candidate)
+  if (words.size < 3) return false
+  return !existing.some((item) => {
+    const other = lessonWords(item.text ?? item)
+    const shared = [...words].filter((word) => other.has(word)).length
+    const union = new Set([...words, ...other]).size
+    return union > 0 && shared / union >= threshold
+  })
+}
+
+export function appendLesson(state, { text, taskId, project, at = new Date().toISOString() }, { maximumPerProject = 40 } = {}) {
+  const items = Array.isArray(state?.items) ? state.items : []
+  const lesson = compactText(text, 400)
+  if (!lesson) return { changed: false, state: { items } }
+  const sameProject = items.filter((item) => item.project === project)
+  if (!isNewLesson(lesson, sameProject)) return { changed: false, state: { items } }
+  const next = [{ text: lesson, taskId, project, at }, ...items]
+  const kept = []
+  const counts = {}
+  for (const item of next) {
+    counts[item.project] = (counts[item.project] ?? 0) + 1
+    if (counts[item.project] <= maximumPerProject) kept.push(item)
+  }
+  return { changed: true, state: { items: kept } }
+}
+
+export function composeLessonsSection(state, project, maximumLength = 4_000) {
+  const items = (Array.isArray(state?.items) ? state.items : []).filter((item) => item.project === project)
+  if (items.length === 0) return ''
+  const lines = []
+  let length = 0
+  for (const item of items) {
+    const line = `- ${item.text} (${item.taskId})`
+    if (length + line.length > maximumLength) break
+    lines.push(line)
+    length += line.length + 1
+  }
+  return `Уроки попередніх задач цього проєкту (додаються автоматично лише нові):\n${lines.join('\n')}`
 }

@@ -209,7 +209,8 @@ function codexSessionLabel(run: AgentRun) {
             : kind === 'resume-failed' || kind === 'retry' ? `відновлення не вдалося (${detail})`
               : reason || 'без причини')
   const mode = run.sessionMode === 'resume' ? 'продовження' : 'нова'
-  return `${mode} — ${readable}${run.codexModel ? ` · ${run.codexModel}` : ''}`
+  const effort = run.reasoningEffort ? ` · effort ${run.reasoningEffort}${run.reasoningReason && run.reasoningReason !== 'default' ? ` (${run.reasoningReason})` : ''}` : ''
+  return `${mode} — ${readable}${run.codexModel ? ` · ${run.codexModel}` : ''}${effort}`
 }
 
 function isTaskQueuedOrRunning(task: Task) {

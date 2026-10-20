@@ -337,3 +337,96 @@ test('швидкий review-again після completed продовжує сес
     await fixture.cleanup()
   }
 })
+
+test('ліміт Codex не валить задачу: запуск повертається в чергу, worker стає на паузу з backoff', async () => {
+  const { isUsageLimitFailure, usageLimitBackoffMs, USAGE_LIMIT_STATE_KEY } = await import('../server/codex-worker.js')
+  assert.equal(isUsageLimitFailure("You've hit your usage limit. Try again at 08:00."), true)
+  assert.equal(isUsageLimitFailure('tests failed'), false)
+  assert.equal(usageLimitBackoffMs(1), 15 * 60 * 1000)
+  assert.equal(usageLimitBackoffMs(2), 30 * 60 * 1000)
+  assert.equal(usageLimitBackoffMs(10), 2 * 60 * 60 * 1000)
+
+  const fixture = await setupWorker({ results: [], verificationRunner: async () => ({ passed: true, checks: [] }) })
+  try {
+    const failing = path.join(path.dirname(fixture.jobDirectory('BUG-1051')), '..', 'limit-codex.mjs')
+    await writeFile(failing, `#!/usr/bin/env node
+for await (const chunk of process.stdin) void chunk
+process.stdout.write(JSON.stringify({ type: 'error', message: "You've hit your usage limit. Try again at 08:00." }) + '\\n')
+process.exit(1)
+`, 'utf8')
+    await chmod(failing, 0o755)
+    fixture.worker.codexBinary = failing
+    fixture.store.enqueueAgentRun('RUN-LIMIT', 'BUG-1051', 'manual')
+    await fixture.worker.processRun(fixture.store.claimNextAgentRun(fixture.worker.workerId))
+    const run = fixture.store.findAgentRun('RUN-LIMIT')
+    assert.equal(run.status, 'queued')
+    assert.match(run.error, /Ліміт Codex/)
+    assert.ok(fixture.worker.pausedUntil > Date.now())
+    assert.ok(fixture.store.readSystemState(USAGE_LIMIT_STATE_KEY).pausedUntil)
+    let claimed = 0
+    fixture.store.claimNextAgentRun = () => {
+      claimed += 1
+      return null
+    }
+    fixture.worker.tick()
+    assert.equal(claimed, 0, 'під час паузи нові запуски не беруться')
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('SQL-задача запускається з підвищеним reasoning effort, урок зберігається для наступних запусків', async () => {
+  const fixture = await setupWorker({
+    results: [{ change: true, spec: liveSpec('BUG-1051'), result: fixedResult({ lesson: 'Звіти по складу рахують залишок лише з повного руху, а не з кешованої таблиці' }) }],
+    verificationRunner: async () => ({ passed: true, checks: [] }),
+  })
+  try {
+    fixture.store.patch('BUG-1051', { title: 'Повільний SQL у звіті залишків' })
+    fixture.store.enqueueAgentRun('RUN-EFFORT', 'BUG-1051', 'manual')
+    await fixture.worker.processRun(fixture.store.claimNextAgentRun())
+    const run = fixture.store.findAgentRun('RUN-EFFORT')
+    assert.equal(run.reasoningEffort, 'xhigh')
+    assert.equal(run.reasoningReason, 'sql')
+    const invocation = JSON.parse((await readFile(path.join(fixture.jobDirectory('BUG-1051'), 'codex-invocations.jsonl'), 'utf8')).trim())
+    assert.equal(invocation.includes('model_reasoning_effort="xhigh"'), true)
+    assert.match(fixture.store.readSystemState('codex-lessons').items[0].text, /повного руху/)
+
+    fixture.store.updateAgentRunRelease('RUN-EFFORT', { status: 'released', phase: 'released' }, 'ready_for_retest')
+    fixture.store.patch('BUG-1050', { status: 'new' })
+    fixture.store.enqueueAgentRun('RUN-NEXT', 'BUG-1050', 'manual')
+    const next = fixture.store.claimNextAgentRun()
+    const context = await fixture.worker.persistentContextForRun(fixture.store.find('BUG-1050'), next)
+    assert.match(context, /Уроки попередніх задач[\s\S]*повного руху/)
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('Codex worker із concurrency=2 запускає дві незалежні задачі одночасно', async () => {
+  const queue = [{ id: 'R1', taskId: 'T1' }, { id: 'R2', taskId: 'T2' }, { id: 'R3', taskId: 'T3' }]
+  const store = {
+    claimNextAgentRun: () => queue.shift() ?? null,
+    claimNextCleanupRun: () => null,
+    updateAgentRun: () => undefined,
+  }
+  const worker = new CodexWorker({ store, rootDirectory: '/tmp', dataDirectory: '/tmp', uploadsDirectory: '/tmp', concurrency: 2 })
+  const releases = new Map()
+  let maximumActive = 0
+  let active = 0
+  worker.processRun = async (run) => {
+    active += 1
+    maximumActive = Math.max(maximumActive, active)
+    await new Promise((resolve) => releases.set(run.id, resolve))
+    active -= 1
+  }
+  worker.tick()
+  assert.equal(worker.activeRuns.size, 2)
+  releases.get('R1')()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(worker.activeRuns.size, 2)
+  releases.get('R2')()
+  releases.get('R3')()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(maximumActive, 2)
+  worker.acceptingRuns = false
+})

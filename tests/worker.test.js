@@ -40,12 +40,13 @@ async function waitFor(predicate, timeoutMs = 1000) {
   }
 }
 
-test('Codex worker примусово нормалізує будь-яку конфігурацію до одного агента', () => {
+test('Codex worker обмежує паралельність від 1 до 3 агентів', () => {
   assert.equal(normalizeWorkerConcurrency(undefined), 1)
   assert.equal(normalizeWorkerConcurrency('1'), 1)
-  assert.equal(normalizeWorkerConcurrency('2'), 1)
-  assert.equal(normalizeWorkerConcurrency('3'), 1)
-  assert.equal(normalizeWorkerConcurrency('20'), 1)
+  assert.equal(normalizeWorkerConcurrency('2'), 2)
+  assert.equal(normalizeWorkerConcurrency('3'), 3)
+  assert.equal(normalizeWorkerConcurrency('20'), 3)
+  assert.equal(normalizeWorkerConcurrency('0'), 1)
   assert.equal(normalizeWorkerConcurrency('invalid'), 1)
 })
 
@@ -459,7 +460,7 @@ test('зупинка detached Codex надсилає сигнал усій proce
   }
 })
 
-test('Codex worker обробляє чергу строго по одній задачі', async () => {
+test('Codex worker із concurrency=1 обробляє чергу строго по одній задачі', async () => {
   const queue = Array.from({ length: 5 }, (_, index) => ({
     id: `RUN-PARALLEL-${index + 1}`,
     taskId: `BUG-PARALLEL-${index + 1}`,
@@ -479,7 +480,7 @@ test('Codex worker обробляє чергу строго по одній за
     rootDirectory: '/tmp',
     dataDirectory: '/tmp',
     uploadsDirectory: '/tmp',
-    concurrency: 3,
+    concurrency: 1,
   })
   worker.processRun = async (run) => {
     started.push(run.id)

@@ -727,7 +727,10 @@ test('API піднімає задачу в черзі Codex', async () => {
     const queueOrder = () => {
       const claimed = []
       let run
-      while ((run = store.claimNextAgentRun())) claimed.push(run)
+      while ((run = store.claimNextAgentRun())) {
+        claimed.push(run)
+        store.updateAgentRun(run.id, { status: 'failed' })
+      }
       for (const item of claimed) store.updateAgentRun(item.id, { status: 'queued' })
       return claimed.map((item) => item.taskId)
     }
@@ -1339,5 +1342,25 @@ test('службовий повторний запуск після live-пер�
     assert.equal(queued.body.agentRun.reviewComment, 'FAIL: 0/1 GET-перевірок після deploy')
     assert.equal(queued.body.agentRun.codexSessionId, undefined)
     assert.equal(store.find(created.body.id).reviewComment, '')
+  })
+})
+
+test('паралельні Codex-запуски беруть лише незалежні задачі: інший проєкт або розділ', async () => {
+  await withTestApp(async ({ app, store }) => {
+    const salesA = await request(app).post('/api/tasks').field('title', 'Продажі A').field('area', 'Продажі').expect(201)
+    const salesB = await request(app).post('/api/tasks').field('title', 'Продажі B').field('area', 'Продажі').expect(201)
+    const warehouse = await request(app).post('/api/tasks').field('title', 'Склад').field('area', 'Склад').expect(201)
+    const shop = await request(app).post('/api/tasks').field('title', 'Магазин').field('area', 'Продажі').field('project', 'ecommerce').expect(201)
+
+    const first = store.claimNextAgentRun('worker-a')
+    const second = store.claimNextAgentRun('worker-a')
+    const third = store.claimNextAgentRun('worker-a')
+    assert.deepEqual([first.taskId, second.taskId, third.taskId], [salesA.body.id, warehouse.body.id, shop.body.id])
+    assert.equal(store.claimNextAgentRun('worker-a'), null, 'та сама ділянка не стартує паралельно')
+
+    store.updateAgentRun(first.id, { status: 'completed', finishedAt: new Date().toISOString() })
+    assert.equal(store.claimNextAgentRun('worker-a'), null, 'release у тій самій ділянці ще триває')
+    store.updateAgentRunRelease(first.id, { status: 'released', phase: 'released' }, 'ready_for_retest')
+    assert.equal(store.claimNextAgentRun('worker-a').taskId, salesB.body.id)
   })
 })

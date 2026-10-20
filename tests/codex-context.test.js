@@ -140,3 +140,36 @@ test('коментарі конвеєра розпізнаються за маш
   assert.equal(isPipelineComment({ body: 'QA: [конвеєр:released] у тексті' }), false)
   assert.equal(isPipelineComment({ body: 'звичайний коментар' }), false)
 })
+
+test('reasoning effort підвищується для SQL, синку та мультирепо-задач і ніколи не знижується', async () => {
+  const { selectReasoningEffort } = await import('../server/codex-context.js')
+  assert.deepEqual(selectReasoningEffort({ task: { title: 'Кнопка не того кольору' }, baseEffort: 'high' }), { effort: 'high', reason: 'default' })
+  assert.deepEqual(selectReasoningEffort({ task: { title: 'Повільний SQL у звіті' }, baseEffort: 'high' }), { effort: 'xhigh', reason: 'sql' })
+  assert.equal(selectReasoningEffort({ task: { description: 'Синхронізація з 1С губить рухи' } }).reason, 'sync')
+  assert.equal(selectReasoningEffort({
+    task: { title: 'Договори клієнта' },
+    priorRuns: [{ details: JSON.stringify({ changedFiles: ['gba_console/src/a.tsx', 'gba-server/src/b.cs'] }) }],
+  }).reason, 'multi-repo')
+  assert.equal(selectReasoningEffort({ task: { title: 'Повільний SQL' }, baseEffort: 'max' }).effort, 'max')
+  assert.equal(selectReasoningEffort({ task: { title: 'Текст', comments: [{ body: '[конвеєр:blocked] SQL' }] } }).reason, 'default')
+})
+
+test('урок додається лише якщо він новий для проєкту і потрапляє в постійний контекст', async () => {
+  const { appendLesson, composeLessonsSection } = await import('../server/codex-context.js')
+  let state = { items: [] }
+  let result = appendLesson(state, { text: 'Пошук клієнтів у продажі має відкидати синтетичні папки 1С за IsFolder', taskId: 'BUG-1389', project: 'console' })
+  assert.equal(result.changed, true)
+  state = result.state
+  result = appendLesson(state, { text: 'пошук клієнтів у продажі має відкидати синтетичні папки 1с (IsFolder)', taskId: 'BUG-1400', project: 'console' })
+  assert.equal(result.changed, false)
+  result = appendLesson(state, { text: 'ok', taskId: 'BUG-1401', project: 'console' })
+  assert.equal(result.changed, false)
+  result = appendLesson(state, { text: 'Пошук клієнтів у продажі має відкидати синтетичні папки 1С за IsFolder', taskId: 'BUG-1402', project: 'ecommerce' })
+  assert.equal(result.changed, true)
+  const section = composeLessonsSection(result.state, 'console')
+  assert.match(section, /Уроки попередніх задач/)
+  assert.match(section, /BUG-1389/)
+  assert.doesNotMatch(section, /BUG-1402/)
+  const context = composePersistentContext({ project: 'console', baseContext: 'Основа', lessons: section, generatedAt: 'now' })
+  assert.match(context, /відкидати синтетичні папки/)
+})

@@ -53,9 +53,8 @@ services:
       # Pinned explicitly so a host-wide max/ultra setting cannot spend the
       # whole job timeout before the first repository check.
       CODEX_REASONING_EFFORT: "${CODEX_REASONING_EFFORT:-medium}"
-      # Coding mutations are deliberately serialized. Parallel max-reasoning
-      # runs caused timeout/resource contention and weaker cross-task isolation.
-      CODEX_CONCURRENCY: "1"
+      CODEX_CONCURRENCY: "${CODEX_CONCURRENCY:-2}"
+      CODEX_REASONING_EFFORT_ESCALATED: "${CODEX_REASONING_EFFORT_ESCALATED:-xhigh}"
       CODEX_REPOS_CONSOLE: "${CODEX_TARGET_REPO_HOST_PATH:?Set CODEX_TARGET_REPO_HOST_PATH},${CODEX_SERVER_REPO_HOST_PATH:?Set CODEX_SERVER_REPO_HOST_PATH}"
       CODEX_REPOS_ECOMMERCE: "${CODEX_ECOMMERCE_REPO_HOST_PATH:?Set CODEX_ECOMMERCE_REPO_HOST_PATH},${CODEX_ECOMMERCE_API_REPO_HOST_PATH:?Set CODEX_ECOMMERCE_API_REPO_HOST_PATH}"
       CODEX_REFERENCE_REPOS_CONSOLE: "${CODEX_REFERENCE_REPOS_CONSOLE:-}"

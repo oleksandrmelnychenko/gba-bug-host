@@ -135,6 +135,8 @@ function agentRunFromRow(row, { includeWorkerContext = false } = {}) {
     sessionMode: row.session_mode ?? '',
     sessionReason: row.session_reason ?? '',
     codexModel: row.codex_model ?? '',
+    reasoningEffort: row.reasoning_effort ?? '',
+    reasoningReason: row.reasoning_reason ?? '',
     baselineCommits: parseObjectColumn(row.baseline_commits),
     headCommits: parseObjectColumn(row.head_commits),
     status: row.status,
@@ -345,6 +347,8 @@ export class TaskStore {
         codex_model TEXT NOT NULL DEFAULT '',
         baseline_commits TEXT NOT NULL DEFAULT '{}',
         head_commits TEXT NOT NULL DEFAULT '{}',
+        reasoning_effort TEXT NOT NULL DEFAULT '',
+        reasoning_reason TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL,
         started_at TEXT,
         finished_at TEXT,
@@ -564,6 +568,8 @@ export class TaskStore {
         ['codex_model', "TEXT NOT NULL DEFAULT ''"],
         ['baseline_commits', "TEXT NOT NULL DEFAULT '{}'"],
         ['head_commits', "TEXT NOT NULL DEFAULT '{}'"],
+        ['reasoning_effort', "TEXT NOT NULL DEFAULT ''"],
+        ['reasoning_reason', "TEXT NOT NULL DEFAULT ''"],
       ]) {
         if (!agentRunColumns.has(column)) this.database.exec(`ALTER TABLE agent_runs ADD COLUMN ${column} ${definition}`)
       }
@@ -1147,29 +1153,6 @@ export class TaskStore {
 
   claimNextAgentRun(workerId = '') {
     return this.transaction(() => {
-      // Coding і release використовують різні процеси, але мутують спільні
-      // mainline-репозиторії. Не відкриваємо наступний worktree, доки
-      // попередній completed-run не отримав фінальний release-state: інакше
-      // наступна гілка стартує зі старого baseline та закономірно ловить
-      // non-fast-forward/conflict під час публікації.
-      const releaseInFlight = this.database.prepare(`
-        SELECT 1
-        FROM agent_runs AS run
-        JOIN tasks AS task ON task.id = run.task_id
-        WHERE run.status = 'completed'
-          AND run.release_status IN ('pending', 'processing', 'retrying')
-          AND task.status <> 'done'
-          AND run.id = (
-            SELECT latest.id
-            FROM agent_runs AS latest
-            WHERE latest.task_id = run.task_id
-            ORDER BY latest.created_at DESC
-            LIMIT 1
-          )
-        LIMIT 1
-      `).get()
-      if (releaseInFlight) return null
-
       const row = this.database
         .prepare(`
           SELECT run.*
@@ -1178,6 +1161,29 @@ export class TaskStore {
           WHERE run.status = 'queued'
             AND task.status <> 'done'
             AND task.ai_mode <> 'off'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM agent_runs AS other
+              JOIN tasks AS other_task ON other_task.id = other.task_id
+              WHERE other.task_id <> run.task_id
+                AND other_task.project = task.project
+                AND other_task.area = task.area
+                AND other_task.status <> 'done'
+                AND (
+                  other.status = 'running'
+                  OR (
+                    other.status = 'completed'
+                    AND other.release_status IN ('pending', 'processing', 'retrying')
+                    AND other.id = (
+                      SELECT latest.id
+                      FROM agent_runs AS latest
+                      WHERE latest.task_id = other.task_id
+                      ORDER BY latest.created_at DESC
+                      LIMIT 1
+                    )
+                  )
+                )
+            )
           ORDER BY run.queue_priority DESC, run.created_at ASC
           LIMIT 1
         `)
@@ -1425,6 +1431,8 @@ export class TaskStore {
       sessionMode: 'session_mode',
       sessionReason: 'session_reason',
       codexModel: 'codex_model',
+      reasoningEffort: 'reasoning_effort',
+      reasoningReason: 'reasoning_reason',
       baselineCommits: 'baseline_commits',
       headCommits: 'head_commits',
     }
