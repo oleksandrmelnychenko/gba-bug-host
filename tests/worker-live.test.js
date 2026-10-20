@@ -524,3 +524,62 @@ writeFileSync(outputPath, ${JSON.stringify(JSON.stringify(fixedResult()))}, 'utf
     await fixture.cleanup()
   }
 })
+
+test('двічі обірвана фінальна відповідь повторюється у свіжій сесії без нової спроби', async () => {
+  const { isIncompleteOutputFailure } = await import('../server/codex-worker.js')
+  assert.equal(isIncompleteOutputFailure('Incomplete response returned, reason: max_output_tokens'), true)
+  assert.equal(isIncompleteOutputFailure('tests failed'), false)
+  const fixture = await setupWorker({ results: [], verificationRunner: async () => ({ passed: true, checks: [] }) })
+  try {
+    const job = fixture.jobDirectory('BUG-1051')
+    const fake = path.join(path.dirname(job), '..', 'truncating-codex.mjs')
+    await writeFile(fake, `#!/usr/bin/env node
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+const args = process.argv.slice(2)
+const outputPath = args[args.indexOf('--output-last-message') + 1]
+const count = existsSync('calls.jsonl') ? readFileSync('calls.jsonl', 'utf8').trim().split('\\n').filter(Boolean).length + 1 : 1
+let prompt = ''
+for await (const chunk of process.stdin) prompt += chunk
+appendFileSync('calls.jsonl', JSON.stringify({ args, prompt: prompt.slice(0, 300) }) + '\\n', 'utf8')
+process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 'astra-session' }) + '\\n')
+if (count <= 2) {
+  appendFileSync('target/app.txt', 'fix\\n', 'utf8')
+  mkdirSync('.qa-desk/verify', { recursive: true })
+  writeFileSync('.qa-desk/verify/BUG-1051.json', ${JSON.stringify(JSON.stringify(liveSpec('BUG-1051')))}, 'utf8')
+  process.stdout.write(' \\n \\n \\n\\n')
+  process.stdout.write(JSON.stringify({ type: 'turn.failed', error: { message: 'Incomplete response returned, reason: max_output_tokens' } }) + '\\n')
+  process.exit(1)
+}
+writeFileSync(outputPath, ${JSON.stringify(JSON.stringify(fixedResult()))}, 'utf8')
+`, 'utf8')
+    await chmod(fake, 0o755)
+    fixture.worker.codexBinary = fake
+    fixture.store.enqueueAgentRun('RUN-TRUNC', 'BUG-1051', 'manual')
+    await fixture.worker.processRun(fixture.store.claimNextAgentRun(fixture.worker.workerId))
+    const requeued = fixture.store.findAgentRun('RUN-TRUNC')
+    assert.equal(requeued.status, 'queued')
+    assert.equal(requeued.attempt, 1)
+    assert.match(requeued.error, /свіжій сесії/)
+    assert.match(requeued.sessionReason, /output-recovery-fresh/)
+    await fixture.worker.processRun(fixture.store.claimNextAgentRun(fixture.worker.workerId))
+    const run = fixture.store.findAgentRun('RUN-TRUNC')
+    assert.equal(run.status, 'completed', `${run.error} ${run.details.slice(0, 500)}`)
+    assert.equal(run.sessionMode, 'fresh')
+    assert.match(run.sessionReason, /output-recovery-fresh/)
+    assert.equal(fixture.store.agentRunsForTask('BUG-1051').length, 1)
+    const calls = (await readFile(path.join(job, 'calls.jsonl'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line))
+    assert.equal(calls.length, 3)
+    assert.equal(calls[1].args.includes('resume'), true)
+    assert.equal(calls[2].args.includes('resume'), false)
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('у схемі live-check поле contains стоїть перед expectedStatus, щоб відповідь природно закінчувалась', async () => {
+  const source = await readFile(new URL('../server/codex-worker.js', import.meta.url), 'utf8')
+  const section = source.slice(source.indexOf('postDeployChecks: {'), source.indexOf("required: ['repositories', 'migrationFiles', 'services', 'postDeployChecks']"))
+  assert.ok(section.indexOf('contains: {') > section.indexOf('url: {'))
+  assert.ok(section.indexOf('contains: {') < section.indexOf('expectedStatus: {'))
+  assert.match(section, /required: \['label', 'url', 'contains', 'expectedStatus'\]/)
+})
