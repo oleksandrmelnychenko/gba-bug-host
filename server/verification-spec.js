@@ -482,3 +482,65 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   if (args.includes('--json')) console.log(JSON.stringify(compactVerificationResult(result), null, 2))
   process.exit(result.passed ? 0 : result.infrastructure ? 2 : 1)
 }
+
+export const UI_SPEC_STEP_KINDS = new Set(['goto', 'click', 'hover', 'fill', 'press', 'select', 'waitFor', 'waitForResponse', 'wait', 'screenshot'])
+export const UI_SPEC_CHECK_KINDS = new Set(['visible', 'absent', 'text', 'count', 'rowCount', 'noConsoleErrors', 'noFailedRequests', 'noBlockedRequests', 'response', 'url'])
+
+export function uiVerificationSpecPath(directory, taskId) {
+  return path.join(directory, VERIFY_SPEC_DIRECTORY, `${taskId}.ui.json`)
+}
+
+export function validateUiSpec(spec, { taskId = '' } = {}) {
+  const errors = []
+  if (!isPlainObject(spec)) return { ok: false, errors: ['UI spec має бути JSON-об’єктом'] }
+  if (typeof spec.name !== 'string' || !/^[A-Za-z0-9._-]{1,80}$/.test(spec.name)) errors.push('UI spec: name має відповідати [A-Za-z0-9._-]{1,80}')
+  if (typeof spec.url !== 'string' || !spec.url.startsWith('/') || spec.url.startsWith('//') || spec.url.length > 1000) errors.push('UI spec: url має бути шляхом консолі, що починається з /')
+  if (spec.env !== undefined && spec.env !== 'dev') errors.push('UI spec: дозволене лише env=dev')
+  if (spec.allowNonGet !== undefined) errors.push('UI spec: allowNonGet заборонений — UI-перевірка лише читає')
+  if (spec.steps !== undefined && (!Array.isArray(spec.steps) || spec.steps.length > 30)) errors.push('UI spec: steps — масив до 30 кроків')
+  if (!Array.isArray(spec.checks) || spec.checks.length === 0 || spec.checks.length > 30) errors.push('UI spec: checks — від 1 до 30 перевірок')
+  for (const [index, step] of (Array.isArray(spec.steps) ? spec.steps : []).entries()) {
+    const kinds = isPlainObject(step) ? Object.keys(step).filter((key) => UI_SPEC_STEP_KINDS.has(key)) : []
+    if (kinds.length !== 1) {
+      errors.push(`UI spec: крок #${index + 1} має містити рівно одну дію (${[...UI_SPEC_STEP_KINDS].join(', ')})`)
+      continue
+    }
+    if (kinds[0] === 'goto' && (typeof step.goto !== 'string' || !step.goto.startsWith('/') || step.goto.startsWith('//'))) {
+      errors.push(`UI spec: крок #${index + 1} goto дозволений лише на шлях консолі`)
+    }
+  }
+  for (const [index, check] of (Array.isArray(spec.checks) ? spec.checks : []).entries()) {
+    if (!isPlainObject(check) || !UI_SPEC_CHECK_KINDS.has(check.type)) errors.push(`UI spec: перевірка #${index + 1} має невідомий type`)
+  }
+  const serialized = JSON.stringify(spec)
+  if (serialized.length > 50_000) errors.push('UI spec більший за 50 KB')
+  if (/password|token|bearer|cookie/i.test(serialized)) errors.push('UI spec не може містити credentials, токени чи cookie')
+  if (errors.length > 0) return { ok: false, errors }
+  return {
+    ok: true,
+    errors: [],
+    spec: {
+      ...spec,
+      name: spec.name,
+      env: 'dev',
+      description: typeof spec.description === 'string' ? spec.description.slice(0, 500) : `${taskId} UI-сценарій`,
+    },
+  }
+}
+
+export async function readUiSpecFile(filePath, { taskId = '' } = {}) {
+  let raw
+  try {
+    raw = await readFile(filePath, 'utf8')
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { present: false, ok: false, errors: [] }
+    return { present: false, ok: false, errors: [`UI spec не читається: ${error.message}`] }
+  }
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch (error) {
+    return { present: true, ok: false, errors: [`UI spec не є валідним JSON: ${error.message}`] }
+  }
+  return { present: true, ...validateUiSpec(parsed, { taskId }) }
+}

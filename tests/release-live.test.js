@@ -610,3 +610,84 @@ test('відновлення розпізнає і динамічно відкр
   const injected = { ...task, agentRun: { ...task.agentRun, releaseError: 'gba-server: перевірка «dotnet test tests/x.csproj; rm -rf /» впала' } }
   assert.equal(mainlineRecoveryCandidate(injected, plan), null)
 })
+
+test('UI-перевірка запускається на хості через ui-verify і класифікує pass/403/fail/env', async () => {
+  const { mkdir: makeDirectory, writeFile: write } = await import('node:fs/promises')
+  const uiSpec = {
+    name: 'bug-6001-ui',
+    url: '/products?netId=47b16aa5-fc36-4b56-ae75-17b607f4afcf',
+    steps: [{ click: { role: 'button', name: 'Прихід' } }],
+    checks: [{ type: 'rowCount', rowMatches: '2018', min: 1 }],
+  }
+  const task = {
+    id: 'BUG-6001',
+    status: 'in_progress',
+    notes: '',
+    agentRun: { id: 'RUN-6001', details: JSON.stringify({ contractVersion: 2, verification: { uiSpec } }) },
+  }
+  let mode = 'pass'
+  const calls = []
+  await withWorker(async ({ worker, root }) => {
+    const runner = path.join(root, 'ui-verify', 'ui-verify.mjs')
+    await makeDirectory(path.dirname(runner), { recursive: true })
+    await write(runner, '', 'utf8')
+    const resultFile = path.join(root, 'result.json')
+    const screenshot = path.join(root, 'shot.png')
+    await write(screenshot, 'png', 'utf8')
+    worker.uiVerifyRunner = runner
+    worker.uiVerifyDirectory = path.join(root, 'ui-out')
+    const attachments = []
+    worker.attachEvidence = async (_task, file, name) => attachments.push({ file, name }) > 0
+    worker.runProcess = async (command, args, options) => {
+      calls.push({ command, args, cwd: options.cwd })
+      const exitCode = { pass: 0, forbidden: 1, fail: 1, spec: 2, env: 3 }[mode]
+      await write(resultFile, JSON.stringify({ responses: mode === 'forbidden' ? [{ method: 'GET', path: '/api/v1/uk/storages/get/all', status: 403 }] : [], blockedRequests: [] }), 'utf8')
+      const payload = { status: exitCode === 0 ? 'pass' : exitCode === 1 ? 'fail' : 'error', exitCode, results: [{ spec: 'bug-6001-ui', status: 'x', exitCode, resultFile, screenshot, failedChecks: exitCode === 1 ? [{ description: 'a 2018 receipt row' }] : [], error: exitCode >= 2 ? 'login 502' : null }] }
+      return { code: exitCode, output: `human block\nUI_VERIFY_RESULT ${JSON.stringify(payload)}` }
+    }
+
+    const passed = await worker.runUiVerification(task)
+    assert.equal(passed.ok, true)
+    assert.equal(passed.evidence.status, 'pass')
+    assert.equal(calls[0].command, 'node')
+    assert.deepEqual(calls[0].args.slice(0, 1), [runner])
+    assert.equal(calls[0].args.includes('--env'), true)
+    assert.equal(calls[0].cwd, path.dirname(runner))
+    assert.equal(attachments[0].name, 'ui-verify-bug-6001-pass.png')
+
+    mode = 'forbidden'
+    const forbidden = await worker.runUiVerification(task)
+    assert.equal(forbidden.ok, true)
+    assert.equal(forbidden.evidence.status, 'unverifiable')
+    assert.match(forbidden.report, /403/)
+
+    mode = 'fail'
+    const failed = await worker.runUiVerification(task)
+    assert.equal(failed.ok, false)
+    assert.equal(failed.kind, 'scenario')
+    assert.match(failed.reason, /a 2018 receipt row/)
+
+    mode = 'spec'
+    assert.equal((await worker.runUiVerification(task)).kind, 'scenario')
+    mode = 'env'
+    assert.equal((await worker.runUiVerification(task)).kind, 'transient')
+
+    worker.uiVerifyRunner = path.join(root, 'missing.mjs')
+    const skipped = await worker.runUiVerification(task)
+    assert.equal(skipped.ok, true)
+    assert.equal(skipped.evidence.status, 'skipped')
+    assert.equal(await worker.runUiVerification({ ...task, agentRun: { details: '{}' } }), null)
+  })
+})
+
+test('UI spec від Codex не може дозволяти запис, ходити поза консоль чи містити credentials', async () => {
+  const { validateUiSpec } = await import('../server/verification-spec.js')
+  const base = { name: 'bug-ui', url: '/clients', checks: [{ type: 'text', text: 'KD02801' }] }
+  assert.equal(validateUiSpec(base).ok, true)
+  assert.match(validateUiSpec({ ...base, allowNonGet: ['/x$'] }).errors.join(' '), /allowNonGet/)
+  assert.match(validateUiSpec({ ...base, url: 'https://evil.example/' }).errors.join(' '), /шляхом консолі/)
+  assert.match(validateUiSpec({ ...base, steps: [{ goto: 'https://gba-console.85.17.167.167.nip.io/' }] }).errors.join(' '), /goto/)
+  assert.match(validateUiSpec({ ...base, steps: [{ fill: { locator: { label: 'Password' }, value: 'x' } }] }).errors.join(' '), /credentials/)
+  assert.match(validateUiSpec({ ...base, env: 'qa' }).errors.join(' '), /env=dev/)
+  assert.match(validateUiSpec({ ...base, checks: [{ type: 'magic' }] }).errors.join(' '), /type/)
+})

@@ -7,6 +7,7 @@ import {
   compactVerificationResult,
   formatVerificationReport,
   runVerificationSpec,
+  validateUiSpec,
   validateVerificationSpec,
 } from './verification-spec.js'
 import { affectedDotnetTestProjects, dotnetFastFilter, dotnetTestCommand, readDotnetProjectGraph } from './dotnet-tests.js'
@@ -615,6 +616,10 @@ export class ReleaseWorker {
     verificationRetryDelayMs = Number.parseInt(process.env.RELEASE_VERIFICATION_RETRY_DELAY_MS ?? '20000', 10),
     guardianEnabled = false,
     batching = process.env.RELEASE_BATCHING !== 'off',
+    uiVerifyRunner = process.env.RELEASE_UI_VERIFY_RUNNER ?? '/root/projects/gba-infra/tools/ui-verify/ui-verify.mjs',
+    uiVerifyDirectory = process.env.RELEASE_UI_VERIFY_DIR ?? '/root/projects/gba-release-worktrees/ui-verify',
+    uiVerifyBaseUrl = process.env.RELEASE_UI_VERIFY_BASE_URL ?? '',
+    uiVerifyTimeoutMs = Number.parseInt(process.env.RELEASE_UI_VERIFY_TIMEOUT_MS ?? String(6 * 60 * 1000), 10),
     batchWorktreesDirectory = process.env.RELEASE_BATCH_WORKTREES_DIR ?? '/root/projects/gba-release-worktrees/batch',
     guardianAiMode = process.env.RELEASE_GUARDIAN_AI_MODE === 'auto' ? 'auto' : 'off',
     guardianPreemptPollMs = Number.parseInt(process.env.RELEASE_GUARDIAN_PREEMPT_POLL_MS ?? '20000', 10),
@@ -650,6 +655,10 @@ export class ReleaseWorker {
     this.guardianState = new Map()
     this.guardianRedGraceMs = Number.isInteger(guardianRedGraceMs) && guardianRedGraceMs >= 0 ? guardianRedGraceMs : 30 * 60 * 1000
     this.batching = batching
+    this.uiVerifyRunner = uiVerifyRunner
+    this.uiVerifyDirectory = uiVerifyDirectory
+    this.uiVerifyBaseUrl = uiVerifyBaseUrl
+    this.uiVerifyTimeoutMs = Number.isInteger(uiVerifyTimeoutMs) && uiVerifyTimeoutMs > 0 ? uiVerifyTimeoutMs : 6 * 60 * 1000
     this.batchWorktreesDirectory = batchWorktreesDirectory
     this.batchExcluded = new Set()
     this.lastOriginFetchAt = 0
@@ -2193,9 +2202,114 @@ export class ReleaseWorker {
     }
     const live = await this.runLiveVerification(task)
     evidence.liveVerification = live.evidence
-    return live.ok
-      ? { ok: true, evidence, report: live.report }
-      : { ok: false, kind: live.kind, reason: live.reason, evidence, report: live.report }
+    if (!live.ok) return { ok: false, kind: live.kind, reason: live.reason, evidence, report: live.report }
+    const ui = await this.runUiVerification(task)
+    if (ui) evidence.uiVerification = ui.evidence
+    const report = [live.report, ui?.report].filter(Boolean).join('\n')
+    if (ui && !ui.ok) return { ok: false, kind: ui.kind, reason: ui.reason, evidence, report }
+    return { ok: true, evidence, report }
+  }
+
+  async attachEvidence(task, filePath, name) {
+    try {
+      const content = await readFile(filePath)
+      const body = new FormData()
+      body.append('attachments', new Blob([content], { type: 'image/png' }), name)
+      const response = await fetch(`${this.deskBaseUrl}/api/tasks/${encodeURIComponent(task.id)}/attachments`, {
+        method: 'POST',
+        headers: this.requestHeaders(),
+        body,
+      })
+      return response.ok
+    } catch {
+      return false
+    }
+  }
+
+  async runUiVerification(task) {
+    const uiSpec = readAgentDetails(task).verification?.uiSpec
+    if (!uiSpec) return null
+    const at = new Date().toISOString()
+    const validation = validateUiSpec(uiSpec, { taskId: task.id })
+    if (!validation.ok) {
+      const reason = `UI spec невалідний: ${validation.errors.slice(0, 5).join('; ')}`
+      return { ok: false, kind: 'scenario', reason, report: reason, evidence: { status: 'invalid', at, errors: validation.errors } }
+    }
+    if (!(await pathExists(this.uiVerifyRunner))) {
+      const report = 'UI-перевірку пропущено: ui-verify runner недоступний на хості'
+      return { ok: true, report, evidence: { status: 'skipped', reason: 'runner-missing', at } }
+    }
+    const directory = path.join(this.uiVerifyDirectory, taskSlug(task.id), at.replace(/[:.]/g, '-'))
+    await mkdir(directory, { recursive: true })
+    const specFile = path.join(directory, `${validation.spec.name}.json`)
+    await writeFile(specFile, JSON.stringify(validation.spec, null, 2), 'utf8')
+    const result = await this.runProcess(
+      'node',
+      [this.uiVerifyRunner, specFile, '--out', path.join(directory, 'evidence'), '--env', 'dev', ...(this.uiVerifyBaseUrl ? ['--base', this.uiVerifyBaseUrl] : [])],
+      { cwd: path.dirname(this.uiVerifyRunner), timeoutMs: this.uiVerifyTimeoutMs },
+    )
+    const line = String(result.output ?? '').split('\n').reverse().find((item) => item.startsWith('UI_VERIFY_RESULT '))
+    let parsed = null
+    try {
+      parsed = line ? JSON.parse(line.slice('UI_VERIFY_RESULT '.length)) : null
+    } catch {
+      parsed = null
+    }
+    const first = parsed?.results?.[0] ?? {}
+    const exitCode = Number.isInteger(parsed?.exitCode) ? parsed.exitCode : result.timedOut ? 3 : result.code
+    let details = null
+    if (first.resultFile) {
+      try {
+        details = JSON.parse(await readFile(first.resultFile, 'utf8'))
+      } catch {
+        details = null
+      }
+    }
+    const forbidden = (details?.responses ?? []).filter((response) => response?.status === 403).map((response) => `${response.method ?? 'GET'} ${response.path ?? response.url ?? ''}`)
+    const blocked = (details?.blockedRequests ?? []).map((request) => typeof request === 'string' ? request : `${request?.method ?? ''} ${request?.path ?? request?.url ?? ''}`.trim())
+    const failedChecks = (first.failedChecks ?? []).map((check) => typeof check === 'string' ? check : check?.description ?? check?.type ?? JSON.stringify(check))
+    const evidence = {
+      status: parsed?.status ?? 'error',
+      exitCode,
+      at,
+      spec: validation.spec.name,
+      url: validation.spec.url,
+      failedChecks: failedChecks.slice(0, 10),
+      forbidden: forbidden.slice(0, 10),
+      blocked: blocked.slice(0, 10),
+      screenshot: first.screenshot ?? '',
+      resultFile: first.resultFile ?? '',
+      error: first.error ?? (parsed ? null : String(result.output ?? '').slice(-500)),
+    }
+    const attach = async (label) => {
+      if (!evidence.screenshot || !(await pathExists(evidence.screenshot))) return
+      evidence.attached = await this.attachEvidence(task, evidence.screenshot, `ui-verify-${taskSlug(task.id)}-${label}.png`)
+    }
+    if (exitCode === 0) {
+      await attach('pass')
+      return { ok: true, report: `UI (QA Verifier): PASS ${validation.spec.url}`, evidence }
+    }
+    if (exitCode === 1 && (forbidden.length > 0 || blocked.length > 0)) {
+      evidence.status = 'unverifiable'
+      const report = `UI-перевірку не зараховано: ${forbidden.length > 0 ? `verifier не має права бачити екран (403: ${forbidden.slice(0, 3).join(', ')})` : `сценарій потребує запису (заблоковано: ${blocked.slice(0, 3).join(', ')})`}`
+      return { ok: true, report, evidence }
+    }
+    if (exitCode === 1) {
+      await attach('fail')
+      const reason = `UI-перевірка не пройшла: ${failedChecks.slice(0, 5).join('; ') || evidence.error || 'дивись result.json'}`
+      return { ok: false, kind: 'scenario', reason, report: `UI (QA Verifier): FAIL ${validation.spec.url} — ${failedChecks.slice(0, 5).join('; ')}`, evidence }
+    }
+    if (exitCode === 2) {
+      const reason = `UI spec відхилено runner-ом: ${evidence.error ?? 'помилка spec'}`
+      return { ok: false, kind: 'scenario', reason, report: reason, evidence }
+    }
+    return {
+      ok: false,
+      kind: 'transient',
+      reason: `UI runner: середовище або логін недоступні${evidence.error ? ` (${String(evidence.error).slice(0, 200)})` : ''}`,
+      report: 'UI-перевірка не виконалась через середовище',
+      evidence,
+    }
   }
 
   async runLiveVerification(task) {
@@ -2654,6 +2768,7 @@ export class ReleaseWorker {
       `Коміти: ${commits || 'зміни коду не знадобились'}`,
       `Білд консолі: ${build || 'невідомо'}`,
       live?.report ? `Live-перевірка (GET через read-only DEV proxy):\n${live.report}` : 'Live-перевірка: spec відсутній',
+      evidence?.uiVerification ? `UI-перевірка (QA Verifier): ${evidence.uiVerification.status}${evidence.uiVerification.screenshot ? ` · скріншот ${evidence.uiVerification.attached ? 'додано до задачі' : evidence.uiVerification.screenshot}` : ''}` : '',
       smoke.length > 0 ? `Smoke-перевірки:\n${smoke.join('\n')}` : '',
     ].filter(Boolean).join('\n')
   }

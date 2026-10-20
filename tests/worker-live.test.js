@@ -451,3 +451,32 @@ test('структуровані вхідні дані QA і знімок «до
   assert.match(prompt, /Фактично \(QA\): Ціна 0/)
   assert.match(prompt, /Знімок «до» на DEV[\s\S]*products\/search\/advanced/)
 })
+
+test('UI spec від Codex зберігається для release-worker, а невалідний зупиняє реліз', async () => {
+  const uiSpec = { name: 'bug-1051-ui', url: '/clients', checks: [{ type: 'text', text: 'KD02801' }] }
+  const fixture = await setupWorker({
+    results: [
+      { change: true, spec: liveSpec('BUG-1051'), result: fixedResult() },
+    ],
+    verificationRunner: async () => ({ passed: true, checks: [] }),
+  })
+  try {
+    const { mkdir: makeDirectory, writeFile: write } = await import('node:fs/promises')
+    const job = fixture.jobDirectory('BUG-1051')
+    await makeDirectory(path.join(job, '.qa-desk', 'verify'), { recursive: true })
+    await write(path.join(job, '.qa-desk', 'verify', 'BUG-1051.ui.json'), JSON.stringify(uiSpec), 'utf8')
+    fixture.store.enqueueAgentRun('RUN-UI-1', 'BUG-1051', 'manual')
+    await fixture.worker.processRun(fixture.store.claimNextAgentRun())
+    const details = JSON.parse(fixture.store.findAgentRun('RUN-UI-1').details)
+    assert.equal(fixture.store.findAgentRun('RUN-UI-1').status, 'completed')
+    assert.equal(details.verification.uiSpec.url, '/clients')
+    assert.equal(details.verification.uiSpec.env, 'dev')
+
+    await write(path.join(job, '.qa-desk', 'verify', 'BUG-1051.ui.json'), JSON.stringify({ ...uiSpec, allowNonGet: ['/save$'] }), 'utf8')
+    const { liveVerificationQualityFailures } = await import('../server/codex-worker.js')
+    const failures = liveVerificationQualityFailures({ outcome: 'fixed' }, { taskId: 'BUG-1051', present: true, ok: true, ui: { present: true, ok: false, errors: ['UI spec: allowNonGet заборонений — UI-перевірка лише читає'] } })
+    assert.match(failures.join(' '), /BUG-1051\.ui\.json невалідний/)
+  } finally {
+    await fixture.cleanup()
+  }
+})

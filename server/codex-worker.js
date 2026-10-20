@@ -20,8 +20,10 @@ import {
   VERIFY_SPEC_DIRECTORY,
   compactVerificationResult,
   formatVerificationReport,
+  readUiSpecFile,
   readVerificationSpecFile,
   runVerificationSpec,
+  uiVerificationSpecPath,
   verificationSpecPath,
 } from './verification-spec.js'
 import { materializeInstalledDependencies } from './worktree-dependencies.js'
@@ -476,6 +478,9 @@ export function liveVerificationQualityFailures(result, verification) {
   } else if (result.outcome === 'verified' && verification.live && !verification.live.passed && !verification.live.infrastructure) {
     failures.push(`outcome=verified, але live spec не проходить на DEV: ${formatVerificationReport(verification.live, { maximumLength: 600 })}`)
   }
+  if (verification.ui?.present && !verification.ui.ok) {
+    failures.push(`UI spec ${VERIFY_SPEC_DIRECTORY}/${verification.taskId ?? '<TASK>'}.ui.json невалідний: ${(verification.ui.errors ?? []).slice(0, 5).join('; ')}`)
+  }
   return failures
 }
 
@@ -639,6 +644,7 @@ function liveVerificationSection(task, { devApiProxyUrl, verifyCliPath, networkA
   - op: exists, absent, eq, ne, gt, gte, lt, lte, contains, not_contains, matches, in, count_eq, count_gte, count_lte, count_gt, count_lt, body_contains, body_not_contains. Шлях: $.A.B[0].C або $.A[*].B; для [*] умова має виконуватись для всіх елементів (або "quantifier":"any").
   - Spec описує ОЧІКУВАНУ поведінку ПІСЛЯ виправлення на реальних DEV-даних: конкретні існуючі ID/пошукові рядки, точні кількості й поля зі сценарію. Ніяких placeholder ID; кожна успішна перевірка має assertions на кількості/поля.
   - Запускай: node ${verifyCliPath} ${specFile} (exit 0 = PASS, 1 = FAIL, 2 = невалідний spec або інфраструктура).
+- Якщо дефект видно лише в UI консолі, додатково запиши ./${VERIFY_SPEC_DIRECTORY}/${task.id}.ui.json у форматі ui-verify: {"name":"${task.id.toLowerCase()}-ui","url":"/шлях-консолі?...","steps":[{"click":{"role":"button","name":"Прихід"}},{"waitForResponse":{"urlIncludes":"/api/...","status":200}}],"checks":[{"type":"rowCount","rowHasText":"...","min":1},{"type":"text","text":"..."},{"type":"noFailedRequests"}]}. Кроки: goto (лише шлях консолі), click, hover, fill, press, select, waitFor, waitForResponse, wait, screenshot; локатор — {"role","name"} | {"text"} | {"label"} | {"placeholder"} | {"testId"} | {"css"}. Перевірки: visible, absent, text, count, rowCount, noConsoleErrors, noFailedRequests, noBlockedRequests, response, url. allowNonGet і будь-які credentials заборонені. Сам ти UI spec запустити не можеш (браузера й сесії тут немає): його виконає release-worker після deploy від імені read-only QA Verifier, а провал поверне задачу тобі.
 - Там, де дефект видно в DEV API, spec ДО виправлення має падати саме на assertions сценарію — це доказ відтворення. Для outcome=verified spec має проходити на DEV вже зараз.
 - Після виправлення доведи ту саму поведінку локально: регресійний тест перевіряє ті самі поля/кількості, що й spec, і проходить. Після deploy release-worker сам прожене spec проти DEV і лише тоді поставить «Готовий до ретесту»; якщо spec не пройде, задача повернеться тобі з результатами.
 - У liveVerification поверни specPath, reproducedBeforeFix (reproduced | not_reproduced | not_applicable | blocked) і конкретний evidence: які запити виконано й що вони показали до та після.`
@@ -1598,8 +1604,9 @@ export class CodexWorker {
     const specFile = verificationSpecPath(jobDirectory, task.id)
     const specRead = await readVerificationSpecFile(specFile, { taskId: task.id })
     const liveResult = specRead.ok ? await this.runLiveSpec(specRead.spec) : null
+    const uiRead = await readUiSpecFile(uiVerificationSpecPath(jobDirectory, task.id), { taskId: task.id })
     const verification = qualityGateApplied
-      ? { taskId: task.id, present: specRead.present, ok: specRead.ok, errors: specRead.errors, live: liveResult }
+      ? { taskId: task.id, present: specRead.present, ok: specRead.ok, errors: specRead.errors, live: liveResult, ui: uiRead }
       : undefined
     const qualityFailures = fixedResultQualityFailures(result, {
       actualChangedFiles: actualChanges.files,
@@ -1640,6 +1647,8 @@ export class CodexWorker {
           valid: specRead.ok,
           errors: specRead.errors ?? [],
           spec: specRead.ok ? specRead.spec : null,
+          uiSpec: uiRead.ok ? uiRead.spec : null,
+          uiSpecErrors: uiRead.errors ?? [],
           preDeploy: liveResult ? {
             ...compactVerificationResult(liveResult, 20_000),
             report: formatVerificationReport(liveResult, { maximumLength: 1500 }),
