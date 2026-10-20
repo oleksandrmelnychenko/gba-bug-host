@@ -216,3 +216,23 @@ test('proxy healthz повідомляє про недоступний credentia
     server.close()
   }
 })
+
+test('повільний DEV endpoint дає 504 з маркером timeout, а не мовчазне зависання', async () => {
+  const server = createDevApiProxy({
+    upstreams: { concord: 'http://concord.test' },
+    tokenProvider: async () => 'server-side-token',
+    timeoutMs: 20,
+    fetchImpl: async (_url, init) => new Promise((_resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(init.signal.reason))
+    }),
+    log: () => {},
+  })
+  const base = await listen(server)
+  try {
+    const response = await fetch(`${base}/api/v1/uk/clients/get/top`)
+    assert.equal(response.status, 504)
+    assert.equal(response.headers.get(PROXY_ERROR_HEADER), 'upstream-timeout')
+  } finally {
+    server.close()
+  }
+})

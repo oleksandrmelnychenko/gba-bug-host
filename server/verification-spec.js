@@ -338,7 +338,7 @@ function checkRequestUrl(check, proxyBaseUrl) {
 export async function runVerificationSpec(spec, {
   proxyBaseUrl = process.env.QA_DEV_API_PROXY_URL ?? DEFAULT_DEV_API_PROXY_URL,
   fetchImpl = fetch,
-  timeoutMs = 45_000,
+  timeoutMs = 200_000,
 } = {}) {
   const startedAt = new Date().toISOString()
   const checks = []

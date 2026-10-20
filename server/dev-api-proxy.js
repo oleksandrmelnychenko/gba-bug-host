@@ -235,7 +235,7 @@ export function createDevApiProxy({
   upstreams,
   tokenProvider,
   fetchImpl = fetch,
-  timeoutMs = 60_000,
+  timeoutMs = 180_000,
   maxBodyBytes = 25 * 1024 * 1024,
   maxConcurrent = 6,
   log = (entry) => console.log(JSON.stringify(entry)),
@@ -314,8 +314,13 @@ export function createDevApiProxy({
           signal: AbortSignal.timeout(timeoutMs),
         })
       } catch (error) {
-        sendJson(response, 502, { error: `DEV ${policy.upstream} недоступний: ${String(error?.message ?? error).slice(0, 200)}` }, 'upstream')
-        finish(502, { error: 'upstream' })
+        const timedOut = error?.name === 'TimeoutError' || /timeout/i.test(String(error?.message ?? ''))
+        sendJson(response, timedOut ? 504 : 502, {
+          error: timedOut
+            ? `DEV ${policy.upstream} не відповів за ${Math.round(timeoutMs / 1000)} с`
+            : `DEV ${policy.upstream} недоступний: ${String(error?.message ?? error).slice(0, 200)}`,
+        }, timedOut ? 'upstream-timeout' : 'upstream')
+        finish(timedOut ? 504 : 502, { error: timedOut ? 'upstream-timeout' : 'upstream' })
         return
       }
 
@@ -375,7 +380,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   for (const [name, value] of Object.entries(upstreams)) {
     if (/prod/i.test(value)) throw new Error(`upstream ${name} вказує на prod: ${value}`)
   }
-  const server = createDevApiProxy({ upstreams, tokenProvider })
+  const server = createDevApiProxy({
+    upstreams,
+    tokenProvider,
+    timeoutMs: Number.parseInt(process.env.DEV_API_PROXY_TIMEOUT_MS ?? '180000', 10),
+  })
   const port = Number.parseInt(process.env.DEV_API_PROXY_PORT ?? '8790', 10)
   server.listen(port, '0.0.0.0', () => {
     console.log(`[dev-api-proxy] GET-only DEV API proxy слухає :${port} → ${Object.entries(upstreams).map(([name, value]) => `${name}=${value}`).join(', ')}`)
