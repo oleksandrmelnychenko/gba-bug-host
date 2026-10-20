@@ -857,3 +857,15 @@ test('підсумок vitest зі stdout не губиться за поток�
     assert.match(result.output, /Test Files {2}300 failed/)
   })
 })
+
+test('назви тестів xUnit із «dotnet test -v q» ([xUnit.net …] … [FAIL]) теж виділяються для підтвердження', () => {
+  const output = [
+    'A total of 1 test files matched the specified pattern.',
+    '[xUnit.net 00:02:48.17]     Global.Business.Assistant.Platform.Actors.Tests.SaleReturns.SaleReturnCancellationMoneyActorTests.CancelConsumesRecordedCreditRatherThanRepricedSourceValue [FAIL]',
+    '',
+    'Failed!  - Failed:     1, Passed: 18616, Skipped:  1733, Total: 20350, Duration: 8 m 16 s - Global.Business.Assistant.Platform.Actors.Tests.dll (net10.0)',
+  ].join('\n')
+  assert.deepEqual(extractFailingTests(output), [
+    'Global.Business.Assistant.Platform.Actors.Tests.SaleReturns.SaleReturnCancellationMoneyActorTests.CancelConsumesRecordedCreditRatherThanRepricedSourceValue',
+  ])
+})

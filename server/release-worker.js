@@ -280,10 +280,12 @@ export function extractFailingTests(output, limit = 20) {
   for (const line of stripAnsi(output).split('\n')) {
     const trimmed = line.trim()
     let value = ''
+    const xunit = /^\[xUnit\.net [\d:.]+\]\s+(\S.*?)\s+\[FAIL\]$/.exec(trimmed)
     const vitest = /^(?:FAIL|×|✗)\s+(.+)$/.exec(trimmed)
     const dotnet = /^Failed\s+(.+?)(?:\s+\[[^\]]*\])?$/.exec(trimmed)
     const compiler = /^(.*?)\(\d+,\d+\):\s*error\s+((?:TS|CS)\d+):\s*(.+?)(?:\s+\[[^\]]+\])?$/.exec(trimmed)
     if (compiler) value = `${compiler[1].split('/').slice(-2).join('/')}: ${compiler[2]} ${compiler[3]}`
+    else if (xunit) value = xunit[1]
     else if (vitest) value = vitest[1]
     else if (dotnet) value = dotnet[1]
     if (!value) continue
