@@ -18,13 +18,23 @@
 ## Як працює Codex worker
 
 1. Нова задача автоматично створює `queued` job у таблиці `agent_runs`.
-2. Worker атомарно забирає наступний job і обробляє рівно одну coding-задачу.
-3. Для задачі створюється окрема гілка `codex/qa-bug-*` та git worktree.
-4. Codex отримує опис, URL, нотатки, локальні шляхи вкладень і незмінний snapshot постійного контексту проєкту.
-5. Після успішного виправлення задача переходить у «Готовий до ретесту».
-6. Статус «Передивись ще раз» автоматично створює нову спробу в тому самому worktree та продовжує власну Codex-сесію задачі.
+2. Worker атомарно забирає до `CODEX_CONCURRENCY` (1–3) незалежних задач: паралельно не стартують задачі одного проєкту й розділу, а також задача, чия ділянка ще чекає release.
+3. Для задачі створюється окрема гілка `codex/qa-bug-*` та git worktree у кожному репозиторії стека.
+4. Codex отримує опис, URL, вхідні дані QA (сутність, «очікувано/фактично», знімок «до» з DEV), вкладення, коментарі та snapshot постійного контексту з уроками попередніх задач.
+5. Сесія Codex за замовчуванням нова, з блоком «Попередні рани»; продовження лише для швидкого «Передивись ще раз» (до 12 год, та сама модель, completed-попередник, main зрушив не більше ніж на 20 комітів). Шлях і причина зберігаються на запуску.
+6. Reasoning effort підвищується до `CODEX_REASONING_EFFORT_ESCALATED` для SQL, синку та мультирепо-задач. Ліміт Codex повертає запуск у чергу й ставить worker на паузу з backoff.
+7. `needs_review`/`blocked` без конкретного блокера або результат, що не пройшов quality gate, один раз автоматично продовжуються.
 
-Worker не робить commit, push або merge. Основна робоча папка репозиторію не змінюється. Доступ до мережі для Codex вимкнено за замовчуванням.
+Worker не робить commit, push або merge. Основна робоча папка репозиторію не змінюється.
+
+## Live-перевірка на DEV і release
+
+- `dev-api-proxy` — GET-only проксі до DEV data-concord/data-analytics. Службовий credential мінтиться в контейнері проксі з файлів, змонтованих лише туди (`DEV_API_*` у `.env`). Проксі відхиляє будь-які не-GET методи й GET-маршрути, схожі на мутації. Codex ходить у DEV лише через нього.
+- Кожна fixed/verified задача має machine-checkable spec `.qa-desk/verify/<TASK>.json` (GET-запити + assertions на статуси, кількості, поля) і, для UI-дефектів, `.qa-desk/verify/<TASK>.ui.json` у форматі `gba-infra/tools/ui-verify`. CLI: `node server/verification-spec.js <spec>`.
+- Release-worker після deploy проганяє API spec через проксі, а UI spec — на хості через ui-verify (read-only QA Verifier). PASS → «Готовий до ретесту» з комітами, білдом і доказами в коментарі; провал → задача повертається Codex (до 3 разів).
+- Якщо гейт падає й на чистому `origin/<branch>`, спроба не зараховується: задача чекає (`waiting_mainline`) і релізиться автоматично, щойно main позеленіє. Guardian перевіряє кожен новий SHA main у вільний час і відкриває «MAIN RED <repo>@<sha>», якщо падіння тримається.
+- Готові задачі з однаковим набором репозиторіїв релізяться пакетом (один гейт, push і deploy); винуватця падіння знаходить бісекція. dotnet-тести обираються з `tests/**/*Tests.csproj` за графом ProjectReference.
+- Перемикачі release-worker: `RELEASE_BATCHING=off`, `RELEASE_GUARDIAN=off`, `RELEASE_GUARDIAN_AI_MODE=auto`, `RELEASE_DEV_API_PROXY_URL`, `RELEASE_UI_VERIFY_RUNNER`.
 
 ## Локальний запуск
 
@@ -66,10 +76,10 @@ VOICE_TRANSCRIBE_MODEL=base
 CODEX_TARGET_REPO_HOST_PATH=/srv/gba-console
 CODEX_WORKTREES_HOST_PATH=/srv/gba-worktrees
 RTK_HOST_PATH=/absolute/path/to/rtk
-CODEX_NETWORK_ACCESS=false
+CODEX_NETWORK_ACCESS=true
 CODEX_JOB_TIMEOUT_MS=2700000
 CODEX_REASONING_EFFORT=high
-# coding queue is deliberately singleton (one active Codex task)
+CODEX_CONCURRENCY=2
 CODEX_WORKER_LEASE_TTL_MS=20000
 CODEX_WORKER_HEARTBEAT_MS=5000
 CODEX_RUN_STALE_MS=30000
