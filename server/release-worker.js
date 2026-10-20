@@ -614,6 +614,8 @@ export class ReleaseWorker {
     verificationAttempts = Number.parseInt(process.env.RELEASE_VERIFICATION_ATTEMPTS ?? '3', 10),
     verificationRetryDelayMs = Number.parseInt(process.env.RELEASE_VERIFICATION_RETRY_DELAY_MS ?? '20000', 10),
     guardianEnabled = false,
+    batching = process.env.RELEASE_BATCHING !== 'off',
+    batchWorktreesDirectory = process.env.RELEASE_BATCH_WORKTREES_DIR ?? '/root/projects/gba-release-worktrees/batch',
     guardianAiMode = process.env.RELEASE_GUARDIAN_AI_MODE === 'auto' ? 'auto' : 'off',
     guardianPreemptPollMs = Number.parseInt(process.env.RELEASE_GUARDIAN_PREEMPT_POLL_MS ?? '20000', 10),
   } = {}) {
@@ -645,6 +647,9 @@ export class ReleaseWorker {
     this.guardianAiMode = guardianAiMode
     this.guardianPreemptPollMs = Number.isInteger(guardianPreemptPollMs) && guardianPreemptPollMs > 0 ? guardianPreemptPollMs : 20_000
     this.guardianState = new Map()
+    this.batching = batching
+    this.batchWorktreesDirectory = batchWorktreesDirectory
+    this.batchExcluded = new Set()
     this.lastOriginFetchAt = 0
     this.busy = false
     this.leaseStarted = false
@@ -858,6 +863,12 @@ export class ReleaseWorker {
         return now - this.firstSeenAt.get(task.id) >= requiredSettleMs
       })
       if (ready.length > 0) {
+        const group = this.batchCandidates(ready)
+        if (group.length >= 2) {
+          await this.releaseGroup(group)
+          for (const task of group) this.firstSeenAt.delete(task.id)
+          return
+        }
         // Release queue is deliberately single-task. A multi-repository task may
         // need a recovery pass after one remote accepted a push; shipping another
         // task meanwhile could deploy that partial state.
@@ -867,11 +878,15 @@ export class ReleaseWorker {
       }
       if (active.length > 0) return
 
+      const readyWaiting = []
       for (const task of waiting) {
-        if (await this.mainlineHoldReady(task)) {
-          await this.releaseBatch([task])
-          return
-        }
+        if (await this.mainlineHoldReady(task)) readyWaiting.push(task)
+      }
+      if (readyWaiting.length > 0) {
+        const group = this.batchCandidates(readyWaiting)
+        if (group.length >= 2) await this.releaseGroup(group)
+        else await this.releaseBatch([readyWaiting[0]])
+        return
       }
       await this.recoverMainlineBlockedTasks(tasks)
       await this.guardMainlines()
@@ -895,35 +910,30 @@ export class ReleaseWorker {
       await this.handleReleaseFailure(task, outcome)
       return
     }
+    const entry = this.publishedEntry(task, outcome.repos, outcome.repositoryEvidence)
+    if (!entry.ok) {
+      await this.handleReleaseFailure(task, entry.failure)
+      return
+    }
+    await this.deployAndFinalize([entry], entry.repos, outcome.repositoryEvidence)
+  }
 
-    const repos = [...new Set(outcome.repos)]
+  publishedEntry(task, outcomeRepos, repositoryEvidence, extraEvidence = {}) {
+    const repos = [...new Set(outcomeRepos)]
     const services = [...new Set(repos.flatMap((repo) => this.repoPlan[repo]?.services ?? []))]
     if (repos.length === 0 || services.length === 0) {
-      await this.handleReleaseFailure(task, {
-        kind: 'repository',
-        reason: 'Release не має доведеного репозиторію або DEV-сервісу; статус released заборонено.',
-      })
-      return
+      return {
+        ok: false,
+        failure: { kind: 'repository', reason: 'Release не має доведеного репозиторію або DEV-сервісу; статус released заборонено.' },
+      }
     }
-
     const handoff = readAgentReleasePlan(task)
-    const handoffValidation = validateReleaseHandoff(
-      handoff,
-      repos,
-      services,
-      outcome.repositoryEvidence,
-      this.repoPlan,
-    )
+    const handoffValidation = validateReleaseHandoff(handoff, repos, services, repositoryEvidence, this.repoPlan)
     if (!handoffValidation.ok) {
-      await this.handleReleaseFailure(task, {
-        kind: 'validation',
-        phase: 'preflight',
-        reason: handoffValidation.reason,
-      })
-      return
+      return { ok: false, failure: { kind: 'validation', phase: 'preflight', reason: handoffValidation.reason } }
     }
-    let evidence = mergeEvidence(task.agentRun?.releaseEvidence, {
-      repositories: outcome.repositoryEvidence,
+    const evidence = mergeEvidence(task.agentRun?.releaseEvidence, {
+      repositories: repositoryEvidence,
       services,
       handoff,
       handoffConsistency: {
@@ -934,75 +944,68 @@ export class ReleaseWorker {
         effectiveServices: handoffValidation.effectiveServices,
         autoAddedServices: handoffValidation.autoAddedServices,
       },
+      ...extraEvidence,
     })
+    return { ok: true, task, repos, services, handoffValidation, evidence }
+  }
 
-    const publishedBeforeMigration = await this.verifyPublishedWorktrees(repos, outcome.repositoryEvidence)
+  async deployAndFinalize(entries, repos, repositoryEvidence) {
+    const services = [...new Set(repos.flatMap((repo) => this.repoPlan[repo]?.services ?? []))]
+    const failAll = async (failure) => {
+      for (const entry of entries) await this.handleReleaseFailure(entry.task, { ...failure, evidence: entry.evidence })
+    }
+
+    const publishedBeforeMigration = await this.verifyPublishedWorktrees(repos, repositoryEvidence)
     if (!publishedBeforeMigration.ok) {
-      await this.handleReleaseFailure(task, {
-        kind: 'transient',
-        phase: 'migrating',
-        reason: publishedBeforeMigration.reason,
-        evidence,
-      })
+      await failAll({ kind: 'transient', phase: 'migrating', reason: publishedBeforeMigration.reason })
       return
     }
 
-    await this.updateRelease(task, {
-      status: 'processing',
-      phase: 'migrating',
-      repositories: repos,
-      error: '',
-      evidence,
-    })
+    for (const entry of entries) {
+      await this.updateRelease(entry.task, {
+        status: 'processing',
+        phase: 'migrating',
+        repositories: repos,
+        error: '',
+        evidence: entry.evidence,
+      })
+    }
     await this.assertLease()
-    const migrations = await this.runRequiredMigrations(task, repos, outcome.repositoryEvidence)
-    evidence = mergeEvidence(evidence, { migrations: migrations.evidence })
+    const migrations = await this.runRequiredMigrations(entries[0].task, repos, repositoryEvidence)
+    for (const entry of entries) entry.evidence = mergeEvidence(entry.evidence, { migrations: migrations.evidence })
     if (!migrations.ok) {
-      await this.handleReleaseFailure(task, {
-        kind: migrations.kind,
-        reason: migrations.reason,
-        phase: 'migrating',
-        evidence,
-      })
+      await failAll({ kind: migrations.kind, reason: migrations.reason, phase: 'migrating' })
       return
     }
 
-    const publishedBeforeBuild = await this.verifyPublishedWorktrees(repos, outcome.repositoryEvidence)
+    const publishedBeforeBuild = await this.verifyPublishedWorktrees(repos, repositoryEvidence)
     if (!publishedBeforeBuild.ok) {
-      await this.handleReleaseFailure(task, {
-        kind: 'transient',
-        phase: 'deploying',
-        reason: publishedBeforeBuild.reason,
-        evidence,
-      })
+      await failAll({ kind: 'transient', phase: 'deploying', reason: publishedBeforeBuild.reason })
       return
     }
 
     const expectedCommits = Object.fromEntries(repos.flatMap((repo) =>
-      (this.repoPlan[repo]?.services ?? []).map((service) => [service, outcome.repositoryEvidence?.[repo]?.commit ?? ''])))
+      (this.repoPlan[repo]?.services ?? []).map((service) => [service, repositoryEvidence?.[repo]?.commit ?? ''])))
     const before = await this.captureDeployment(services)
     let verification = await this.verifyDeployment(services, before, expectedCommits)
     let composeOutput = 'Exact immutable deployment was already healthy; rebuild/recreate skipped.'
 
     if (!verification.ok) {
-      await this.updateRelease(task, {
-        status: 'processing',
-        phase: 'deploying',
-        evidence,
-      })
+      for (const entry of entries) {
+        await this.updateRelease(entry.task, { status: 'processing', phase: 'deploying', evidence: entry.evidence })
+      }
       await this.assertLease()
-      const deploymentEnvironment = this.deploymentEnvironment(outcome.repositoryEvidence)
+      const deploymentEnvironment = this.deploymentEnvironment(repositoryEvidence)
       const deploy = await this.runMutation(
         'docker',
         [...COMPOSE_ARGS, 'up', '-d', '--build', '--no-deps', '--wait', '--wait-timeout', '420', ...services],
         { cwd: this.infraDirectory, timeoutMs: 60 * 60 * 1000, env: deploymentEnvironment },
       )
       if (deploy.code !== 0) {
-        await this.handleReleaseFailure(task, {
+        await failAll({
           kind: 'transient',
           reason: `Деплой не пройшов${deploy.timedOut ? ' (timeout)' : ''}: ${deploy.output.slice(-1000)}`,
           phase: 'deploying',
-          evidence,
         })
         return
       }
@@ -1011,33 +1014,31 @@ export class ReleaseWorker {
       verification = await this.verifyDeployment(services, before, expectedCommits)
     }
 
-    await this.updateRelease(task, {
-      status: 'processing',
-      phase: 'verifying',
-      evidence,
-    })
+    for (const entry of entries) {
+      await this.updateRelease(entry.task, { status: 'processing', phase: 'verifying', evidence: entry.evidence })
+    }
     await this.assertLease()
     const repositoryCommits = Object.fromEntries(
-      repos.map((repo) => [repo, outcome.repositoryEvidence?.[repo]?.commit ?? '']),
+      repos.map((repo) => [repo, repositoryEvidence?.[repo]?.commit ?? '']),
     )
-    evidence = mergeEvidence(evidence, {
-      deployment: {
-        services: verification.services ?? {},
-        repositoryCommits,
-        verifiedAt: new Date().toISOString(),
-        composeOutput,
-      },
-    })
+    const deployment = {
+      services: verification.services ?? {},
+      repositoryCommits,
+      verifiedAt: new Date().toISOString(),
+      composeOutput,
+    }
+    for (const entry of entries) entry.evidence = mergeEvidence(entry.evidence, { deployment })
     if (!verification.ok) {
-      await this.handleReleaseFailure(task, {
-        kind: 'transient',
-        reason: verification.reason,
-        phase: 'verifying',
-        evidence,
-      })
+      await failAll({ kind: 'transient', reason: verification.reason, phase: 'verifying' })
       return
     }
-    const scenario = await this.verifyScenario(task, handoffValidation.checks)
+    for (const entry of entries) await this.finalizeEntry(entry)
+  }
+
+  async finalizeEntry(entry) {
+    const { task } = entry
+    let evidence = entry.evidence
+    const scenario = await this.verifyScenario(task, entry.handoffValidation.checks)
     evidence = mergeEvidence(evidence, scenario.evidence)
     if (!scenario.ok) {
       if (scenario.kind === 'transient') {
@@ -1084,6 +1085,256 @@ export class ReleaseWorker {
     })
     await this.comment(task, await this.releasedComment(task, evidence, { closing, auditOnly: false }))
     console.log(`[release] ${task.id}: випущено з міграційним і live доказом${closing ? ' та закрито' : ''}`)
+  }
+
+  async integrateRepository(repo, entries, baseline) {
+    const plan = this.repoPlan[repo]
+    const root = path.join(this.batchWorktreesDirectory, repo)
+    const ready = await this.ensureDetachedWorktree(repo, root, baseline)
+    if (!ready.ok) return { ok: false, kind: 'transient', reason: ready.reason }
+    const conflicts = []
+    for (const entry of entries) {
+      const merged = await this.runMutation('git', [
+        '-C', root, 'merge', '--no-ff', '--no-edit', '-m', `release batch: ${entry.task.id}`, branchName(entry.task.id),
+      ], {})
+      if (merged.code !== 0) {
+        await this.runMutation('git', ['-C', root, 'merge', '--abort'], {})
+        conflicts.push(entry)
+      }
+    }
+    try {
+      await materializeInstalledDependencies(plan.root, root, { forceRefresh: true })
+    } catch (error) {
+      return { ok: false, kind: 'repository', reason: `${repo}: ${error.message}` }
+    }
+    const head = await this.runProcess('git', ['-C', root, 'rev-parse', 'HEAD'], {})
+    const commit = /\b[0-9a-f]{40}\b/.exec(head.output)?.[0]
+    if (!commit) return { ok: false, kind: 'repository', reason: `${repo}: не вдалося визначити commit пакета` }
+    return { ok: true, root, commit, conflicts }
+  }
+
+  async integrateGroup(entries, repos) {
+    let included = [...entries]
+    const excluded = []
+    for (let round = 0; round < 4; round += 1) {
+      const integration = { ok: true, repositories: {} }
+      let conflicted = false
+      for (const repo of repos) {
+        const baseline = await this.resolveMainlineCommit(this.repoPlan[repo])
+        if (!baseline) return { ok: false, kind: 'repository', reason: `${repo}: не вдалося зафіксувати mainline для пакета`, included, excluded }
+        const result = await this.integrateRepository(repo, included, baseline)
+        if (!result.ok) return { ...result, included, excluded }
+        if (result.conflicts.length > 0) {
+          for (const entry of result.conflicts) excluded.push({ entry, reason: `${repo}: конфлікт мерджу в пакеті` })
+          included = included.filter((entry) => !result.conflicts.includes(entry))
+          conflicted = true
+          break
+        }
+        integration.repositories[repo] = { baseline, commit: result.commit, root: result.root }
+      }
+      if (!conflicted) return { ...integration, included, excluded }
+      if (included.length === 0) return { ok: false, kind: 'conflict', reason: 'усі задачі пакета конфліктують', included, excluded }
+    }
+    return { ok: false, kind: 'conflict', reason: 'пакет не вдалося стабілізувати після конфліктів', included, excluded }
+  }
+
+  async gateGroup(integration, entries, repos) {
+    for (const repo of repos) {
+      const { root, baseline } = integration.repositories[repo]
+      const files = [...new Set(entries.flatMap((entry) => entry.prepared.selected.get(repo)?.files ?? []))]
+      const gate = await this.resolveRepositoryGate(repo, root, files)
+      for (const quick of gate.fast) {
+        const result = await this.runReleaseCheck(repo, quick.command, root)
+        if (result.code !== 0) {
+          return {
+            ok: false,
+            kind: 'validation',
+            reason: `${repo}: перевірка «${quick.full.join(' ')}» впала на швидкому прогоні пов’язаних тестів пакета (${extractFailingTests(result.output, 5).join('; ') || 'деталі в логах'})`,
+            failedGate: { repo, check: quick.full, baselineCommit: baseline },
+          }
+        }
+      }
+      for (const check of gate.full) {
+        const result = await this.runReleaseCheck(repo, check, root)
+        if (result.code !== 0) {
+          return {
+            ok: false,
+            kind: 'validation',
+            reason: `${repo}: перевірка «${check.join(' ')}» впала в пакетному релізі (${extractFailingTests(result.output, 5).join('; ') || 'деталі в логах'})`,
+            failedGate: { repo, check, baselineCommit: baseline },
+          }
+        }
+      }
+    }
+    return { ok: true }
+  }
+
+  async subsetFailsGate(entries, failedGate) {
+    const integration = await this.integrateRepository(failedGate.repo, entries, failedGate.baselineCommit)
+    if (!integration.ok || integration.conflicts.length > 0) return null
+    const result = await this.runReleaseCheck(failedGate.repo, failedGate.check, integration.root)
+    return result.code !== 0
+  }
+
+  async bisectCulprit(entries, failedGate) {
+    let candidates = [...entries]
+    while (candidates.length > 1) {
+      const half = candidates.slice(0, Math.ceil(candidates.length / 2))
+      const rest = candidates.slice(half.length)
+      const halfRed = await this.subsetFailsGate(half, failedGate)
+      if (halfRed === null) return null
+      if (halfRed) {
+        candidates = half
+        continue
+      }
+      const restRed = await this.subsetFailsGate(rest, failedGate)
+      if (!restRed) return null
+      candidates = rest
+    }
+    return candidates[0] ?? null
+  }
+
+  batchCandidates(tasks) {
+    if (!this.batching) return []
+    const groups = new Map()
+    for (const task of tasks) {
+      if (this.batchExcluded.has(task.id) || isVerifiedAudit(task)) continue
+      if ((task.agentRun?.releaseAttempts ?? 0) > 0) continue
+      if (!['pending', 'waiting_mainline'].includes(task.agentRun?.releaseStatus)) continue
+      const repos = readAgentReleasePlan(task).repositories
+      if (!Array.isArray(repos) || repos.length === 0) continue
+      const key = [...repos].sort().join('+')
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key).push(task)
+    }
+    return [...groups.values()].sort((left, right) => right.length - left.length)[0] ?? []
+  }
+
+  async releaseGroup(tasks) {
+    await this.assertLease()
+    const entries = []
+    for (const task of tasks) {
+      const prepared = await this.prepareRelease(task)
+      if (!prepared.ok) {
+        await this.handleReleaseFailure(task, prepared)
+        continue
+      }
+      if ([...prepared.selected.values()].some((selection) => selection.mode !== 'candidate')) {
+        this.batchExcluded.add(task.id)
+        continue
+      }
+      entries.push({ task, prepared })
+    }
+    if (entries.length < 2) {
+      for (const entry of entries) this.batchExcluded.add(entry.task.id)
+      return
+    }
+    const repos = [...entries[0].prepared.touchedRepos].sort()
+    for (const entry of entries) {
+      await this.updateRelease(entry.task, { status: 'processing', phase: 'validating', evidence: entry.prepared.evidence })
+    }
+    const integration = await this.integrateGroup(entries, repos)
+    for (const { entry } of integration.excluded ?? []) this.batchExcluded.add(entry.task.id)
+    const included = integration.included ?? []
+    if (!integration.ok) {
+      for (const entry of included) {
+        await this.handleReleaseFailure(entry.task, { kind: 'transient', phase: 'validating', reason: `пакетний реліз: ${integration.reason}`, evidence: entry.prepared.evidence })
+      }
+      return
+    }
+    if (included.length < 2) {
+      for (const entry of included) this.batchExcluded.add(entry.task.id)
+      return
+    }
+    const gated = await this.gateGroup(integration, included, repos)
+    if (!gated.ok) {
+      const probe = await this.probeMainlineGate(gated.failedGate.repo, gated.failedGate.baselineCommit, gated.failedGate.check)
+      if (probe.status === 'red') {
+        for (const entry of included) {
+          await this.holdForMainline(entry.task, { ...gated, evidence: entry.prepared.evidence }, probe)
+        }
+        return
+      }
+      const culprit = probe.status === 'green' ? await this.bisectCulprit(included, gated.failedGate) : null
+      if (!culprit) {
+        for (const entry of included) this.batchExcluded.add(entry.task.id)
+        console.error(`[release] пакет ${included.map((entry) => entry.task.id).join(', ')}: винуватця не визначено, задачі підуть поодинці`)
+        return
+      }
+      this.batchExcluded.add(culprit.task.id)
+      for (const entry of included) {
+        if (entry === culprit) continue
+        await this.updateRelease(entry.task, { status: 'pending', phase: 'queued', evidence: entry.prepared.evidence })
+      }
+      await this.handleReleaseFailure(culprit.task, {
+        ...gated,
+        phase: 'validating',
+        reason: `${gated.reason}; бісекція пакета показала, що падіння вносить саме ця задача`,
+        evidence: culprit.prepared.evidence,
+      })
+      return
+    }
+
+    for (const entry of included) {
+      await this.updateRelease(entry.task, { status: 'processing', phase: 'publishing', evidence: entry.prepared.evidence })
+    }
+    await this.assertLease()
+    const refetched = await this.fetchMainlines({ force: true })
+    const failGroup = async (reason, kind = 'transient') => {
+      for (const entry of included) {
+        await this.handleReleaseFailure(entry.task, { kind, phase: 'publishing', reason, evidence: entry.prepared.evidence })
+      }
+    }
+    if (!refetched.ok) {
+      await failGroup(refetched.reason)
+      return
+    }
+    for (const repo of repos) {
+      const current = await this.resolveMainlineCommit(this.repoPlan[repo])
+      if (current !== integration.repositories[repo].baseline) {
+        await failGroup(`${repo}: mainline змінився під час пакетної перевірки`)
+        return
+      }
+    }
+    const repositoryEvidence = {}
+    for (const repo of repos) {
+      const plan = this.repoPlan[repo]
+      const { commit } = integration.repositories[repo]
+      await this.assertLease()
+      const push = await this.runMutation('git', ['-C', plan.root, 'push', 'origin', `${commit}:refs/heads/${plan.branch}`], {})
+      if (push.code !== 0) {
+        await failGroup(`${repo}: push пакета не пройшов: ${push.output.slice(-500)}`, classifyGitPushFailure(push.output))
+        return
+      }
+      repositoryEvidence[repo] = {
+        validatedCommit: commit,
+        validation: 'passed',
+        validatedAt: new Date().toISOString(),
+        commit,
+        branch: plan.branch,
+        pushed: true,
+        pushedAt: new Date().toISOString(),
+      }
+      await this.fastForwardMainCheckout({ plan, commit })
+    }
+    const batch = { taskIds: included.map((entry) => entry.task.id), commits: Object.fromEntries(repos.map((repo) => [repo, integration.repositories[repo].commit])) }
+    const published = []
+    for (const entry of included) {
+      const taskEvidence = Object.fromEntries(repos.map((repo) => [repo, {
+        ...repositoryEvidence[repo],
+        files: entry.prepared.selected.get(repo)?.files ?? [],
+      }]))
+      const publishedEntry = this.publishedEntry(entry.task, repos, taskEvidence, { batch })
+      if (!publishedEntry.ok) {
+        await this.handleReleaseFailure(entry.task, publishedEntry.failure)
+        continue
+      }
+      await this.updateRelease(entry.task, { status: 'processing', phase: 'publishing', evidence: publishedEntry.evidence })
+      published.push(publishedEntry)
+    }
+    if (published.length === 0) return
+    console.log(`[release] пакет ${batch.taskIds.join(', ')}: один гейт і push для ${repos.join(', ')}`)
+    await this.deployAndFinalize(published, repos, repositoryEvidence)
   }
 
   async releaseVerifiedAudit(task) {
@@ -1446,7 +1697,7 @@ export class ReleaseWorker {
     return { ok: true, evidence }
   }
 
-  async releaseTask(task) {
+  async prepareRelease(task) {
     const slug = taskSlug(task.id)
     const branch = branchName(task.id)
     const jobDirectory = path.join(this.worktreesDirectory, slug)
@@ -1586,6 +1837,14 @@ export class ReleaseWorker {
       error: '',
       evidence,
     })
+    return { ok: true, selected, touchedRepos, evidence, branch }
+  }
+
+  async releaseTask(task) {
+    const preparedRelease = await this.prepareRelease(task)
+    if (!preparedRelease.ok) return preparedRelease
+    const { selected, touchedRepos, branch } = preparedRelease
+    let { evidence } = preparedRelease
 
     const prepared = []
     for (const repo of touchedRepos) {
