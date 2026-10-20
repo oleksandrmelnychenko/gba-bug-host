@@ -285,6 +285,7 @@ export interface MetricsAlert {
   minutes?: number
   count?: number
   lastAt?: string | null
+  pausedUntil?: string
   runStatus?: string
   releaseStatus?: string
 }

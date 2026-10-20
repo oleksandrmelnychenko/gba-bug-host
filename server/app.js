@@ -476,7 +476,7 @@ export async function createApp(options = {}) {
       const days = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 180) : 28
       const now = Date.now()
       const rows = store.metricsRows(new Date(now - days * 24 * 60 * 60 * 1000).toISOString())
-      response.json(computeMetrics({ ...rows, now, days }))
+      response.json(computeMetrics({ ...rows, usageLimitState: store.readSystemState('codex-usage-limit'), now, days }))
     } catch (error) {
       next(error)
     }

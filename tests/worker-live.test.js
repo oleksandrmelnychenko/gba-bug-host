@@ -430,3 +430,24 @@ test('Codex worker із concurrency=2 запускає дві незалежні
   assert.equal(maximumActive, 2)
   worker.acceptingRuns = false
 })
+
+test('структуровані вхідні дані QA і знімок «до» потрапляють у промпт', () => {
+  const prompt = buildPrompt({
+    id: 'BUG-1391',
+    title: 'Ціна товару',
+    description: 'Не та ціна',
+    area: 'Товари',
+    priority: 'medium',
+    status: 'new',
+    project: 'console',
+    entityKind: 'product',
+    entityCode: '1987302814-BOSCH',
+    expectedResult: 'Ціна 12.40 EUR',
+    actualResult: 'Ціна 0',
+    intakeEvidence: { requests: [{ path: '/api/v1/uk/products/search/advanced?value=1987302814-BOSCH', status: 200, count: 1 }] },
+  }, { attempt: 1, trigger: 'manual' }, [], [], [], 'контекст', { networkAccess: true })
+  assert.match(prompt, /Зачеплена сутність: товар "1987302814-BOSCH"/)
+  assert.match(prompt, /Очікувано \(QA\): Ціна 12\.40 EUR/)
+  assert.match(prompt, /Фактично \(QA\): Ціна 0/)
+  assert.match(prompt, /Знімок «до» на DEV[\s\S]*products\/search\/advanced/)
+})

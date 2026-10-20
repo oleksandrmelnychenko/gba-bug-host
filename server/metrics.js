@@ -148,7 +148,7 @@ function runTimeline(run) {
   }
 }
 
-export function computeMetrics({ tasks = [], runs = [], lastComments = [], pipelineComments = [], now = Date.now(), days = 28 } = {}) {
+export function computeMetrics({ tasks = [], runs = [], lastComments = [], pipelineComments = [], usageLimitState = null, now = Date.now(), days = 28 } = {}) {
   const since = now - days * 24 * 60 * 60 * 1000
   const normalizedRuns = runs.map(normalizeRun)
   const tasksById = new Map(tasks.map((task) => [task.id, task]))
@@ -257,12 +257,16 @@ export function computeMetrics({ tasks = [], runs = [], lastComments = [], pipel
     const at = time(run.finishedAt) ?? time(run.updatedAt)
     return run.status === 'failed' && at !== null && now - at <= USAGE_LIMIT_WINDOW_MS && USAGE_LIMIT_PATTERN.test(run.error)
   })
-  if (usageFailures.length > 0) {
+  const pauseAt = time(usageLimitState?.at)
+  const pausedUntil = time(usageLimitState?.pausedUntil)
+  const recentPause = pauseAt !== null && now - pauseAt <= USAGE_LIMIT_WINDOW_MS
+  if (usageFailures.length > 0 || recentPause) {
     alerts.push({
       kind: 'usage_limit',
-      count: usageFailures.length,
-      lastAt: maxTime(usageFailures.map((run) => run.finishedAt ?? run.updatedAt)),
+      count: usageFailures.length + (recentPause ? 1 : 0),
+      lastAt: maxTime([...usageFailures.map((run) => run.finishedAt ?? run.updatedAt), ...(recentPause ? [usageLimitState.at] : [])]),
       taskIds: [...new Set(usageFailures.map((run) => run.taskId))].slice(0, 10),
+      ...(pausedUntil !== null && pausedUntil > now ? { pausedUntil: usageLimitState.pausedUntil } : {}),
     })
   }
 

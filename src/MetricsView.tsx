@@ -80,7 +80,7 @@ function alertText(alert: MetricsAlert) {
     case 'long_run':
       return `Codex працює вже ${alert.minutes} хв`
     case 'usage_limit':
-      return `Ліміт Codex: ${alert.count} падінь за 24 год (останнє ${formatTime(alert.lastAt)})`
+      return `Ліміт Codex: ${alert.count} подій за 24 год (останнє ${formatTime(alert.lastAt)})${alert.pausedUntil ? `; нові запуски на паузі до ${formatTime(alert.pausedUntil)}` : ''}`
     case 'stale_task':
       return `${alert.minutes} хв без зміни статусу чи коментаря (${alert.releaseStatus && alert.releaseStatus !== 'blocked' ? `реліз: ${alert.releaseStatus}` : `запуск: ${alert.runStatus}`})`
     default:

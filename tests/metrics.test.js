@@ -226,3 +226,17 @@ test('GET /api/metrics читає seeded store лише на читання й �
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('пауза worker через ліміт Codex з’являється в сигналах навіть без failed-запусків', async () => {
+  const { computeMetrics } = await import('../server/metrics.js')
+  const now = Date.parse('2026-10-20T12:00:00.000Z')
+  const metrics = computeMetrics({
+    usageLimitState: { at: '2026-10-20T11:30:00.000Z', pausedUntil: '2026-10-20T12:15:00.000Z' },
+    now,
+  })
+  const alert = metrics.alerts.find((item) => item.kind === 'usage_limit')
+  assert.equal(alert.count, 1)
+  assert.equal(alert.pausedUntil, '2026-10-20T12:15:00.000Z')
+  const stale = computeMetrics({ usageLimitState: { at: '2026-10-18T11:30:00.000Z', pausedUntil: '2026-10-18T12:00:00.000Z' }, now })
+  assert.equal(stale.alerts.some((item) => item.kind === 'usage_limit'), false)
+})
