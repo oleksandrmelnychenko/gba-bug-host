@@ -480,3 +480,47 @@ test('UI spec від Codex зберігається для release-worker, а н
     await fixture.cleanup()
   }
 })
+
+test('обрив фінальної відповіді на max_output_tokens добирає лише результат у тій самій сесії', async () => {
+  const { isIncompleteOutputFailure } = await import('../server/codex-worker.js')
+  assert.equal(isIncompleteOutputFailure('Incomplete response returned, reason: max_output_tokens'), true)
+  assert.equal(isIncompleteOutputFailure('tests failed'), false)
+  const fixture = await setupWorker({ results: [], verificationRunner: async () => ({ passed: true, checks: [] }) })
+  try {
+    const job = fixture.jobDirectory('BUG-1051')
+    const fake = path.join(path.dirname(job), '..', 'truncating-codex.mjs')
+    await writeFile(fake, `#!/usr/bin/env node
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+const args = process.argv.slice(2)
+const outputPath = args[args.indexOf('--output-last-message') + 1]
+const count = existsSync('calls.jsonl') ? readFileSync('calls.jsonl', 'utf8').trim().split('\\n').filter(Boolean).length + 1 : 1
+let prompt = ''
+for await (const chunk of process.stdin) prompt += chunk
+appendFileSync('calls.jsonl', JSON.stringify({ args, prompt: prompt.slice(0, 300) }) + '\\n', 'utf8')
+process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 'astra-session' }) + '\\n')
+if (count === 1) {
+  appendFileSync('target/app.txt', 'fix\\n', 'utf8')
+  mkdirSync('.qa-desk/verify', { recursive: true })
+  writeFileSync('.qa-desk/verify/BUG-1051.json', ${JSON.stringify(JSON.stringify(liveSpec('BUG-1051')))}, 'utf8')
+  process.stdout.write(' \\n \\n \\n\\n')
+  process.stdout.write(JSON.stringify({ type: 'turn.failed', error: { message: 'Incomplete response returned, reason: max_output_tokens' } }) + '\\n')
+  process.exit(1)
+}
+writeFileSync(outputPath, ${JSON.stringify(JSON.stringify(fixedResult()))}, 'utf8')
+`, 'utf8')
+    await chmod(fake, 0o755)
+    fixture.worker.codexBinary = fake
+    fixture.store.enqueueAgentRun('RUN-TRUNC', 'BUG-1051', 'manual')
+    await fixture.worker.processRun(fixture.store.claimNextAgentRun())
+    const run = fixture.store.findAgentRun('RUN-TRUNC')
+    assert.equal(run.status, 'completed', `${run.error} ${run.details.slice(0, 500)}`)
+    assert.match(run.sessionReason, /finalize-after-max-output/)
+    const calls = (await readFile(path.join(job, 'calls.jsonl'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line))
+    assert.equal(calls.length, 2)
+    assert.equal(calls[1].args.includes('resume'), true)
+    assert.equal(calls[1].args.includes('astra-session'), true)
+    assert.match(calls[1].prompt, /обірвалась через ліміт вихідних токенів/)
+  } finally {
+    await fixture.cleanup()
+  }
+})

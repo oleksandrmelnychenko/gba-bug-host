@@ -38,6 +38,19 @@ export function isUsageLimitFailure(message) {
   return /usage limit|rate limit|too many requests|\b429\b|quota|limit reached|try again (?:at|in)/i.test(String(message ?? ''))
 }
 
+export function isIncompleteOutputFailure(message) {
+  return /max_output_tokens|Incomplete response returned/i.test(String(message ?? ''))
+}
+
+export function finalizationPrompt(taskId) {
+  return [
+    `Попередня відповідь по задачі ${taskId} обірвалась через ліміт вихідних токенів (модель почала видавати порожні рядки).`,
+    'Не повторюй дослідження й не змінюй файли без потреби: робота й live spec уже в job-директорії.',
+    'Поверни ЛИШЕ фінальний structured result за наданою JSON-схемою — компактний однорядковий JSON без відступів, порожніх рядків і пробілів між токенами.',
+    'Довгі тексти скорочуй до суті (summary до 1500 символів, кожен evidence до 400). Якщо роботу не завершено — чесно поверни відповідний outcome і конкретний blocker.',
+  ].join('\n')
+}
+
 export function usageLimitBackoffMs(consecutive, { baseMs = 15 * 60 * 1000, maximumMs = 2 * 60 * 60 * 1000 } = {}) {
   return Math.min(maximumMs, baseMs * 2 ** Math.max(0, consecutive - 1))
 }
@@ -1552,6 +1565,17 @@ export class CodexWorker {
       this.store.updateAgentRun(run.id, { codexSessionId: '', sessionMode: session.mode, sessionReason: session.reason })
       await rm(resultPath, { force: true })
       execution = await invokeCodex('', promptFor('fresh'))
+    }
+
+    const incompleteFailure = codexExecutionFailureReason(execution, this.timeoutMs)
+    if (!stopControl && !this.stopping && !execution.timedOut && isIncompleteOutputFailure(incompleteFailure)) {
+      const sessionId = this.store.findAgentRun(run.id)?.codexSessionId
+      if (sessionId) {
+        console.log(`[Codex worker] ${task.id}: відповідь обірвалась на max_output_tokens, прошу лише фінальний результат у тій самій сесії`)
+        this.store.updateAgentRun(run.id, { sessionReason: `${session.reason};finalize-after-max-output` })
+        await rm(resultPath, { force: true })
+        execution = await invokeCodex(sessionId, finalizationPrompt(task.id))
+      }
     }
 
     if (this.stopping) {
