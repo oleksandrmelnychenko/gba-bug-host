@@ -144,3 +144,54 @@ test('точний хвіст BUG-1393 (ANSI-кольори, лічильник 
   const realRegression = '\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m src/a.test.ts > breaks\nAssertionError: expected 1 to be 2\n\u001b[31m⎯⎯⎯[1/1]⎯\u001b[39m'
   assert.equal(classifyGateOutput(realRegression).environment, false)
 })
+
+test('повний vitest бере хост ексклюзивно: js-1 і всі dotnet-слоти, а js-pending зупиняє нових dotnet-учасників', async () => {
+  const { readdir, readFile } = await import('node:fs/promises')
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-gate-exclusive-'))
+  const quiet = { dotnetTest: 0, dotnetBuild: 0, vitest: 0 }
+  const make = () => new HostGateLimiter({
+    lockDirectory: root,
+    maxDotnet: 3,
+    maxLoad: 50,
+    pollMs: 5,
+    scan: async () => quiet,
+    load: () => 1,
+  })
+  const limiter = make()
+  const other = make()
+  try {
+    const vitest = await limiter.acquire('vitest', { maxWaitMs: 0 })
+    assert.equal(vitest.exclusive, true)
+    assert.deepEqual((await readdir(root)).sort(), ['dotnet-1.lock', 'dotnet-2.lock', 'dotnet-3.lock', 'js-1.lock'])
+    assert.equal((await other.acquire('dotnet-test', { maxWaitMs: 0 })).release, null)
+    assert.equal((await other.acquire('vitest-related', { maxWaitMs: 0 })).release, null)
+    await vitest.release()
+    assert.deepEqual(await readdir(root), [])
+
+    const related = await limiter.acquire('vitest-related', { maxWaitMs: 0 })
+    const dotnetBeside = await other.acquire('dotnet-test', { maxWaitMs: 0 })
+    assert.equal(typeof dotnetBeside.release, 'function', 'короткий vitest related лишається на легкому правилі')
+    await related.release()
+    await dotnetBeside.release()
+
+    await writeFile(path.join(root, 'dotnet-2.lock'), `${process.ppid}\n2026-10-20T16:00:00Z\n`, 'utf8')
+    const waiting = limiter.acquire('vitest', { maxWaitMs: 5_000 })
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    assert.equal((await readFile(path.join(root, 'js-pending'), 'utf8')).split('\n')[0], String(process.pid))
+    await writeFile(path.join(root, 'js-pending'), `${process.ppid}\n2026-10-20T16:00:00Z\n`, 'utf8')
+    assert.equal(await other.foreignExclusivePending(), true)
+    assert.equal((await other.acquire('dotnet-test', { maxWaitMs: 0 })).release, null, 'живий js-pending тримає нових dotnet-учасників')
+    await rm(path.join(root, 'dotnet-2.lock'), { force: true })
+    const granted = await waiting
+    assert.equal(granted.exclusive, true)
+    assert.equal((await readdir(root)).includes('js-pending'), false)
+    await granted.release()
+    assert.deepEqual(await readdir(root), [])
+
+    await writeFile(path.join(root, 'js-pending'), '999999999\n2026-10-20T16:00:00Z\n', 'utf8')
+    assert.equal(await other.foreignExclusivePending(), false, 'маркер мертвого процесу прибирається')
+    assert.deepEqual(await readdir(root), [])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

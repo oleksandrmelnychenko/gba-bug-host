@@ -122,6 +122,13 @@ export async function acquireLockFile(file) {
   return null
 }
 
+export const EXCLUSIVE_PENDING_MARKER = 'js-pending'
+
+async function readLockOwner(file) {
+  const owner = Number.parseInt((await readFile(file, 'utf8').catch(() => '')).split('\n')[0], 10)
+  return Number.isInteger(owner) && owner > 0 ? owner : null
+}
+
 export class HostGateLimiter {
   constructor({
     lockDirectory = process.env.RELEASE_GATE_LOCK_DIR ?? DEFAULT_GATE_LOCK_DIRECTORY,
@@ -162,12 +169,77 @@ export class HostGateLimiter {
     return { ok: true, state }
   }
 
+  async foreignExclusivePending() {
+    const file = path.join(this.lockDirectory, EXCLUSIVE_PENDING_MARKER)
+    const owner = await readLockOwner(file)
+    if (owner === null) return false
+    if (owner === process.pid) return false
+    if (processAlive(owner)) return true
+    await rm(file, { force: true })
+    return false
+  }
+
+  exclusiveLockFiles() {
+    return [
+      path.join(this.lockDirectory, 'js-1.lock'),
+      ...Array.from({ length: Math.max(1, this.maxDotnet) }, (_, index) => path.join(this.lockDirectory, `dotnet-${index + 1}.lock`)),
+    ]
+  }
+
+  async acquireExclusive({ maxWaitMs, now }) {
+    const started = now()
+    const held = new Map()
+    let marker = null
+    let last = null
+    const releaseHeld = async () => {
+      for (const release of held.values()) await release()
+      held.clear()
+    }
+    try {
+      while (true) {
+        if (!marker && maxWaitMs > 0) marker = await acquireLockFile(path.join(this.lockDirectory, EXCLUSIVE_PENDING_MARKER))
+        if (!marker && await this.foreignExclusivePending()) {
+          last = { ok: false, reason: 'інший повний vitest уже чекає на хост' }
+        } else {
+          for (const file of this.exclusiveLockFiles()) {
+            if (held.has(file)) continue
+            const release = await acquireLockFile(file)
+            if (release) held.set(file, release)
+          }
+          if (held.size === this.exclusiveLockFiles().length) {
+            last = await this.admissible('vitest')
+            if (last.ok) {
+              await marker?.()
+              marker = null
+              return { release: releaseHeld, waitedMs: now() - started, state: last.state, forced: false, exclusive: true }
+            }
+          } else {
+            last = { ok: false, reason: 'повний vitest чекає, поки інші раннери звільнять слоти js-1 і dotnet-1..3' }
+          }
+        }
+        if (now() - started >= maxWaitMs) {
+          await releaseHeld()
+          await marker?.()
+          return { release: null, waitedMs: now() - started, state: last?.state ?? null, forced: false, busy: true, reason: last?.reason }
+        }
+        await this.sleep(this.pollMs)
+      }
+    } catch (error) {
+      await releaseHeld()
+      await marker?.()
+      throw error
+    }
+  }
+
   async acquire(kind, { maxWaitMs = 30 * 60 * 1000, now = () => Date.now() } = {}) {
     if (kind === 'other') return { release: async () => {}, waitedMs: 0, state: null, forced: false }
+    if (kind === 'vitest') return this.acquireExclusive({ maxWaitMs, now })
     const started = now()
     let last = null
     while (true) {
-      last = await this.admissible(kind)
+      last = kind.startsWith('dotnet') && await this.foreignExclusivePending()
+        ? { ok: false, state: null, reason: 'повний vitest чекає на хост (js-pending) — новий dotnet не стартує' }
+        : await this.admissible(kind)
       if (last.ok) {
         const lock = await this.lockSlot(kind)
         if (lock) return { release: lock, waitedMs: now() - started, state: last.state, forced: false }
