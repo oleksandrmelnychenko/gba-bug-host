@@ -431,7 +431,7 @@ test('швидкий прогін пов’язаних тестів будує�
   assert.equal(relatedTestCheck({ checks: [['dotnet', 'test']] }, ['src/a.ts']), null)
 })
 
-test('guardian на червоному main відкриває одну задачу MAIN RED і оновлює її на новому SHA', async () => {
+test('guardian відкриває MAIN RED лише коли те саме падіння повторилось на двох SHA, далі оновлює одну задачу', async () => {
   const originalFetch = global.fetch
   const deskTasks = []
   const posts = []
@@ -455,8 +455,13 @@ test('guardian на червоному main відкриває одну зада
   try {
     await withWorker(async ({ worker, record }) => {
       await worker.guardMainlines()
+      await worker.guardMainlines()
+      assert.equal(posts.length, 0, 'одне падіння під час розбиття тестів ще не задача')
+
+      current = shaB
+      await worker.guardMainlines()
       assert.equal(posts.length, 1)
-      assert.equal(posts[0].title, `MAIN RED repo@${shaA.slice(0, 12)}`)
+      assert.equal(posts[0].title, `MAIN RED repo@${shaB.slice(0, 12)}`)
       assert.equal(posts[0].priority, 'high')
       assert.equal(posts[0].aiMode, 'off')
       assert.match(posts[0].notes, /\[main-red:repo\]/)
@@ -465,12 +470,37 @@ test('guardian на червоному main відкриває одну зада
       await worker.guardMainlines()
       assert.equal(posts.length, 1, 'той самий SHA не створює дубль')
 
-      current = shaB
+      current = 'c'.repeat(40)
       await worker.guardMainlines()
       assert.equal(posts.length, 1)
-      assert.equal(patches[0].title, `MAIN RED repo@${shaB.slice(0, 12)}`)
+      assert.equal(patches[0].title, `MAIN RED repo@${'c'.repeat(12)}`)
       assert.match(record.comments.at(-1), /^\[конвеєр:main-red\]/)
     }, { guardianEnabled: true, mainline: () => current })
+  } finally {
+    global.fetch = originalFetch
+  }
+})
+
+test('guardian відкриває MAIN RED і без нового SHA, якщо червоний main тримається довше за поріг', async () => {
+  const originalFetch = global.fetch
+  const posts = []
+  global.fetch = async (url, init = {}) => {
+    if (init.method === 'POST' && String(url).endsWith('/api/tasks')) {
+      posts.push(Object.fromEntries(init.body.entries()))
+      return { ok: true, json: async () => ({ id: 'BUG-MR-1' }) }
+    }
+    return { ok: true, json: async () => [] }
+  }
+  try {
+    await withWorker(async ({ worker }) => {
+      await worker.guardMainlines()
+      assert.equal(posts.length, 0)
+      worker.guardianState.get('repo').firstRedAt = new Date(Date.now() - 31 * 60 * 1000).toISOString()
+      await worker.guardMainlines()
+      assert.equal(posts.length, 1)
+      await worker.guardMainlines()
+      assert.equal(posts.length, 1)
+    }, { guardianEnabled: true })
   } finally {
     global.fetch = originalFetch
   }

@@ -618,6 +618,7 @@ export class ReleaseWorker {
     batchWorktreesDirectory = process.env.RELEASE_BATCH_WORKTREES_DIR ?? '/root/projects/gba-release-worktrees/batch',
     guardianAiMode = process.env.RELEASE_GUARDIAN_AI_MODE === 'auto' ? 'auto' : 'off',
     guardianPreemptPollMs = Number.parseInt(process.env.RELEASE_GUARDIAN_PREEMPT_POLL_MS ?? '20000', 10),
+    guardianRedGraceMs = Number.parseInt(process.env.RELEASE_GUARDIAN_RED_GRACE_MS ?? String(30 * 60 * 1000), 10),
   } = {}) {
     this.deskBaseUrl = deskBaseUrl.replace(/\/$/, '')
     this.worktreesDirectory = worktreesDirectory
@@ -647,6 +648,7 @@ export class ReleaseWorker {
     this.guardianAiMode = guardianAiMode
     this.guardianPreemptPollMs = Number.isInteger(guardianPreemptPollMs) && guardianPreemptPollMs > 0 ? guardianPreemptPollMs : 20_000
     this.guardianState = new Map()
+    this.guardianRedGraceMs = Number.isInteger(guardianRedGraceMs) && guardianRedGraceMs >= 0 ? guardianRedGraceMs : 30 * 60 * 1000
     this.batching = batching
     this.batchWorktreesDirectory = batchWorktreesDirectory
     this.batchExcluded = new Set()
@@ -2500,13 +2502,18 @@ export class ReleaseWorker {
       const sha = await this.resolveMainlineCommit(plan)
       if (!sha) continue
       const state = this.guardianState.get(repo)
-      if (state?.sha === sha) continue
+      if (state?.sha === sha) {
+        if (state.status === 'red' && !state.reported && Date.now() - Date.parse(state.firstRedAt) >= this.guardianRedGraceMs) {
+          await this.reportMainRed(repo, plan, sha, state.probe)
+          state.reported = true
+        }
+        continue
+      }
       let red = null
       let incomplete = null
-      const prepared = await this.ensureDetachedWorktree(repo, path.join(this.probeWorktreesDirectory, repo), sha)
-      const checks = prepared.ok
-        ? (await this.resolveRepositoryGate(repo, path.join(this.probeWorktreesDirectory, repo), null)).full
-        : []
+      const probeRoot = path.join(this.probeWorktreesDirectory, repo)
+      const prepared = await this.ensureDetachedWorktree(repo, probeRoot, sha)
+      const checks = prepared.ok ? (await this.resolveRepositoryGate(repo, probeRoot, null)).full : []
       if (!prepared.ok) incomplete = { status: 'error', reason: prepared.reason }
       for (const check of checks) {
         const probe = await this.probeMainlineGate(repo, sha, check, { preemptible: true })
@@ -2520,13 +2527,37 @@ export class ReleaseWorker {
         }
       }
       if (incomplete?.status === 'aborted') return
-      this.guardianState.set(repo, { sha, status: red ? 'red' : incomplete ? 'error' : 'green', at: new Date().toISOString() })
+      const now = new Date().toISOString()
       if (incomplete) {
+        this.guardianState.set(repo, { ...(state ?? {}), sha, status: 'error', at: now })
         console.error(`[release] guardian ${repo}@${sha.slice(0, 12)}: ${incomplete.reason ?? 'перевірка не відбулася'}`)
         return
       }
-      if (red) await this.reportMainRed(repo, plan, sha, red)
-      else await this.reportMainGreen(repo, plan, sha)
+      if (!red) {
+        this.guardianState.set(repo, { sha, status: 'green', at: now })
+        await this.reportMainGreen(repo, plan, sha)
+        return
+      }
+      const failedCheck = Array.isArray(red.check) ? red.check.join(' ') : String(red.check)
+      const sameFailure = state?.status === 'red' && state.failedCheck === failedCheck
+      const next = {
+        sha,
+        status: 'red',
+        at: now,
+        failedCheck,
+        probe: red,
+        firstRedAt: sameFailure ? state.firstRedAt : now,
+        consecutive: sameFailure ? (state.consecutive ?? 1) + 1 : 1,
+        reported: sameFailure && state.reported === true,
+      }
+      this.guardianState.set(repo, next)
+      const persisted = Date.now() - Date.parse(next.firstRedAt) >= this.guardianRedGraceMs
+      if (next.reported || next.consecutive >= 2 || persisted) {
+        await this.reportMainRed(repo, plan, sha, red)
+        next.reported = true
+      } else {
+        console.error(`[release] guardian ${repo}@${sha.slice(0, 12)}: «${failedCheck}» червоний; задачу MAIN RED відкрию, якщо падіння повториться на наступному SHA або протримається ${Math.round(this.guardianRedGraceMs / 60_000)} хв`)
+      }
       return
     }
   }
