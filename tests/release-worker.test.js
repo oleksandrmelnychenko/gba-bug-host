@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -44,6 +44,29 @@ test('release gate перевідтворює agent-writable dependencies із t
   try {
     await materializeInstalledDependencies(repository, worktree, { forceRefresh: true })
     assert.equal(await readFile(targetRunner, 'utf8'), 'trusted\n')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('копія dependencies не переносить вкладений node_modules-симлінк на чужий React', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-release-deps-'))
+  const repository = path.join(root, 'main')
+  const worktree = path.join(root, 'worktree')
+  const stale = path.join(root, 'stale')
+  await mkdir(path.join(repository, 'node_modules', 'react'), { recursive: true })
+  await mkdir(worktree, { recursive: true })
+  await symlink(path.join(repository, 'node_modules'), path.join(repository, 'node_modules', 'node_modules'))
+  await mkdir(path.join(stale, 'node_modules', 'react'), { recursive: true })
+  await writeFile(path.join(stale, 'node_modules', '.gba-isolated-dependencies-v2'), 'isolated-v2\n', 'utf8')
+  await symlink(path.join(repository, 'node_modules'), path.join(stale, 'node_modules', 'node_modules'))
+
+  try {
+    assert.equal(await materializeInstalledDependencies(repository, worktree), true)
+    await assert.rejects(lstat(path.join(worktree, 'node_modules', 'node_modules')))
+    await lstat(path.join(worktree, 'node_modules', 'react'))
+    assert.equal(await materializeInstalledDependencies(repository, stale), false)
+    await assert.rejects(lstat(path.join(stale, 'node_modules', 'node_modules')))
   } finally {
     await rm(root, { recursive: true, force: true })
   }

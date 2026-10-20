@@ -14,6 +14,12 @@ async function pathExists(filePath) {
   }
 }
 
+async function dropNestedDependencyLink(target) {
+  const nested = path.join(target, 'node_modules')
+  const entry = await lstat(nested).catch(() => null)
+  if (entry?.isSymbolicLink()) await unlink(nested)
+}
+
 async function copyDirectory(args) {
   await execFileAsync('cp', args, { maxBuffer: 1024 * 1024 })
 }
@@ -26,7 +32,10 @@ export async function materializeInstalledDependencies(repositoryPath, worktreeP
 
   const existing = await lstat(target).catch(() => null)
   if (existing) {
-    if (!forceRefresh && !existing.isSymbolicLink() && await pathExists(isolationMarker)) return false
+    if (!forceRefresh && !existing.isSymbolicLink() && await pathExists(isolationMarker)) {
+      await dropNestedDependencyLink(target)
+      return false
+    }
     if (existing.isSymbolicLink()) await unlink(target)
     else await rm(target, { recursive: true, force: true })
   }
@@ -38,6 +47,7 @@ export async function materializeInstalledDependencies(repositoryPath, worktreeP
   // linked file and silently mutate every active worktree.
   try {
     await copyDirectory(['-a', '--reflink=always', '--', source, target])
+    await dropNestedDependencyLink(target)
     await writeFile(isolationMarker, 'isolated-v2\n', 'utf8')
     return true
   } catch (reflinkError) {
@@ -46,7 +56,8 @@ export async function materializeInstalledDependencies(repositoryPath, worktreeP
     await rm(target, { recursive: true, force: true })
     try {
       await copyDirectory(['-a', '--', source, target])
-      await writeFile(isolationMarker, 'isolated-v2\n', 'utf8')
+      await dropNestedDependencyLink(target)
+    await writeFile(isolationMarker, 'isolated-v2\n', 'utf8')
       return true
     } catch (copyError) {
       await rm(target, { recursive: true, force: true })
