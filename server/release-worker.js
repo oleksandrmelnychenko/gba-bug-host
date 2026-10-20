@@ -2160,7 +2160,10 @@ export class ReleaseWorker {
   async withGateSlot(check, { background = false } = {}, operation) {
     if (!this.gateLimiter) return operation()
     const kind = gateKind(check)
-    const slot = await this.gateLimiter.acquire(kind, { maxWaitMs: background ? 0 : this.gateMaxWaitMs })
+    const slot = await this.gateLimiter.acquire(kind, {
+      maxWaitMs: background ? 0 : this.gateMaxWaitMs,
+      onWait: (reason) => console.log(`[release] «${check.slice(0, 4).join(' ')}…» чекає слот гейта: ${reason}`),
+    })
     if (!slot.release && background) {
       return { code: null, deferred: true, output: slot.reason ?? 'хост зайнятий' }
     }

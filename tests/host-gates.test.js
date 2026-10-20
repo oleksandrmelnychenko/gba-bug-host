@@ -82,6 +82,7 @@ test('лімітер не пускає повний vitest при двох dotne
   const limiter = new HostGateLimiter({ lockDirectory: root, maxDotnet: 3, maxLoad: 20, pollMs: 1, scan: async () => counts, load: () => load, sleep: async () => {} })
   try {
     assert.equal((await limiter.admissible('vitest')).ok, false)
+    assert.equal((await limiter.admissible('vitest-related')).ok, true, 'короткий related не чекає на dotnet test')
     assert.equal((await limiter.admissible('dotnet-test')).ok, true)
     counts = { dotnetTest: 2, dotnetBuild: 1, vitest: 0 }
     assert.equal((await limiter.admissible('dotnet-build')).ok, false)

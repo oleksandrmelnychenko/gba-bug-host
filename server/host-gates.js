@@ -161,9 +161,9 @@ export class HostGateLimiter {
     if (kind === 'dotnet-test' || kind === 'dotnet-build') {
       if (dotnet >= this.maxDotnet) return { ok: false, state, reason: `уже працює ${dotnet} dotnet build/test (ліміт ${this.maxDotnet})` }
     }
-    if (kind === 'vitest' || kind === 'vitest-related' || kind === 'js-build') {
+    if (kind === 'vitest') {
       if (state.dotnetTest > this.maxDotnetTestsForVitest) return { ok: false, state, reason: `працює ${state.dotnetTest} dotnet test — повний vitest не стартує` }
-      if (kind === 'vitest' && state.vitest > 0) return { ok: false, state, reason: 'уже працює інший vitest' }
+      if (state.vitest > 0) return { ok: false, state, reason: 'уже працює інший vitest' }
     }
     if (kind !== 'other' && state.load > this.maxLoad) return { ok: false, state, reason: `load average ${state.load.toFixed(1)} > ${this.maxLoad}` }
     return { ok: true, state }
@@ -186,11 +186,12 @@ export class HostGateLimiter {
     ]
   }
 
-  async acquireExclusive({ maxWaitMs, now }) {
+  async acquireExclusive({ maxWaitMs, now, onWait }) {
     const started = now()
     const held = new Map()
     let marker = null
     let last = null
+    let announced = false
     const releaseHeld = async () => {
       for (const release of held.values()) await release()
       held.clear()
@@ -222,6 +223,10 @@ export class HostGateLimiter {
           await marker?.()
           return { release: null, waitedMs: now() - started, state: last?.state ?? null, forced: false, busy: true, reason: last?.reason }
         }
+        if (!announced) {
+          announced = true
+          onWait?.(last?.reason ?? 'хост зайнятий')
+        }
         await this.sleep(this.pollMs)
       }
     } catch (error) {
@@ -231,11 +236,12 @@ export class HostGateLimiter {
     }
   }
 
-  async acquire(kind, { maxWaitMs = 30 * 60 * 1000, now = () => Date.now() } = {}) {
+  async acquire(kind, { maxWaitMs = 30 * 60 * 1000, now = () => Date.now(), onWait } = {}) {
     if (kind === 'other') return { release: async () => {}, waitedMs: 0, state: null, forced: false }
-    if (kind === 'vitest') return this.acquireExclusive({ maxWaitMs, now })
+    if (kind === 'vitest') return this.acquireExclusive({ maxWaitMs, now, onWait })
     const started = now()
     let last = null
+    let announced = false
     while (true) {
       last = kind.startsWith('dotnet') && await this.foreignExclusivePending()
         ? { ok: false, state: null, reason: 'повний vitest чекає на хост (js-pending) — новий dotnet не стартує' }
@@ -247,6 +253,10 @@ export class HostGateLimiter {
       }
       if (now() - started >= maxWaitMs) {
         return { release: null, waitedMs: now() - started, state: last.state, forced: false, busy: true, reason: last.reason }
+      }
+      if (!announced) {
+        announced = true
+        onWait?.(last.reason)
       }
       await this.sleep(this.pollMs)
     }
