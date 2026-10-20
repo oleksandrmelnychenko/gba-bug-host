@@ -1,14 +1,23 @@
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { access, rm } from 'node:fs/promises'
+import { access, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
+import {
+  compactVerificationResult,
+  formatVerificationReport,
+  runVerificationSpec,
+  validateVerificationSpec,
+} from './verification-spec.js'
 import { materializeInstalledDependencies } from './worktree-dependencies.js'
 
 const RELEASE_MARKER = /\[released:([^\]]+)\]/g
 const BLOCKED_MARKER = /\[release-blocked:([^\]]+)\]/g
 const SENTINEL_MARKER = /\[sentinel:[0-9a-f]{12}\]/
 const MAX_RELEASE_ATTEMPTS = 3
+export const MAX_VERIFICATION_ATTEMPTS = 3
+const PIPELINE_OWNED_TASK_STATUSES = new Set(['new', 'in_progress', 'blocked'])
+const GATE_FAILURE_PATTERN = /^([A-Za-z0-9._-]+): перевірка «(.+)» впала/
 const DEFAULT_PROCESS_TIMEOUT_MS = 45 * 60 * 1000
 const COMPOSE_ARGS = ['compose', '-p', 'gba-dev', '-f', 'docker-compose.yml', '-f', 'docker-compose.dev.yml', '--env-file', '.env.dev']
 const REPOSITORY_BUILD_CONTEXT_ENV = {
@@ -212,12 +221,12 @@ export function releaseStatusFor(task) {
 }
 
 export function selectReleasableTasks(tasks) {
-  const priority = { processing: 0, retrying: 1, pending: 2, '': 3 }
+  const priority = { processing: 0, retrying: 1, pending: 2, '': 3, waiting_mainline: 5 }
   return tasks.filter((task) =>
     task.aiMode !== 'off' &&
     (task.agentRun?.status === 'completed' || isSandboxLimitedReview(task)) &&
     (task.agentRun?.releaseStatus
-      ? ['pending', 'processing', 'retrying'].includes(task.agentRun.releaseStatus)
+      ? ['pending', 'processing', 'retrying', 'waiting_mainline'].includes(task.agentRun.releaseStatus)
       : hasWorkNewerThanGate(task)) &&
     task.status !== 'done')
     .sort((left, right) => {
@@ -279,6 +288,73 @@ export function checkCommand(check) {
   return Array.isArray(check) ? check : check.command
 }
 
+export function mainlineGateKey(repo, sha, check) {
+  return `${repo}@${sha}#${(Array.isArray(check) ? check : [check]).join(' ')}`
+}
+
+export class MainlineGateCache {
+  constructor({ file = '', maximumEntries = 400 } = {}) {
+    this.file = file
+    this.maximumEntries = maximumEntries
+    this.entries = null
+  }
+
+  async load() {
+    if (this.entries) return this.entries
+    this.entries = {}
+    if (!this.file) return this.entries
+    try {
+      const parsed = JSON.parse(await readFile(this.file, 'utf8'))
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) this.entries = parsed
+    } catch {
+      this.entries = {}
+    }
+    return this.entries
+  }
+
+  async get(key) {
+    return (await this.load())[key] ?? null
+  }
+
+  async set(key, value) {
+    const entries = await this.load()
+    entries[key] = value
+    const keys = Object.keys(entries)
+    if (keys.length > this.maximumEntries) {
+      keys
+        .sort((left, right) => Date.parse(entries[left]?.at ?? 0) - Date.parse(entries[right]?.at ?? 0))
+        .slice(0, keys.length - this.maximumEntries)
+        .forEach((stale) => delete entries[stale])
+    }
+    if (!this.file) return value
+    await mkdir(path.dirname(this.file), { recursive: true })
+    const temporary = `${this.file}.${process.pid}.tmp`
+    await writeFile(temporary, JSON.stringify(entries, null, 2), 'utf8')
+    await rename(temporary, this.file)
+    return value
+  }
+}
+
+export function mainlineRecoveryCandidate(task, repoPlan) {
+  const run = task?.agentRun
+  if (!run || task.status === 'done' || task.aiMode === 'off') return null
+  if (!PIPELINE_OWNED_TASK_STATUSES.has(task.status)) return null
+  if (run.releaseStatus !== 'blocked') return null
+  if (!(run.status === 'completed' || isSandboxLimitedReview(task))) return null
+  const match = GATE_FAILURE_PATTERN.exec(run.releaseError ?? '')
+  if (!match) return null
+  const evidence = run.releaseEvidence ?? {}
+  if (evidence.failure?.mainlineGate?.status === 'green' || evidence.mainlineRecovery) return null
+  const plan = repoPlan[match[1]]
+  if (!plan) return null
+  const check = plan.checks.map(checkCommand).find((command) => command.join(' ') === match[2])
+  return check ? { repo: match[1], check } : null
+}
+
+export function pipelineTaskStatusAfterBlock(task) {
+  return PIPELINE_OWNED_TASK_STATUSES.has(task?.status) || isSentinelTask(task ?? {}) ? 'blocked' : task.status
+}
+
 export function selectRepositoryChecks(plan, changedFiles = []) {
   const unconditional = plan.checks.filter(Array.isArray)
   const conditional = plan.checks.filter((check) => !Array.isArray(check))
@@ -313,6 +389,17 @@ function mergeEvidence(current, patch) {
       : value
   }
   return merged
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds))
+}
+
+export function commitSummary(evidence) {
+  return Object.entries(evidence?.repositories ?? {})
+    .filter(([, value]) => value?.commit)
+    .map(([repo, value]) => `${repo}@${String(value.commit).slice(0, 12)} → ${value.branch ?? 'main'}`)
+    .join(', ')
 }
 
 function readAgentDetails(task) {
@@ -488,8 +575,8 @@ export class ReleaseWorker {
     worktreesDirectory = process.env.CODEX_WORKTREES_DIR ?? '/root/projects/gba-bug-worktrees',
     infraDirectory = process.env.RELEASE_INFRA_DIR ?? '/root/projects/gba-infra',
     repoPlan = defaultRepoPlan,
-    pollIntervalMs = Number.parseInt(process.env.RELEASE_POLL_INTERVAL_MS ?? '30000', 10),
-    settleMs = Number.parseInt(process.env.RELEASE_SETTLE_MS ?? '180000', 10),
+    pollIntervalMs = Number.parseInt(process.env.RELEASE_POLL_INTERVAL_MS ?? '15000', 10),
+    settleMs = Number.parseInt(process.env.RELEASE_SETTLE_MS ?? '15000', 10),
     heartbeatIntervalMs = Number.parseInt(process.env.RELEASE_HEARTBEAT_INTERVAL_MS ?? '30000', 10),
     leaseName = process.env.RELEASE_WORKER_LEASE_NAME ?? 'release-worker',
     leaseTtlMs = Number.parseInt(process.env.RELEASE_WORKER_LEASE_TTL_MS ?? '120000', 10),
@@ -499,6 +586,16 @@ export class ReleaseWorker {
     probes = serviceProbes,
     mainlineSource = process.env.RELEASE_MAINLINE_SOURCE ?? 'local',
     buildWorktreesDirectory = process.env.RELEASE_BUILD_WORKTREES_DIR ?? '/root/projects/gba-release-worktrees/build',
+    probeWorktreesDirectory = process.env.RELEASE_PROBE_WORKTREES_DIR ?? '/root/projects/gba-release-worktrees/mainline',
+    mainlineGateCache = new MainlineGateCache({
+      file: process.env.RELEASE_MAINLINE_GATE_CACHE ?? '/root/projects/gba-release-worktrees/mainline-gates.json',
+    }),
+    mainlineRedTtlMs = Number.parseInt(process.env.RELEASE_MAINLINE_RED_TTL_MS ?? String(6 * 60 * 60 * 1000), 10),
+    recoveryIntervalMs = Number.parseInt(process.env.RELEASE_RECOVERY_INTERVAL_MS ?? String(10 * 60 * 1000), 10),
+    devApiProxyUrl = process.env.RELEASE_DEV_API_PROXY_URL ?? 'http://127.0.0.1:4010',
+    verificationRunner = runVerificationSpec,
+    verificationAttempts = Number.parseInt(process.env.RELEASE_VERIFICATION_ATTEMPTS ?? '3', 10),
+    verificationRetryDelayMs = Number.parseInt(process.env.RELEASE_VERIFICATION_RETRY_DELAY_MS ?? '20000', 10),
   } = {}) {
     this.deskBaseUrl = deskBaseUrl.replace(/\/$/, '')
     this.worktreesDirectory = worktreesDirectory
@@ -515,6 +612,15 @@ export class ReleaseWorker {
     this.probes = probes
     this.originMainline = mainlineSource === 'origin'
     this.buildWorktreesDirectory = buildWorktreesDirectory
+    this.probeWorktreesDirectory = probeWorktreesDirectory
+    this.mainlineGateCache = mainlineGateCache
+    this.mainlineRedTtlMs = mainlineRedTtlMs
+    this.recoveryIntervalMs = recoveryIntervalMs
+    this.lastRecoveryAt = 0
+    this.devApiProxyUrl = devApiProxyUrl
+    this.verificationRunner = verificationRunner
+    this.verificationAttempts = Number.isInteger(verificationAttempts) && verificationAttempts > 0 ? verificationAttempts : 3
+    this.verificationRetryDelayMs = Number.isInteger(verificationRetryDelayMs) && verificationRetryDelayMs >= 0 ? verificationRetryDelayMs : 20_000
     this.lastOriginFetchAt = 0
     this.busy = false
     this.leaseStarted = false
@@ -549,8 +655,11 @@ export class ReleaseWorker {
   }
 
   async ensureBuildWorktree(repo, commit) {
+    return this.ensureDetachedWorktree(repo, this.buildRoot(repo), commit)
+  }
+
+  async ensureDetachedWorktree(repo, root, commit) {
     const plan = this.repoPlan[repo]
-    const root = this.buildRoot(repo)
     if (!(await pathExists(path.join(root, '.git')))) {
       await this.runMutation('git', ['-C', plan.root, 'worktree', 'prune'], {})
       const added = await this.runMutation('git', ['-C', plan.root, 'worktree', 'add', '--detach', '--force', root, commit], {})
@@ -705,33 +814,42 @@ export class ReleaseWorker {
       if (!response.ok) throw new Error(`desk → ${response.status}`)
       const tasks = await response.json()
       await this.recoverReleasedWorktreeCleanup(tasks)
+      await this.recoverVerificationFollowUps(tasks)
       const fetched = await this.fetchMainlines()
       if (!fetched.ok) console.error(`[release] ${fetched.reason}`)
       const candidates = selectReleasableTasks(tasks)
-      if (candidates.length === 0) {
-        this.firstSeenAt.clear()
-        return
-      }
+      const active = candidates.filter((task) => task.agentRun?.releaseStatus !== 'waiting_mainline')
+      const waiting = candidates.filter((task) => task.agentRun?.releaseStatus === 'waiting_mainline')
 
       const now = Date.now()
-      const candidateIds = new Set(candidates.map((task) => task.id))
+      const candidateIds = new Set(active.map((task) => task.id))
       for (const taskId of this.firstSeenAt.keys()) {
         if (!candidateIds.has(taskId)) this.firstSeenAt.delete(taskId)
       }
-      for (const task of candidates) {
+      for (const task of active) {
         if (!this.firstSeenAt.has(task.id)) this.firstSeenAt.set(task.id, now)
       }
-      const ready = candidates.filter((task) => {
+      const ready = active.filter((task) => {
         const requiredSettleMs = isVerifiedAudit(task) ? 0 : this.settleMs
         return now - this.firstSeenAt.get(task.id) >= requiredSettleMs
       })
-      if (ready.length === 0) return
+      if (ready.length > 0) {
+        // Release queue is deliberately single-task. A multi-repository task may
+        // need a recovery pass after one remote accepted a push; shipping another
+        // task meanwhile could deploy that partial state.
+        await this.releaseBatch([ready[0]])
+        this.firstSeenAt.delete(ready[0].id)
+        return
+      }
+      if (active.length > 0) return
 
-      // Release queue is deliberately single-task. A multi-repository task may
-      // need a recovery pass after one remote accepted a push; shipping another
-      // task meanwhile could deploy that partial state.
-      await this.releaseBatch([ready[0]])
-      this.firstSeenAt.delete(ready[0].id)
+      for (const task of waiting) {
+        if (await this.mainlineHoldReady(task)) {
+          await this.releaseBatch([task])
+          return
+        }
+      }
+      await this.recoverMainlineBlockedTasks(tasks)
     } catch (error) {
       console.error(`[release] tick: ${error.message}`)
     } finally {
@@ -894,15 +1012,19 @@ export class ReleaseWorker {
       })
       return
     }
-    const scenario = await this.verifyPostDeployChecks(handoffValidation.checks)
-    evidence = mergeEvidence(evidence, { scenarioChecks: scenario.evidence })
+    const scenario = await this.verifyScenario(task, handoffValidation.checks)
+    evidence = mergeEvidence(evidence, scenario.evidence)
     if (!scenario.ok) {
-      await this.handleReleaseFailure(task, {
-        kind: scenario.kind ?? 'transient',
-        reason: scenario.reason,
-        phase: 'verifying',
-        evidence,
-      })
+      if (scenario.kind === 'transient') {
+        await this.handleReleaseFailure(task, {
+          kind: 'transient',
+          reason: scenario.reason,
+          phase: 'verifying',
+          evidence,
+        })
+        return
+      }
+      await this.handleScenarioFailure(task, scenario, evidence, { deployed: true })
       return
     }
     // Crash-safe checkpoint: якщо процес упаде під час cleanup/final status,
@@ -935,6 +1057,7 @@ export class ReleaseWorker {
       releasedAt: stamp,
       taskStatus,
     })
+    await this.comment(task, await this.releasedComment(task, evidence, { closing, auditOnly: false }))
     console.log(`[release] ${task.id}: випущено з міграційним і live доказом${closing ? ' та закрито' : ''}`)
   }
 
@@ -978,7 +1101,7 @@ export class ReleaseWorker {
     })
     await this.assertLease()
 
-    const scenario = await this.verifyPostDeployChecks(handoffValidation.checks)
+    const scenario = await this.verifyScenario(task, handoffValidation.checks)
     evidence = mergeEvidence(evidence, {
       deployment: {
         services: {},
@@ -986,15 +1109,19 @@ export class ReleaseWorker {
         verifiedAt: new Date().toISOString(),
         composeOutput: 'Audit-only: current DEV behavior verified; no code changes or rebuild were required.',
       },
-      scenarioChecks: scenario.evidence,
+      ...scenario.evidence,
     })
     if (!scenario.ok) {
-      await this.handleReleaseFailure(task, {
-        kind: scenario.kind ?? 'transient',
-        reason: scenario.reason,
-        phase: 'verifying',
-        evidence,
-      })
+      if (scenario.kind === 'transient') {
+        await this.handleReleaseFailure(task, {
+          kind: 'transient',
+          reason: scenario.reason,
+          phase: 'verifying',
+          evidence,
+        })
+        return
+      }
+      await this.handleScenarioFailure(task, scenario, evidence, { deployed: false })
       return
     }
 
@@ -1020,10 +1147,39 @@ export class ReleaseWorker {
       releasedAt: stamp,
       taskStatus,
     })
+    await this.comment(task, await this.releasedComment(task, evidence, { closing: taskStatus === 'done', auditOnly: true }))
     console.log(`[release] ${task.id}: audit-only перевірку завершено, DEV-сценарій підтверджено`)
   }
 
-  async handleReleaseFailure(task, outcome) {
+  async handleReleaseFailure(task, incoming) {
+    let outcome = incoming
+    if (outcome.kind === 'validation' && outcome.failedGate) {
+      const { repo, baselineCommit, check } = outcome.failedGate
+      const probe = await this.probeMainlineGate(repo, baselineCommit, check)
+      if (probe.status === 'red') {
+        await this.holdForMainline(task, outcome, probe)
+        return
+      }
+      const branch = this.repoPlan[repo]?.branch ?? 'main'
+      outcome = {
+        ...outcome,
+        reason: probe.status === 'green'
+          ? `${outcome.reason}; на чистому origin/${branch}@${String(baselineCommit).slice(0, 12)} цей гейт зелений — падіння внесла задача`
+          : outcome.reason,
+        evidence: mergeEvidence(outcome.evidence ?? task.agentRun?.releaseEvidence, {
+          failure: {
+            mainlineGate: {
+              status: probe.status,
+              repo,
+              sha: baselineCommit,
+              check: check.join(' '),
+              at: probe.at ?? new Date().toISOString(),
+              ...(probe.reason ? { reason: probe.reason } : {}),
+            },
+          },
+        }),
+      }
+    }
     const attempts = (task.agentRun?.releaseAttempts ?? 0) + 1
     const deterministic = ['conflict', 'validation', 'repository'].includes(outcome.kind)
     const evidence = mergeEvidence(outcome.evidence ?? task.agentRun?.releaseEvidence, {
@@ -1035,15 +1191,22 @@ export class ReleaseWorker {
     })
     if (deterministic && attempts >= MAX_RELEASE_ATTEMPTS) {
       const stamp = new Date().toISOString()
+      const taskStatus = isVerifiedAudit(task) ? 'blocked' : pipelineTaskStatusAfterBlock(task)
       await this.updateRelease(task, {
         status: 'blocked',
         phase: 'failed',
         attempts,
         error: outcome.reason,
         evidence,
-        taskStatus: isSentinelTask(task) || isVerifiedAudit(task) ? 'blocked' : task.status,
+        taskStatus,
       })
       await this.annotate(task, `[release-blocked:${stamp}] ${attempts} невдалих спроб на фазі ${outcome.phase ?? 'release'}: ${outcome.reason}.`.slice(0, 700))
+      await this.comment(task, [
+        `[конвеєр:blocked] Реліз зупинено після ${attempts} невдалих спроб на фазі ${outcome.phase ?? 'release'}${taskStatus === 'blocked' ? '; статус — «Заблоковано»' : ''}.`,
+        `Причина: ${outcome.reason}`,
+        commitSummary(evidence) ? `Коміти: ${commitSummary(evidence)}` : '',
+        'Що далі: виправте причину й запустіть «Передивись ще раз» — новий запуск Codex отримає цей коментар.',
+      ].filter(Boolean).join('\n'))
       console.error(`[release] ${task.id}: заблоковано після ${attempts} спроб — ${outcome.reason.slice(0, 160)}`)
       return
     }
@@ -1489,6 +1652,7 @@ export class ReleaseWorker {
               phase: 'validating',
               reason: `${repo}: перевірка «${check.join(' ')}» впала${result.retried ? ' після одного flake-retry' : ''}; mainline не змінено`,
               evidence,
+              failedGate: { repo, check, baselineCommit },
             }
           }
         }
@@ -1680,6 +1844,343 @@ export class ReleaseWorker {
         console.log(`[release] ${task.id}: завершено відкладений cleanup worktree`)
       }
     }
+  }
+
+  async verifyScenario(task, checks) {
+    const smoke = await this.verifyPostDeployChecks(checks)
+    const evidence = { scenarioChecks: smoke.evidence }
+    if (!smoke.ok) {
+      const report = (smoke.evidence ?? [])
+        .map((check) => `${check.passed ? '✓' : '✗'} ${check.label} — GET ${check.resolvedUrl ?? check.url} → ${check.actualStatus ?? 'немає відповіді'} (очікувано ${check.expectedStatus})`)
+        .join('\n')
+      return {
+        ok: false,
+        kind: smoke.kind === 'validation' ? 'scenario' : 'transient',
+        reason: smoke.reason,
+        evidence,
+        report,
+      }
+    }
+    const live = await this.runLiveVerification(task)
+    evidence.liveVerification = live.evidence
+    return live.ok
+      ? { ok: true, evidence, report: live.report }
+      : { ok: false, kind: live.kind, reason: live.reason, evidence, report: live.report }
+  }
+
+  async runLiveVerification(task) {
+    const at = new Date().toISOString()
+    const details = readAgentDetails(task)
+    const spec = details.verification?.spec
+    if (!spec) {
+      if ((details.contractVersion ?? 1) >= 2) {
+        const reason = 'немає валідного live spec .qa-desk/verify для цієї спроби'
+        return { ok: false, kind: 'scenario', reason, report: reason, evidence: { passed: false, missingSpec: true, at, report: reason } }
+      }
+      const report = 'live spec відсутній: спроба виконана до контракту live-перевірки (legacy)'
+      return { ok: true, skipped: true, report, evidence: { passed: null, skipped: true, at, report } }
+    }
+    const validation = validateVerificationSpec(spec, { taskId: task.id })
+    if (!validation.ok) {
+      const reason = `live spec невалідний: ${validation.errors.slice(0, 5).join('; ')}`
+      return { ok: false, kind: 'scenario', reason, report: reason, evidence: { passed: false, invalidSpec: true, at, report: reason } }
+    }
+    let result
+    for (let attempt = 1; attempt <= this.verificationAttempts; attempt += 1) {
+      try {
+        result = await this.verificationRunner(validation.spec, { proxyBaseUrl: this.devApiProxyUrl })
+      } catch (error) {
+        result = { passed: false, infrastructure: true, checks: [], error: String(error?.message ?? error).slice(0, 500) }
+      }
+      if (result.passed) break
+      if (attempt < this.verificationAttempts && this.verificationRetryDelayMs > 0) await delay(this.verificationRetryDelayMs)
+    }
+    const report = result.error && !result.checks?.length
+      ? `live-перевірка не виконалась: ${result.error}`
+      : formatVerificationReport(result, { maximumLength: 2500 })
+    const evidence = {
+      passed: result.passed,
+      infrastructure: Boolean(result.infrastructure),
+      at,
+      proxy: this.devApiProxyUrl,
+      scenario: validation.spec.scenario,
+      report,
+      result: compactVerificationResult(result, 20_000),
+    }
+    if (result.passed) return { ok: true, report, evidence }
+    return {
+      ok: false,
+      kind: result.infrastructure ? 'transient' : 'scenario',
+      reason: result.infrastructure ? 'live spec не вдалося виконати: DEV API proxy або DEV недоступний' : 'live spec не пройшов на DEV',
+      report,
+      evidence,
+    }
+  }
+
+  async fetchAgentRuns(taskId) {
+    const response = await fetch(`${this.deskBaseUrl}/api/tasks/${encodeURIComponent(taskId)}/agent-runs`, { headers: this.requestHeaders() })
+      .catch(() => null)
+    if (!response?.ok) return []
+    const runs = await response.json().catch(() => [])
+    return Array.isArray(runs) ? runs : []
+  }
+
+  async enqueueFollowUp(task, triggerReason, reviewComment) {
+    const response = await fetch(`${this.deskBaseUrl}/api/tasks/${encodeURIComponent(task.id)}/agent-runs`, {
+      method: 'POST',
+      headers: this.requestHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ triggerReason, reviewComment: reviewComment.slice(0, 7_900) }),
+    }).catch(() => null)
+    return response?.ok === true
+  }
+
+  async handleScenarioFailure(task, scenario, incomingEvidence, { deployed }) {
+    const runs = await this.fetchAgentRuns(task.id)
+    let chain = 0
+    for (const run of runs) {
+      if (run.triggerReason !== 'verification_failed') break
+      chain += 1
+    }
+    const failures = chain + 1
+    const exhausted = failures >= MAX_VERIFICATION_ATTEMPTS
+    const stamp = new Date().toISOString()
+    const commits = commitSummary(incomingEvidence)
+    const followUpComment = [
+      deployed
+        ? `Після deploy (${commits || 'коміти не зафіксовано'}) live-перевірка сценарію не пройшла на DEV: ${scenario.reason}.`
+        : `Audit-only результат не підтвердився на DEV: ${scenario.reason}.`,
+      scenario.report ?? '',
+      deployed
+        ? 'Код попередньої спроби вже в main і на DEV. Знайди, чому сценарій досі не виконується (або чому spec хибний), виправ код і онови spec.'
+        : 'Сценарій на DEV не відповідає вердикту verified: відтвори його наживо через проксі й виправ.',
+    ].filter(Boolean).join('\n').slice(0, 7_000)
+    const evidence = mergeEvidence(incomingEvidence, {
+      liveVerification: { followUp: exhausted ? 'exhausted' : 'requested', failures, followUpComment },
+      failure: { phase: 'verifying', reason: scenario.reason, at: stamp },
+    })
+    const cleanupErrors = await this.cleanupReleasedWorktrees(task)
+    await this.updateRelease(task, {
+      status: 'blocked',
+      phase: 'failed',
+      error: `live-перевірка не пройшла: ${scenario.reason}`.slice(0, 2_900),
+      evidence,
+      taskStatus: exhausted ? 'blocked' : 'in_progress',
+    })
+    await this.annotate(task, [
+      `[live-verify-failed:${stamp}] ${scenario.reason}; ${exhausted ? `ліміт ${MAX_VERIFICATION_ATTEMPTS} повторів вичерпано` : `повернуто Codex (${failures}/${MAX_VERIFICATION_ATTEMPTS})`}`,
+      cleanupErrors.length > 0 ? `[release-cleanup-warning] ${cleanupErrors.join('; ')}` : '',
+    ].filter(Boolean).join('\n').slice(0, 1200))
+    await this.comment(task, [
+      `[конвеєр:verification-failed] ${deployed ? 'Після deploy' : 'Під час audit-only перевірки'} сценарій не підтвердився наживо на DEV.`,
+      commits ? `Коміти: ${commits}` : '',
+      `Результат: ${scenario.report || scenario.reason}`,
+      exhausted
+        ? `Ліміт ${MAX_VERIFICATION_ATTEMPTS} автоматичних повторів вичерпано — задача «Заблоковано», потрібне рішення людини.`
+        : `Задачу автоматично повернуто Codex (повтор ${failures} з ${MAX_VERIFICATION_ATTEMPTS}).`,
+    ].filter(Boolean).join('\n'))
+    if (!exhausted && !await this.enqueueFollowUp(task, 'verification_failed', followUpComment)) {
+      console.error(`[release] ${task.id}: не вдалося поставити повторний запуск після live-перевірки; відновлю на наступному тіку`)
+    }
+    console.error(`[release] ${task.id}: live-перевірка не пройшла — ${scenario.reason}`)
+  }
+
+  async recoverVerificationFollowUps(tasks) {
+    for (const task of tasks) {
+      const run = task.agentRun
+      if (!run || task.status !== 'in_progress' || task.aiMode === 'off') continue
+      if (run.releaseStatus !== 'blocked' || run.releaseEvidence?.liveVerification?.followUp !== 'requested') continue
+      const comment = run.releaseEvidence.liveVerification.followUpComment
+        || 'Live-перевірка після deploy не пройшла; деталі — у коментарях конвеєра.'
+      if (await this.enqueueFollowUp(task, 'verification_failed', comment)) {
+        console.log(`[release] ${task.id}: відновлено повторний запуск після live-перевірки`)
+      }
+    }
+  }
+
+  async probeMainlineGate(repo, sha, check) {
+    const plan = this.repoPlan[repo]
+    if (!plan || !sha || !Array.isArray(check)) return { status: 'error', reason: 'невідомий repo/SHA/гейт для перевірки mainline' }
+    const key = mainlineGateKey(repo, sha, check)
+    const cached = await this.mainlineGateCache.get(key)
+    if (cached && (cached.status === 'green' || (cached.status === 'red' && Date.now() - Date.parse(cached.at) < this.mainlineRedTtlMs))) {
+      return { ...cached, check, cached: true }
+    }
+    const root = path.join(this.probeWorktreesDirectory, repo)
+    const prepared = await this.ensureDetachedWorktree(repo, root, sha)
+    if (!prepared.ok) return { status: 'error', reason: prepared.reason, at: new Date().toISOString() }
+    try {
+      await materializeInstalledDependencies(plan.root, root, { forceRefresh: true })
+    } catch (error) {
+      return { status: 'error', reason: `${repo}: ${error.message}`, at: new Date().toISOString() }
+    }
+    console.log(`[release] ${repo}: перевіряю «${check.join(' ')}» на чистому mainline ${sha.slice(0, 12)}`)
+    const result = await this.runReleaseCheck(repo, check, root)
+    const entry = {
+      status: result.code === 0 ? 'green' : 'red',
+      at: new Date().toISOString(),
+      repo,
+      sha,
+      check: check.join(' '),
+      retried: Boolean(result.retried),
+      output: String(result.output ?? '').slice(-1500),
+    }
+    await this.mainlineGateCache.set(key, entry)
+    return { ...entry, check }
+  }
+
+  async holdForMainline(task, outcome, probe) {
+    const { repo, baselineCommit: sha, check } = outcome.failedGate
+    const branch = this.repoPlan[repo]?.branch ?? 'main'
+    const previous = task.agentRun?.releaseEvidence?.mainlineHold
+    const now = new Date().toISOString()
+    const hold = {
+      repo,
+      branch,
+      sha,
+      check,
+      since: previous?.since ?? now,
+      probedAt: probe.at ?? now,
+      output: String(probe.output ?? '').slice(-1500),
+    }
+    const reason = `${repo}: «${check.join(' ')}» червоний і на чистому origin/${branch}@${sha.slice(0, 12)} — падає mainline, а не задача`
+    await this.updateRelease(task, {
+      status: 'waiting_mainline',
+      phase: 'validating',
+      error: reason,
+      evidence: mergeEvidence(outcome.evidence ?? task.agentRun?.releaseEvidence, { mainlineHold: hold }),
+    })
+    if ((task.notes ?? '').includes(`[release-waiting-mainline:${sha}]`)) return
+    await this.annotate(task, `[release-waiting-mainline:${sha}] ${reason}; спробу не зараховано, реліз піде автоматично після зеленого mainline`.slice(0, 700))
+    await this.comment(task, [
+      '[конвеєр:waiting-mainline] Реліз чекає зеленого mainline — задача тут ні до чого, спробу не зараховано.',
+      `Гейт: «${check.join(' ')}» (${repo}) червоний і на чистому origin/${branch}@${sha.slice(0, 12)}.`,
+      'Як тільки origin/main зміниться і цей гейт на ньому пройде, конвеєр сам повторить реліз і поставить «Готовий до ретесту».',
+    ].join('\n'))
+    console.error(`[release] ${task.id}: чекає зеленого mainline ${repo}@${sha.slice(0, 12)}`)
+  }
+
+  async mainlineHoldReady(task) {
+    const hold = task.agentRun?.releaseEvidence?.mainlineHold
+    if (!hold?.repo || !this.repoPlan[hold.repo] || !Array.isArray(hold.check)) return true
+    const plan = this.repoPlan[hold.repo]
+    const current = await this.resolveMainlineCommit(plan)
+    if (!current) return false
+    const probe = await this.probeMainlineGate(hold.repo, current, hold.check)
+    if (probe.status === 'green') {
+      console.log(`[release] ${task.id}: mainline ${hold.repo}@${current.slice(0, 12)} зелений — повторюю реліз`)
+      return true
+    }
+    if (probe.status === 'red' && current !== hold.sha) {
+      await this.updateRelease(task, {
+        status: 'waiting_mainline',
+        phase: 'validating',
+        evidence: mergeEvidence(task.agentRun?.releaseEvidence, {
+          mainlineHold: { sha: current, probedAt: probe.at, output: String(probe.output ?? '').slice(-1500) },
+        }),
+      })
+      await this.annotate(task, `[release-waiting-mainline:${current}] ${hold.repo}: «${hold.check.join(' ')}» досі червоний на новому origin/${plan.branch}@${current.slice(0, 12)}`)
+    }
+    return false
+  }
+
+  async reopenRelease(task, values) {
+    const response = await fetch(`${this.deskBaseUrl}/api/agent-runs/${task.agentRun.id}/release`, {
+      method: 'PATCH',
+      headers: this.requestHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ ...values, reopen: true, leaseOwnerId: this.workerId }),
+    }).catch(() => null)
+    if (!response?.ok) return false
+    task.agentRun = await response.json()
+    return true
+  }
+
+  async recoverMainlineBlockedTasks(tasks) {
+    if (Date.now() - this.lastRecoveryAt < this.recoveryIntervalMs) return
+    this.lastRecoveryAt = Date.now()
+    for (const task of tasks) {
+      const candidate = mainlineRecoveryCandidate(task, this.repoPlan)
+      if (!candidate) continue
+      const plan = this.repoPlan[candidate.repo]
+      const sha = await this.resolveMainlineCommit(plan)
+      if (!sha) continue
+      const probe = await this.probeMainlineGate(candidate.repo, sha, candidate.check)
+      if (!['green', 'red'].includes(probe.status)) continue
+      const stamp = new Date().toISOString()
+      const green = probe.status === 'green'
+      const evidence = mergeEvidence(task.agentRun.releaseEvidence, {
+        mainlineRecovery: { at: stamp, sha, check: candidate.check.join(' '), mainline: probe.status },
+        ...(green ? {} : {
+          mainlineHold: {
+            repo: candidate.repo,
+            branch: plan.branch,
+            sha,
+            check: candidate.check,
+            since: stamp,
+            probedAt: probe.at,
+            output: String(probe.output ?? '').slice(-1500),
+          },
+        }),
+      })
+      const reopened = await this.reopenRelease(task, {
+        status: green ? 'retrying' : 'waiting_mainline',
+        phase: green ? 'queued' : 'validating',
+        error: green ? '' : `${candidate.repo}: «${candidate.check.join(' ')}» червоний на чистому origin/${plan.branch}@${sha.slice(0, 12)}`,
+        evidence,
+      })
+      if (!reopened) continue
+      await this.annotate(task, `[release-recovered:${stamp}] реліз, заблокований на гейті «${candidate.check.join(' ')}», відновлено без зарахування спроб; mainline ${candidate.repo}@${sha.slice(0, 12)} ${green ? 'зелений' : 'досі червоний — чекаємо'}`)
+      await this.comment(task, [
+        '[конвеєр:recovered] Реліз, заблокований тестами mainline, відновлено автоматично; попередні спроби не зараховано.',
+        green
+          ? `На чистому origin/${plan.branch}@${sha.slice(0, 12)} гейт «${candidate.check.join(' ')}» зелений — задачу знову взято в реліз.`
+          : `Гейт «${candidate.check.join(' ')}» досі червоний на origin/${plan.branch}@${sha.slice(0, 12)}; реліз стартує автоматично, щойно main позеленіє.`,
+      ].join('\n'))
+      console.log(`[release] ${task.id}: відновлено з release-blocked (${green ? 'mainline зелений' : 'чекає mainline'})`)
+    }
+  }
+
+  async readConsoleBuild() {
+    const probe = this.probes['gba-console']
+    if (probe) {
+      const build = await fetch(probe, { signal: AbortSignal.timeout(10_000) })
+        .then((response) => response.ok ? response.json() : null)
+        .then((payload) => typeof payload?.build === 'string' ? payload.build : '')
+        .catch(() => '')
+      if (build) return build
+    }
+    return fetch(`${this.deskBaseUrl}/api/builds/current`, { signal: AbortSignal.timeout(10_000) })
+      .then((response) => response.ok ? response.json() : null)
+      .then((payload) => typeof payload?.number === 'string' ? payload.number : '')
+      .catch(() => '')
+  }
+
+  async releasedComment(task, evidence, { closing = false, auditOnly = false } = {}) {
+    const build = await this.readConsoleBuild()
+    const commits = commitSummary(evidence)
+    const live = evidence?.liveVerification
+    const smoke = (evidence?.scenarioChecks ?? [])
+      .map((check) => `${check.passed ? '✓' : '✗'} ${check.label} — GET ${check.resolvedUrl ?? check.url} → ${check.actualStatus}`)
+    return [
+      auditOnly
+        ? `[конвеєр:released] Сценарій підтверджено наживо на DEV без змін коду — ${closing ? 'задачу закрито' : 'статус «Готовий до ретесту»'}.`
+        : `[конвеєр:released] Виправлення в main, задеплоєне на DEV і підтверджене наживо — ${closing ? 'задачу закрито' : 'статус «Готовий до ретесту»'}.`,
+      `Коміти: ${commits || 'зміни коду не знадобились'}`,
+      `Білд консолі: ${build || 'невідомо'}`,
+      live?.report ? `Live-перевірка (GET через read-only DEV proxy):\n${live.report}` : 'Live-перевірка: spec відсутній',
+      smoke.length > 0 ? `Smoke-перевірки:\n${smoke.join('\n')}` : '',
+    ].filter(Boolean).join('\n')
+  }
+
+  async comment(task, body) {
+    const text = String(body ?? '').trim()
+    if (!text) return false
+    const response = await fetch(`${this.deskBaseUrl}/api/tasks/${encodeURIComponent(task.id)}/comments`, {
+      method: 'POST',
+      headers: this.requestHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ body: text.length > 4_900 ? `${text.slice(0, 4_899)}…` : text }),
+    }).catch(() => null)
+    if (!response?.ok) console.error(`[release] ${task.id}: коментар конвеєра не збережено (${response?.status ?? 'network'})`)
+    return response?.ok === true
   }
 
   async annotate(task, line) {

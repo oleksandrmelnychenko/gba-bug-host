@@ -119,10 +119,24 @@ function agentRunFromRow(row, { includeWorkerContext = false } = {}) {
   } catch {
     releaseEvidence = {}
   }
+  const parseObjectColumn = (value) => {
+    try {
+      const parsed = JSON.parse(value ?? '{}')
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
   return {
     id: row.id,
     taskId: row.task_id,
     trigger: row.trigger,
+    triggerReason: row.trigger_reason ?? '',
+    sessionMode: row.session_mode ?? '',
+    sessionReason: row.session_reason ?? '',
+    codexModel: row.codex_model ?? '',
+    baselineCommits: parseObjectColumn(row.baseline_commits),
+    headCommits: parseObjectColumn(row.head_commits),
     status: row.status,
     attempt: row.attempt,
     reviewComment: row.review_comment || inputSnapshot?.reviewComment || '',
@@ -325,6 +339,12 @@ export class TaskStore {
         released_at TEXT,
         context_snapshot TEXT NOT NULL DEFAULT '',
         codex_session_id TEXT NOT NULL DEFAULT '',
+        trigger_reason TEXT NOT NULL DEFAULT '',
+        session_mode TEXT NOT NULL DEFAULT '',
+        session_reason TEXT NOT NULL DEFAULT '',
+        codex_model TEXT NOT NULL DEFAULT '',
+        baseline_commits TEXT NOT NULL DEFAULT '{}',
+        head_commits TEXT NOT NULL DEFAULT '{}',
         created_at TEXT NOT NULL,
         started_at TEXT,
         finished_at TEXT,
@@ -536,6 +556,16 @@ export class TaskStore {
       }
       if (!agentRunColumns.has('codex_session_id')) {
         this.database.exec("ALTER TABLE agent_runs ADD COLUMN codex_session_id TEXT NOT NULL DEFAULT ''")
+      }
+      for (const [column, definition] of [
+        ['trigger_reason', "TEXT NOT NULL DEFAULT ''"],
+        ['session_mode', "TEXT NOT NULL DEFAULT ''"],
+        ['session_reason', "TEXT NOT NULL DEFAULT ''"],
+        ['codex_model', "TEXT NOT NULL DEFAULT ''"],
+        ['baseline_commits', "TEXT NOT NULL DEFAULT '{}'"],
+        ['head_commits', "TEXT NOT NULL DEFAULT '{}'"],
+      ]) {
+        if (!agentRunColumns.has(column)) this.database.exec(`ALTER TABLE agent_runs ADD COLUMN ${column} ${definition}`)
       }
       this.database.exec('CREATE INDEX IF NOT EXISTS idx_agent_runs_heartbeat ON agent_runs(status, heartbeat_at)')
     })
@@ -981,7 +1011,7 @@ export class TaskStore {
     }
   }
 
-  enqueueAgentRun(id, taskId, trigger = 'manual') {
+  enqueueAgentRun(id, taskId, trigger = 'manual', { reviewComment = null, triggerReason = '' } = {}) {
     const task = this.find(taskId)
     if (!task) return { status: 'task_not_found', run: null, created: false }
     if (task.status === 'done') {
@@ -1011,6 +1041,20 @@ export class TaskStore {
         AND status = 'needs_review'
         AND release_status = 'pending'
     `).run(supersededAt, taskId)
+    this.database.prepare(`
+      UPDATE agent_runs
+      SET release_status = 'blocked',
+          release_error = 'Очікування зеленого mainline замінено новим запуском.',
+          release_phase = 'failed',
+          updated_at = ?
+      WHERE id = (
+        SELECT id FROM agent_runs
+        WHERE task_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+      )
+        AND release_status = 'waiting_mainline'
+    `).run(supersededAt, taskId)
 
     if (this.hasActiveRelease(taskId)) {
       return { status: 'release_active', run: task.agentRun, created: false }
@@ -1025,28 +1069,25 @@ export class TaskStore {
       .prepare('SELECT COALESCE(MAX(attempt), 0) + 1 AS nextAttempt FROM agent_runs WHERE task_id = ?')
       .get(taskId)
     const now = new Date().toISOString()
-    const inputSnapshot = agentRunInputFromTask(task, this.commentsForTask(taskId))
-    const previousSession = this.database
-      .prepare(`
-        SELECT codex_session_id FROM agent_runs
-        WHERE task_id = ?
-        ORDER BY created_at DESC LIMIT 1
-      `)
-      .get(taskId)
+    const runReviewComment = typeof reviewComment === 'string' ? reviewComment : task.reviewComment ?? ''
+    const inputSnapshot = {
+      ...agentRunInputFromTask(task, this.commentsForTask(taskId)),
+      ...(typeof reviewComment === 'string' ? { reviewComment } : {}),
+    }
     this.database.prepare(`
       INSERT INTO agent_runs (
-        id, task_id, trigger, status, attempt, review_comment, input_snapshot, branch, worktree_path,
+        id, task_id, trigger, trigger_reason, status, attempt, review_comment, input_snapshot, branch, worktree_path,
         summary, details, error, release_status, context_snapshot, codex_session_id,
         created_at, started_at, finished_at, updated_at
-      ) VALUES (?, ?, ?, 'queued', ?, ?, ?, '', '', '', '', '', 'pending', '', ?, ?, NULL, NULL, ?)
+      ) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, '', '', '', '', '', 'pending', '', '', ?, NULL, NULL, ?)
     `).run(
       id,
       taskId,
       trigger,
+      String(triggerReason ?? '').slice(0, 64),
       nextAttempt,
-      task.reviewComment ?? '',
+      runReviewComment,
       JSON.stringify(inputSnapshot),
-      previousSession?.codex_session_id ?? '',
       now,
       now,
     )
@@ -1371,20 +1412,6 @@ export class TaskStore {
   }
 
   updateAgentRun(id, values) {
-    const allowedFields = [
-      'status',
-      'branch',
-      'worktreePath',
-      'summary',
-      'details',
-      'error',
-      'finishedAt',
-      'contextSnapshot',
-      'codexSessionId',
-    ]
-    const fields = allowedFields.filter((field) => Object.hasOwn(values, field))
-    if (!fields.length) return this.findAgentRun(id)
-
     const columnNames = {
       status: 'status',
       branch: 'branch',
@@ -1395,12 +1422,58 @@ export class TaskStore {
       finishedAt: 'finished_at',
       contextSnapshot: 'context_snapshot',
       codexSessionId: 'codex_session_id',
+      sessionMode: 'session_mode',
+      sessionReason: 'session_reason',
+      codexModel: 'codex_model',
+      baselineCommits: 'baseline_commits',
+      headCommits: 'head_commits',
     }
+    const fields = Object.keys(columnNames).filter((field) => Object.hasOwn(values, field))
+    if (!fields.length) return this.findAgentRun(id)
+
+    const serialize = (field) => ['baselineCommits', 'headCommits'].includes(field) && typeof values[field] !== 'string'
+      ? JSON.stringify(values[field] ?? {})
+      : values[field]
     const assignments = fields.map((field) => `${columnNames[field]} = ?`).join(', ')
     this.database
       .prepare(`UPDATE agent_runs SET ${assignments}, updated_at = ? WHERE id = ?`)
-      .run(...fields.map((field) => values[field]), new Date().toISOString(), id)
+      .run(...fields.map(serialize), new Date().toISOString(), id)
     return this.findAgentRun(id)
+  }
+
+  reopenAgentRunRelease(id, values = {}) {
+    return this.transaction(() => {
+      const run = this.findAgentRun(id)
+      if (!run) return { status: 'not_found', run: null }
+      if (run.releaseStatus !== 'blocked') return { status: 'not_blocked', run }
+      if (!['completed', 'needs_review'].includes(run.status)) return { status: 'not_releasable', run }
+      const latest = this.database
+        .prepare('SELECT id FROM agent_runs WHERE task_id = ? ORDER BY created_at DESC LIMIT 1')
+        .get(run.taskId)
+      if (latest?.id !== run.id) return { status: 'superseded', run }
+      const task = this.find(run.taskId)
+      if (!task || task.status === 'done' || task.aiMode === 'off') return { status: 'task_closed', run }
+      const status = values.status === 'waiting_mainline' ? 'waiting_mainline' : 'retrying'
+      const now = new Date().toISOString()
+      this.database.prepare(`
+        UPDATE agent_runs
+        SET release_status = ?, release_attempts = ?, release_error = ?, release_phase = ?,
+            release_evidence = ?, updated_at = ?
+        WHERE id = ?
+      `).run(
+        status,
+        Number.isInteger(values.attempts) && values.attempts >= 0 ? values.attempts : 0,
+        String(values.error ?? ''),
+        String(values.phase ?? 'queued'),
+        JSON.stringify(values.evidence ?? run.releaseEvidence ?? {}),
+        now,
+        id,
+      )
+      if (['blocked', 'new'].includes(task.status)) {
+        this.database.prepare("UPDATE tasks SET status = 'in_progress', updated_at = ? WHERE id = ?").run(now, task.id)
+      }
+      return { status: 'reopened', run: this.findAgentRun(id) }
+    })
   }
 
   updateAgentRunRelease(id, values, taskStatus = '') {

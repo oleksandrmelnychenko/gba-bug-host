@@ -2,7 +2,7 @@ export type TaskStatus = 'new' | 'in_progress' | 'ready_for_retest' | 'review_ag
 export type TaskPriority = 'low' | 'medium' | 'high' | 'critical'
 export type TaskProject = 'console' | 'ecommerce'
 export type AgentRunStatus = 'queued' | 'running' | 'completed' | 'needs_review' | 'blocked' | 'failed'
-export type ReleaseStatus = 'pending' | 'processing' | 'retrying' | 'released' | 'blocked' | ''
+export type ReleaseStatus = 'pending' | 'processing' | 'retrying' | 'waiting_mainline' | 'released' | 'blocked' | ''
 export type ReleasePhase = 'queued' | 'preflight' | 'validating' | 'publishing' | 'migrating' | 'deploying' | 'verifying' | 'released' | 'failed' | ''
 
 export interface TaskAttachment {
@@ -59,6 +59,10 @@ export interface AgentRun {
   id: string
   taskId: string
   trigger: 'manual' | 'review_again'
+  triggerReason?: '' | 'verification_failed' | 'auto_continue'
+  sessionMode?: '' | 'fresh' | 'resume'
+  sessionReason?: string
+  codexModel?: string
   status: AgentRunStatus
   attempt: number
   reviewComment: string

@@ -1244,3 +1244,100 @@ test('міграція ai_mode вимикає AI для наявних зада�
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('waiting_mainline тримає release, але не зупиняє coding-чергу інших задач', async () => {
+  await withTestApp(async ({ app, store }) => {
+    const first = await request(app).post('/api/tasks').field('title', 'Чекає зеленого main').expect(201)
+    const second = await request(app).post('/api/tasks').field('title', 'Наступна задача').expect(201)
+    const claimed = store.claimNextAgentRun('worker-a')
+    assert.equal(claimed.taskId, first.body.id)
+    store.updateAgentRun(claimed.id, { status: 'completed', finishedAt: new Date().toISOString() })
+    assert.equal(store.claimNextAgentRun('worker-a'), null, 'pending release блокує наступний coding run')
+
+    const releaseOwner = 'release-waiting-worker'
+    assert.equal(store.acquireWorkerLease('release-worker', releaseOwner, new Date(0).toISOString()), true)
+    const waiting = await request(app)
+      .patch(`/api/agent-runs/${claimed.id}/release`)
+      .set('Authorization', 'Bearer test-internal-token')
+      .send({ status: 'waiting_mainline', phase: 'validating', leaseOwnerId: releaseOwner, evidence: { mainlineHold: { repo: 'gba_console', sha: 'a'.repeat(40) } } })
+      .expect(200)
+    assert.equal(waiting.body.releaseStatus, 'waiting_mainline')
+    assert.equal(store.claimNextAgentRun('worker-a').taskId, second.body.id)
+
+    await request(app)
+      .post(`/api/tasks/${first.body.id}/agent-runs`)
+      .expect(202)
+    assert.equal(store.findAgentRun(claimed.id).releaseStatus, 'blocked')
+    assert.match(store.findAgentRun(claimed.id).releaseError, /mainline/)
+  })
+})
+
+test('заблокований release можна відновити лише конвеєром із lease і лише для останнього запуску', async () => {
+  await withTestApp(async ({ app, store }) => {
+    const created = await request(app).post('/api/tasks').field('title', 'Відновлення release').expect(201)
+    const runId = created.body.agentRun.id
+    store.updateAgentRun(runId, { status: 'completed', finishedAt: new Date().toISOString() })
+    store.updateAgentRunRelease(runId, {
+      status: 'blocked',
+      phase: 'failed',
+      attempts: 3,
+      error: 'gba_console: перевірка «npx vitest run --silent --maxWorkers=8» впала; mainline не змінено',
+    }, 'blocked')
+    const releaseOwner = 'release-reopen-worker'
+    assert.equal(store.acquireWorkerLease('release-worker', releaseOwner, new Date(0).toISOString()), true)
+
+    await request(app)
+      .patch(`/api/agent-runs/${runId}/release`)
+      .set('Authorization', 'Bearer test-internal-token')
+      .send({ reopen: true, status: 'released', leaseOwnerId: releaseOwner })
+      .expect(422)
+    await request(app)
+      .patch(`/api/agent-runs/${runId}/release`)
+      .set('Authorization', 'Bearer test-internal-token')
+      .send({ reopen: true, status: 'retrying', leaseOwnerId: 'not-the-owner' })
+      .expect(409)
+    const reopened = await request(app)
+      .patch(`/api/agent-runs/${runId}/release`)
+      .set('Authorization', 'Bearer test-internal-token')
+      .send({ reopen: true, status: 'retrying', phase: 'queued', leaseOwnerId: releaseOwner, evidence: { mainlineRecovery: { sha: 'a'.repeat(40) } } })
+      .expect(200)
+    assert.equal(reopened.body.releaseStatus, 'retrying')
+    assert.equal(reopened.body.releaseAttempts, 0)
+    assert.equal(reopened.body.releaseEvidence.mainlineRecovery.sha, 'a'.repeat(40))
+    assert.equal(store.find(created.body.id).status, 'in_progress')
+
+    await request(app)
+      .patch(`/api/agent-runs/${runId}/release`)
+      .set('Authorization', 'Bearer test-internal-token')
+      .send({ reopen: true, status: 'retrying', leaseOwnerId: releaseOwner })
+      .expect(409)
+  })
+})
+
+test('службовий повторний запуск після live-перевірки доступний лише внутрішньому конвеєру', async () => {
+  await withTestApp(async ({ app, store }) => {
+    const created = await request(app).post('/api/tasks').field('title', 'Повтор після live').expect(201)
+    const runId = created.body.agentRun.id
+    store.updateAgentRun(runId, { status: 'completed', finishedAt: new Date().toISOString() })
+    store.updateAgentRunRelease(runId, { status: 'blocked', phase: 'failed' }, 'in_progress')
+
+    await request(app)
+      .post(`/api/tasks/${created.body.id}/agent-runs`)
+      .send({ triggerReason: 'verification_failed', reviewComment: 'FAIL: 0/1 GET-перевірок після deploy' })
+      .expect(403)
+    await request(app)
+      .post(`/api/tasks/${created.body.id}/agent-runs`)
+      .set('Authorization', 'Bearer test-internal-token')
+      .send({ triggerReason: 'verification_failed', reviewComment: 'коротко' })
+      .expect(422)
+    const queued = await request(app)
+      .post(`/api/tasks/${created.body.id}/agent-runs`)
+      .set('Authorization', 'Bearer test-internal-token')
+      .send({ triggerReason: 'verification_failed', reviewComment: 'FAIL: 0/1 GET-перевірок після deploy' })
+      .expect(202)
+    assert.equal(queued.body.agentRun.triggerReason, 'verification_failed')
+    assert.equal(queued.body.agentRun.reviewComment, 'FAIL: 0/1 GET-перевірок після deploy')
+    assert.equal(queued.body.agentRun.codexSessionId, undefined)
+    assert.equal(store.find(created.body.id).reviewComment, '')
+  })
+})

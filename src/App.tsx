@@ -179,6 +179,39 @@ const workspaceTabs: Array<{ key: WorkspaceTab; label: string }> = [
 
 const RELEASED_MARKER = /\[released:([^\]]+)\]/
 
+function agentRunTriggerLabel(run: AgentRun, variant: 'history' | 'details') {
+  if (run.triggerReason === 'verification_failed') return 'Повтор після live-перевірки'
+  if (run.triggerReason === 'auto_continue') return 'Авто-продовження конвеєра'
+  if (run.trigger === 'review_again') return variant === 'history' ? 'Повторний перегляд' : 'Передивись ще раз'
+  return variant === 'history' ? 'Перший запуск' : 'Створення задачі'
+}
+
+const codexSessionReasonLabels: Record<string, string> = {
+  'first-run': 'перший запуск задачі',
+  'quick-follow-up': 'швидкий review-again після успішної спроби',
+  'interrupted-run': 'продовження перерваного запуску',
+  'interrupted-run-without-session': 'перерваний запуск без збереженої сесії',
+  'previous-release-failed': 'реліз попередньої спроби не вдався',
+  'previous-run-legacy': 'попередня спроба без даних про сесію',
+  'mainline-drift-unknown': 'невідомо, наскільки змінився main',
+  'previous-session-missing': 'сесія попередньої спроби недоступна',
+}
+
+function codexSessionLabel(run: AgentRun) {
+  if (!run.sessionMode) return '—'
+  const reason = run.sessionReason ?? ''
+  const [kind, detail] = reason.split(':')
+  const readable = codexSessionReasonLabels[reason]
+    ?? (kind === 'trigger' ? `тригер ${detail}`
+      : kind === 'previous-verdict' ? `вердикт попередньої спроби: ${detail}`
+        : kind === 'model-changed' ? `змінено модель (${detail})`
+          : kind === 'mainline-moved' ? `main зрушив на ${detail}`
+            : kind === 'resume-failed' || kind === 'retry' ? `відновлення не вдалося (${detail})`
+              : reason || 'без причини')
+  const mode = run.sessionMode === 'resume' ? 'продовження' : 'нова'
+  return `${mode} — ${readable}${run.codexModel ? ` · ${run.codexModel}` : ''}`
+}
+
 function isTaskQueuedOrRunning(task: Task) {
   return task.agentRun?.status === 'queued' || task.agentRun?.status === 'running'
 }
@@ -1803,7 +1836,7 @@ function AgentRunHistory({ task }: { task: Task }) {
                 <div className="agent-history-topline">
                   <div className="agent-history-attempt">
                     <strong>Спроба #{run.attempt}</strong>
-                    <span>{run.trigger === 'review_again' ? 'Повторний перегляд' : 'Перший запуск'}</span>
+                    <span>{agentRunTriggerLabel(run, 'history')}</span>
                   </div>
                   <span className={`agent-history-status agent-run-${run.status}`}>
                     <i aria-hidden="true" /> {agentRunMeta[run.status].label}
@@ -2232,7 +2265,8 @@ function AgentConclusionDialog({
               <div><dt>Гілка</dt><dd><code>{run.branch || '—'}</code></dd></div>
               <div><dt>Старт</dt><dd>{run.startedAt ? formatDateTime(run.startedAt) : '—'}</dd></div>
               <div><dt>Фініш</dt><dd>{run.finishedAt ? formatDateTime(run.finishedAt) : '—'}</dd></div>
-              <div><dt>Тригер</dt><dd>{run.trigger === 'review_again' ? 'Передивись ще раз' : 'Створення задачі'}</dd></div>
+              <div><dt>Тригер</dt><dd>{agentRunTriggerLabel(run, 'details')}</dd></div>
+              <div><dt>Сесія Codex</dt><dd>{codexSessionLabel(run)}</dd></div>
             </dl>
           </section>
         </div>

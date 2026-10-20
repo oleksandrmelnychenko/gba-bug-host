@@ -112,3 +112,110 @@ export function createCodexSessionTracker(onSession) {
   }
 }
 
+
+export const CODEX_SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000
+export const CODEX_SESSION_MAX_MAINLINE_DRIFT = 20
+export const PIPELINE_COMMENT_PATTERN = /^\[конвеєр:[a-z_-]+\]/
+
+export function isPipelineComment(comment) {
+  return PIPELINE_COMMENT_PATTERN.test(String(comment?.body ?? '').trim())
+}
+
+function runFinishedAt(run) {
+  return Date.parse(run?.finishedAt ?? run?.updatedAt ?? run?.createdAt ?? '')
+}
+
+export function decideCodexSession({
+  run,
+  previousRun = null,
+  model = '',
+  mainlineDrift = null,
+  now = Date.now(),
+  maxAgeMs = CODEX_SESSION_MAX_AGE_MS,
+  maxDrift = CODEX_SESSION_MAX_MAINLINE_DRIFT,
+}) {
+  const fresh = (reason) => ({ mode: 'fresh', reason, sessionId: '' })
+  if (run?.sessionMode) {
+    return run.codexSessionId
+      ? { mode: 'resume', reason: 'interrupted-run', sessionId: run.codexSessionId }
+      : fresh('interrupted-run-without-session')
+  }
+  if (!previousRun) return fresh('first-run')
+  if (run?.trigger !== 'review_again') return fresh(`trigger:${run?.trigger || 'unknown'}`)
+  if (previousRun.status !== 'completed') return fresh(`previous-verdict:${previousRun.status || 'unknown'}`)
+  if (previousRun.releaseStatus === 'blocked' || previousRun.releasePhase === 'failed') return fresh('previous-release-failed')
+  if (!previousRun.sessionMode) return fresh('previous-run-legacy')
+  const finishedAt = runFinishedAt(previousRun)
+  if (Number.isNaN(finishedAt) || now - finishedAt > maxAgeMs) return fresh(`previous-run-older-than-${Math.round(maxAgeMs / 3_600_000)}h`)
+  if ((previousRun.codexModel ?? '') !== (model ?? '')) {
+    return fresh(`model-changed:${previousRun.codexModel || 'default'}->${model || 'default'}`)
+  }
+  if (mainlineDrift === null || mainlineDrift === undefined || !Number.isFinite(mainlineDrift)) return fresh('mainline-drift-unknown')
+  if (mainlineDrift > maxDrift) return fresh(`mainline-moved:${mainlineDrift}-commits`)
+  if (!previousRun.codexSessionId) return fresh('previous-session-missing')
+  return { mode: 'resume', reason: 'quick-follow-up', sessionId: previousRun.codexSessionId }
+}
+
+function parseObject(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value
+  try {
+    const parsed = JSON.parse(value || '{}')
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function runCommitLines(run) {
+  const evidence = parseObject(run.releaseEvidence)
+  const published = Object.entries(evidence.repositories ?? {})
+    .filter(([, value]) => value?.commit)
+    .map(([repo, value]) => `${repo}@${String(value.commit).slice(0, 12)} (у ${value.branch ?? 'main'})`)
+  if (published.length > 0) return published.join(', ')
+  const heads = Object.entries(parseObject(run.headCommits))
+    .map(([repo, value]) => `${repo}@${String(value?.commit ?? value).slice(0, 12)}${value?.dirty ? ' + незакомічені зміни' : ''}`)
+  return heads.length > 0 ? heads.join(', ') : 'не зафіксовано'
+}
+
+export function composePriorRunsContext({ runs = [], comments = [], maximumLength = 6_000, maximumRuns = 5 } = {}) {
+  const ordered = [...runs]
+    .sort((left, right) => Date.parse(right.createdAt ?? 0) - Date.parse(left.createdAt ?? 0))
+    .slice(0, maximumRuns)
+  if (ordered.length === 0) return ''
+  const chronological = [...ordered].reverse()
+  const sections = chronological.map((run, index) => {
+    const details = parseObject(run.details)
+    const evidence = parseObject(run.releaseEvidence)
+    const nextRun = chronological[index + 1]
+    const from = runFinishedAt(run)
+    const until = nextRun ? Date.parse(nextRun.createdAt ?? '') : Number.POSITIVE_INFINITY
+    const later = comments.filter((comment) => {
+      const created = Date.parse(comment.createdAt ?? '')
+      return !Number.isNaN(created) && created >= from && created < until
+    })
+    const files = Array.isArray(details.changedFiles) ? details.changedFiles.slice(0, 10) : []
+    const verdict = [run.status, details.outcome].filter(Boolean).join('/')
+    const live = evidence.liveVerification
+    const lines = [
+      `- Спроба #${run.attempt ?? '?'} (${run.trigger || 'manual'}, ${run.createdAt ?? 'дата невідома'}) · вердикт: ${verdict || 'невідомо'} · сесія: ${run.sessionMode || 'legacy'}${run.sessionReason ? ` (${run.sessionReason})` : ''}`,
+      run.reviewComment ? `  Запит QA до спроби: ${compactText(run.reviewComment, 300)}` : '',
+      `  Підсумок: ${compactText(run.summary || run.error, 500) || 'немає'}`,
+      details.rootCause ? `  Root cause: ${compactText(details.rootCause, 300)}` : '',
+      details.blocker ? `  Блокер: ${compactText(details.blocker, 300)}` : '',
+      files.length > 0 ? `  Змінені файли: ${files.map((file) => compactText(file, 120)).join(', ')}` : '',
+      `  Гілка: ${run.branch || 'немає'} · коміти: ${runCommitLines(run)}`,
+      `  Release: ${run.releaseStatus || 'немає'}${run.releasePhase ? `/${run.releasePhase}` : ''}${run.releaseError ? ` — ${compactText(run.releaseError, 300)}` : ''}`,
+      live ? `  Live-перевірка DEV: ${live.passed ? 'PASS' : live.skipped ? 'пропущено' : 'FAIL'}${live.report ? ` — ${compactText(live.report, 300)}` : ''}` : '',
+      later.length > 0
+        ? `  Коментарі після спроби: ${later.map((comment) => `[${comment.id}] ${compactText(comment.author, 40)}: ${compactText(comment.body, 200)}`).join(' | ')}`
+        : '',
+    ].filter(Boolean)
+    return lines.join('\n')
+  })
+  let block = sections.join('\n')
+  while (block.length > maximumLength && sections.length > 1) {
+    sections.shift()
+    block = `- (старіші спроби пропущено)\n${sections.join('\n')}`
+  }
+  return block.length > maximumLength ? `${block.slice(0, maximumLength - 1)}…` : block
+}

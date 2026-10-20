@@ -18,6 +18,16 @@ import {
 } from '../server/codex-worker.js'
 import { TaskStore, getSeedTasks } from '../server/store.js'
 
+const FAKE_LIVE_SPEC = `
+{
+  const fs = await import('node:fs')
+  const taskId = process.cwd().split('/').pop().toUpperCase()
+  fs.mkdirSync('.qa-desk/verify', { recursive: true })
+  fs.writeFileSync('.qa-desk/verify/' + taskId + '.json', JSON.stringify({ task: taskId, scenario: 'Fixture: сценарій видно на DEV', checks: [{ label: 'fixture', api: 'concord', path: '/api/v1/uk/clients/get/top', expectStatus: 200, assertions: [{ path: '$.Body', op: 'exists' }] }] }))
+}
+`
+const passingVerification = async () => ({ passed: true, infrastructure: false, startedAt: '', finishedAt: '', checks: [] })
+
 function git(cwd, ...args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim()
 }
@@ -632,6 +642,7 @@ test('Codex worker зберігає verified як completed без штучно�
 
   await writeFile(fakeCodex, `#!/usr/bin/env node
 import { writeFileSync } from 'node:fs'
+${FAKE_LIVE_SPEC}
 const args = process.argv.slice(2)
 const outputPath = args[args.indexOf('--output-last-message') + 1]
 writeFileSync(outputPath, JSON.stringify({
@@ -672,6 +683,7 @@ writeFileSync(outputPath, JSON.stringify({
       targetRepository,
       worktreesDirectory,
       codexBinary: fakeCodex,
+      verificationRunner: passingVerification,
       timeoutMs: 10_000,
     })
     await worker.processRun(store.claimNextAgentRun())
@@ -712,6 +724,7 @@ test('Codex worker працює в окремому worktree та зберіга
 
   await writeFile(fakeCodex, `#!/usr/bin/env node
 import { writeFileSync } from 'node:fs'
+${FAKE_LIVE_SPEC}
 const args = process.argv.slice(2)
 const outputPath = args[args.indexOf('--output-last-message') + 1]
 let prompt = ''
@@ -812,6 +825,7 @@ writeFileSync(outputPath, JSON.stringify({
       targetRepository,
       worktreesDirectory,
       codexBinary: fakeCodex,
+      verificationRunner: passingVerification,
       buildNumber: 'worker-test-build',
       timeoutMs: 10_000,
     })
@@ -901,6 +915,7 @@ test('Codex worker зберігає постійний контекст і пр�
 
   await writeFile(fakeCodex, `#!/usr/bin/env node
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
+${FAKE_LIVE_SPEC}
 const args = process.argv.slice(2)
 const outputPath = args[args.indexOf('--output-last-message') + 1]
 const historyPath = 'codex-invocations.jsonl'
@@ -909,6 +924,7 @@ let prompt = ''
 for await (const chunk of process.stdin) prompt += chunk
 appendFileSync(historyPath, JSON.stringify(args) + '\\n', 'utf8')
 writeFileSync(\`prompt-\${count}.txt\`, prompt, 'utf8')
+appendFileSync('target/app.txt', \`change \${count}\\n\`, 'utf8')
 process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: '${sessionId}' }) + '\\n')
 if (count === 3) {
   process.stderr.write('thread ${sessionId} not found\\n')
@@ -949,6 +965,7 @@ writeFileSync(outputPath, JSON.stringify({
       worktreesDirectory,
       contextFile,
       codexBinary: fakeCodex,
+      verificationRunner: passingVerification,
       timeoutMs: 10_000,
     })
     await worker.processRun(store.claimNextAgentRun())
@@ -967,11 +984,15 @@ writeFileSync(outputPath, JSON.stringify({
     await writeFile(contextFile, 'Контекст версії 2: повторний запуск пам’ятає історію задачі.', 'utf8')
     store.patch('BUG-1051', { status: 'review_again', reviewComment: 'Перевір виправлення ще раз.' })
     const queued = store.enqueueAgentRun('RUN-CONTEXT-2', 'BUG-1051', 'review_again')
-    assert.equal(queued.run.codexSessionId, sessionId)
+    assert.equal(queued.run.codexSessionId, '')
     await worker.processRun(store.claimNextAgentRun())
 
     const secondRun = store.findAgentRun('RUN-CONTEXT-2')
+    assert.equal(firstRun.sessionMode, 'fresh')
+    assert.equal(firstRun.sessionReason, 'first-run')
     assert.equal(secondRun.codexSessionId, sessionId)
+    assert.equal(secondRun.sessionMode, 'resume')
+    assert.equal(secondRun.sessionReason, 'quick-follow-up')
     assert.match(secondRun.contextSnapshot, /Контекст версії 2/)
     assert.match(secondRun.contextSnapshot, /BUG-1051/)
     assert.match(secondRun.contextSnapshot, /Виправлення 1 готове/)
@@ -1044,6 +1065,7 @@ test('Codex worker готує фул-стек worktree-и для всіх реп
 
   await writeFile(fakeCodex, `#!/usr/bin/env node
 import { writeFileSync } from 'node:fs'
+${FAKE_LIVE_SPEC}
 const args = process.argv.slice(2)
 const outputPath = args[args.indexOf('--output-last-message') + 1]
 writeFileSync('frontend/app.txt', 'front-after\\n', 'utf8')
@@ -1086,6 +1108,7 @@ writeFileSync(outputPath, JSON.stringify({
       targetRepository: frontendRepository,
       worktreesDirectory,
       codexBinary: fakeCodex,
+      verificationRunner: passingVerification,
       buildNumber: 'stack-test-build',
       timeoutMs: 10_000,
     })
@@ -1131,6 +1154,7 @@ test('Codex worker ізолює залежності у worktree і диктує
 
   await writeFile(fakeCodex, `#!/usr/bin/env node
 import { writeFileSync } from 'node:fs'
+${FAKE_LIVE_SPEC}
 const args = process.argv.slice(2)
 const outputPath = args[args.indexOf('--output-last-message') + 1]
 let prompt = ''
@@ -1173,6 +1197,7 @@ writeFileSync(outputPath, JSON.stringify({
       targetRepository: repository,
       worktreesDirectory,
       codexBinary: fakeCodex,
+      verificationRunner: passingVerification,
       buildNumber: 'checks-test-build',
       timeoutMs: 10_000,
     })
@@ -1286,6 +1311,7 @@ await new Promise((resolve) => setTimeout(resolve, 20000))
       targetRepository: repository,
       worktreesDirectory,
       codexBinary: fakeCodex,
+      verificationRunner: passingVerification,
       buildNumber: 'stop-test-build',
       timeoutMs: 30_000,
     })

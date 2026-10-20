@@ -22,7 +22,8 @@ import { TranscriptionError, transcribeAudioWithShell } from './transcription.js
 const allowedStatuses = new Set(['new', 'in_progress', 'ready_for_retest', 'review_again', 'done', 'blocked'])
 const allowedPriorities = new Set(['low', 'medium', 'high', 'critical'])
 const allowedProjects = new Set(['console', 'ecommerce'])
-const allowedReleaseStatuses = new Set(['pending', 'processing', 'retrying', 'released', 'blocked'])
+const allowedReleaseStatuses = new Set(['pending', 'processing', 'retrying', 'waiting_mainline', 'released', 'blocked'])
+const allowedFollowUpReasons = new Set(['verification_failed', 'auto_continue'])
 const allowedReleaseTaskStatuses = allowedStatuses
 const allowedReleasePhases = new Set([
   '',
@@ -682,6 +683,36 @@ export async function createApp(options = {}) {
         response.status(404).json({ message: 'AI-запуск не знайдено.' })
         return
       }
+      if (request.body?.reopen === true) {
+        const status = cleanText(request.body.status)
+        if (!['retrying', 'waiting_mainline'].includes(status)) {
+          response.status(422).json({ message: 'Повторно відкрити release можна лише як retrying або waiting_mainline.' })
+          return
+        }
+        const evidence = request.body.evidence
+        if (evidence !== undefined && (!evidence || typeof evidence !== 'object' || Array.isArray(evidence) || JSON.stringify(evidence).length > 100_000)) {
+          response.status(422).json({ message: 'evidence має бути JSON-об’єктом до 100 KB.' })
+          return
+        }
+        const phase = cleanText(request.body.phase) || 'queued'
+        if (!allowedReleasePhases.has(phase)) {
+          response.status(422).json({ message: 'Невідома фаза release.' })
+          return
+        }
+        const reopened = store.reopenAgentRunRelease(request.params.id, {
+          status,
+          phase,
+          error: cleanText(request.body.error).slice(0, 3000),
+          evidence,
+          attempts: 0,
+        })
+        if (reopened.status !== 'reopened') {
+          response.status(409).json({ message: `Release не можна відкрити повторно: ${reopened.status}.` })
+          return
+        }
+        response.json(publicAgentRun(reopened.run))
+        return
+      }
       const values = {}
       if (Object.hasOwn(request.body, 'status')) {
         const status = cleanText(request.body.status)
@@ -781,7 +812,22 @@ export async function createApp(options = {}) {
 
   app.post('/api/tasks/:id/agent-runs', async (request, response, next) => {
     try {
-      const result = await store.enqueueAgentRun(randomUUID(), request.params.id, 'manual')
+      const triggerReason = cleanText(request.body?.triggerReason)
+      if (triggerReason && (!request.user?.internal || !allowedFollowUpReasons.has(triggerReason))) {
+        response.status(403).json({ message: 'Службовий повторний запуск доступний лише внутрішньому конвеєру.' })
+        return
+      }
+      const followUpComment = triggerReason ? cleanText(request.body?.reviewComment).slice(0, 8000) : ''
+      if (triggerReason && followUpComment.length < 10) {
+        response.status(422).json({ message: 'Службовий повторний запуск потребує конкретний опис причини.' })
+        return
+      }
+      const result = await store.enqueueAgentRun(
+        randomUUID(),
+        request.params.id,
+        'manual',
+        triggerReason ? { triggerReason, reviewComment: followUpComment } : {},
+      )
       if (result.status === 'task_not_found') {
         response.status(404).json({ message: 'Задачу не знайдено.' })
         return
