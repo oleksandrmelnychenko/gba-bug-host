@@ -496,6 +496,16 @@ export async function createApp(options = {}) {
     }
   })
 
+  app.get('/api/builds/:number', (request, response) => {
+    const number = cleanText(request.params.number)
+    const build = number.length <= 64 ? store.buildSnapshot(number) : null
+    if (!build) {
+      response.status(404).json({ message: 'Білд не знайдено.' })
+      return
+    }
+    response.json(build)
+  })
+
   app.post('/api/transcriptions', voiceUpload.single('audio'), async (request, response, next) => {
     try {
       if (!request.file?.size) {

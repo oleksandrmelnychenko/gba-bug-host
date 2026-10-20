@@ -1377,3 +1377,71 @@ test('кожна задача в API має intake-поля навіть без 
     }
   })
 })
+
+test('кожна задача показує білд, у якому вона готова, або очікування наступного білду', async () => {
+  await withTestApp(async ({ app, store }) => {
+    const manual = await request(app).post('/api/tasks').field('title', 'Ручний ретест').expect(201)
+    const internal = await request(app).post('/api/tasks').field('title', 'Інтеграція координатора').expect(201)
+    const released = await request(app).post('/api/tasks').field('title', 'Release конвеєра').expect(201)
+    const audit = await request(app).post('/api/tasks').field('title', 'Audit-only').expect(201)
+    const untouched = await request(app).post('/api/tasks').field('title', 'Ще в роботі').expect(201)
+
+    const patched = await request(app).patch(`/api/tasks/${manual.body.id}`).send({ status: 'ready_for_retest' }).expect(200)
+    assert.equal(patched.body.readyBuild.pending, true)
+    assert.equal(patched.body.readyBuild.number, null)
+    assert.equal(patched.body.readyBuild.source, 'manual')
+
+    await request(app)
+      .patch(`/api/tasks/${internal.body.id}`)
+      .set('Authorization', 'Bearer test-internal-token')
+      .send({ status: 'ready_for_retest' })
+      .expect(200)
+
+    const releaseOwner = 'release-ready-build-worker'
+    assert.equal(store.acquireWorkerLease('release-worker', releaseOwner, new Date(0).toISOString()), true)
+    for (const [created, details] of [[released, '{}'], [audit, JSON.stringify({ outcome: 'verified' })]]) {
+      const runId = created.body.agentRun.id
+      store.updateAgentRun(runId, { status: 'completed', details, finishedAt: new Date().toISOString() })
+      await request(app)
+        .patch(`/api/agent-runs/${runId}/release`)
+        .set('Authorization', 'Bearer test-internal-token')
+        .send({ status: 'processing', phase: 'verifying', leaseOwnerId: releaseOwner, evidence: { deployment: { verifiedAt: new Date().toISOString(), services: {} } } })
+        .expect(200)
+      await request(app)
+        .patch(`/api/agent-runs/${runId}/release`)
+        .set('Authorization', 'Bearer test-internal-token')
+        .send({ status: 'released', phase: 'released', leaseOwnerId: releaseOwner, taskStatus: 'ready_for_retest', releasedAt: new Date().toISOString() })
+        .expect(200)
+    }
+
+    const pendingTasks = (await request(app).get('/api/tasks').expect(200)).body
+    const byId = (id, list = pendingTasks) => list.find((task) => task.id === id)
+    for (const created of [manual, internal, released, audit]) {
+      assert.equal(byId(created.body.id).readyBuild.pending, true, created.body.title)
+    }
+    assert.equal(byId(released.body.id).readyBuild.source, 'codex')
+    assert.equal(byId(untouched.body.id).readyBuild, null)
+
+    store.ensureBuild('2026.10.20.1300')
+    const shipped = (await request(app).get('/api/tasks').expect(200)).body
+    for (const created of [manual, internal, released, audit]) {
+      assert.deepEqual(
+        { number: byId(created.body.id, shipped).readyBuild.number, pending: byId(created.body.id, shipped).readyBuild.pending },
+        { number: '2026.10.20.1300', pending: false },
+      )
+    }
+
+    await request(app).patch(`/api/tasks/${manual.body.id}`).send({ status: 'in_progress' }).expect(200)
+    const again = await request(app).patch(`/api/tasks/${manual.body.id}`).send({ status: 'ready_for_retest' }).expect(200)
+    assert.equal(again.body.readyBuild.pending, true, 'останнє опрацювання перемагає старий білд')
+    store.ensureBuild('2026.10.20.1400')
+    assert.equal(store.find(manual.body.id).readyBuild.number, '2026.10.20.1400')
+    assert.equal(store.find(internal.body.id).readyBuild.number, '2026.10.20.1300')
+
+    const view = await request(app).get('/api/builds/2026.10.20.1300').expect(200)
+    assert.deepEqual(view.body.bugs.map((bug) => bug.id).sort(), [manual.body.id, internal.body.id, released.body.id, audit.body.id].sort())
+    assert.deepEqual(view.body.pending, [])
+    await request(app).get('/api/builds/__pending__').expect(404)
+    await request(app).get('/api/builds/2099.01.01.0000').expect(404)
+  })
+})

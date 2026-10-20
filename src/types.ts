@@ -107,7 +107,15 @@ export interface BuildInfo {
   pending: BuildBug[]
 }
 
+export interface TaskReadyBuild {
+  number: string | null
+  pending: boolean
+  processedAt: string
+  source: 'manual' | 'codex'
+}
+
 export interface Task {
+  readyBuild?: TaskReadyBuild | null
   id: string
   title: string
   description: string

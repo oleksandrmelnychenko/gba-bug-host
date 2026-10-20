@@ -10,6 +10,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronUp,
+  ChevronsUpDown,
   ChevronsUp,
   CornerDownRight,
   Download,
@@ -55,6 +56,7 @@ import {
   createTask,
   deleteTask,
   deleteTaskAttachment,
+  getBuild,
   getCurrentBuild,
   getCurrentUser,
   getTaskAgentRuns,
@@ -273,6 +275,7 @@ const tableColumns: Array<{ key: string; label: string; className?: string; srOn
   { key: 'title', label: 'Задача', className: 'column-task' },
   { key: 'created', label: 'Створено', className: 'column-created' },
   { key: 'status', label: 'Статус', className: 'column-status' },
+  { key: 'build', label: 'Білд', className: 'column-build' },
   { key: 'area', label: 'Розділ', className: 'column-area' },
   { key: 'notes', label: 'Нотатки', className: 'column-notes' },
   { key: 'priority', label: 'Пріоритет', className: 'column-priority' },
@@ -439,12 +442,65 @@ function BuildBugRow({
   )
 }
 
+type BuildViewRequest = { number: string | null; nonce: number }
+type TaskSortKey = 'created' | 'build'
+
+function compareReadyBuilds(first: Task, second: Task) {
+  const rank = (task: Task) => (task.readyBuild?.pending ? 2 : task.readyBuild?.number ? 1 : 0)
+  const byRank = rank(first) - rank(second)
+  if (byRank !== 0) return byRank
+  return (first.readyBuild?.number ?? '').localeCompare(second.readyBuild?.number ?? '', 'uk-UA', { numeric: true })
+}
+
+function ReadyBuildChip({
+  task,
+  onOpenBuild,
+}: {
+  task: Task
+  onOpenBuild: (number: string | null) => void
+}) {
+  const ready = task.readyBuild
+  if (!ready) return <span className="ready-build-empty">—</span>
+  const processed = formatDateTime(ready.processedAt)
+  if (ready.pending) {
+    return (
+      <button
+        type="button"
+        className="ready-build-chip is-pending"
+        title={`Очікує наступний білд · опрацьовано ${processed}`}
+        onClick={(event) => {
+          event.stopPropagation()
+          onOpenBuild(null)
+        }}
+      >
+        наступний
+      </button>
+    )
+  }
+  return (
+    <button
+      type="button"
+      className="ready-build-chip"
+      title={`Готово в білді ${ready.number} · опрацьовано ${processed} (${ready.source === 'codex' ? 'AI-конвеєр' : 'QA'})`}
+      onClick={(event) => {
+        event.stopPropagation()
+        onOpenBuild(ready.number)
+      }}
+    >
+      <span className="ready-build-dot" aria-hidden="true" />
+      {ready.number}
+    </button>
+  )
+}
+
 function BuildTicker({
   refreshKey,
+  requested,
   onOpenTask,
   onBuildChanged,
 }: {
   refreshKey: string
+  requested: BuildViewRequest | null
   onOpenTask: (taskId: string) => void
   onBuildChanged: (buildNumber: string) => void
 }) {
@@ -452,6 +508,9 @@ function BuildTicker({
   const [build, setBuild] = useState<BuildInfo | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [viewed, setViewed] = useState<BuildInfo | null>(null)
+  const [viewedLoading, setViewedLoading] = useState(false)
+  const [viewedError, setViewedError] = useState('')
   const rootRef = useRef<HTMLDivElement>(null)
 
   const knownNumberRef = useRef('')
@@ -474,6 +533,38 @@ function BuildTicker({
   useEffect(() => {
     void loadBuild()
   }, [refreshKey])
+
+  useEffect(() => {
+    if (!requested) return
+    setOpen(true)
+    if (!requested.number || requested.number === build?.number) {
+      setViewed(null)
+      setViewedError('')
+      void loadBuild()
+      return
+    }
+    let cancelled = false
+    setViewedLoading(true)
+    setViewedError('')
+    getBuild(requested.number)
+      .then((next) => {
+        if (!cancelled) setViewed(next)
+      })
+      .catch((caughtError) => {
+        if (!cancelled) setViewedError(caughtError instanceof Error ? caughtError.message : 'Не вдалося завантажити build.')
+      })
+      .finally(() => {
+        if (!cancelled) setViewedLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [requested?.nonce])
+
+  const historical = Boolean(viewed || viewedLoading || viewedError)
+  const shown = historical ? viewed : build
+  const shownLoading = historical ? viewedLoading : loading
+  const shownError = historical ? viewedError : error
 
   useEffect(() => {
     const interval = window.setInterval(() => void loadBuild(), 60_000)
@@ -503,6 +594,9 @@ function BuildTicker({
         className="build-ticker-button"
         onClick={() => {
           setOpen((current) => !current)
+          setViewed(null)
+          setViewedError('')
+          setViewedLoading(false)
           if (!open) void loadBuild()
         }}
         aria-expanded={open}
@@ -516,22 +610,36 @@ function BuildTicker({
       </button>
 
       {open && (
-        <section className="build-popover" role="dialog" aria-label="Баги поточного build">
+        <section className="build-popover" role="dialog" aria-label={historical ? 'Баги вибраного build' : 'Баги поточного build'}>
           <div className="build-popover-head">
             <div>
-              <span>Поточний build</span>
-              <strong>{build?.number ?? '—'}</strong>
+              <span>{historical ? 'Build' : 'Поточний build'}</span>
+              <strong>{historical ? (shown?.number ?? requested?.number ?? '—') : (build?.number ?? '—')}</strong>
             </div>
-            <span>{build?.bugs.length ?? 0} опрацьовано</span>
+            <span>{shown?.bugs.length ?? 0} опрацьовано</span>
+            {historical && (
+              <button
+                type="button"
+                className="build-popover-back"
+                onClick={() => {
+                  setViewed(null)
+                  setViewedError('')
+                  setViewedLoading(false)
+                  void loadBuild()
+                }}
+              >
+                До поточного
+              </button>
+            )}
           </div>
 
-          {loading ? (
+          {shownLoading ? (
             <div className="build-popover-state"><LoaderCircle className="spin" size={17} /> Завантажую…</div>
-          ) : error ? (
-            <button className="build-popover-state build-retry" onClick={() => void loadBuild()}>{error} Спробувати ще</button>
-          ) : build?.bugs.length || build?.pending.length ? (
+          ) : shownError ? (
+            <button className="build-popover-state build-retry" onClick={() => void loadBuild()}>{shownError} Спробувати ще</button>
+          ) : shown?.bugs.length || shown?.pending.length ? (
             <div className="build-bug-list">
-              {build.bugs.map((bug) => (
+              {shown.bugs.map((bug) => (
                 <BuildBugRow
                   key={bug.id}
                   bug={bug}
@@ -542,10 +650,10 @@ function BuildTicker({
                 />
               ))}
 
-              {build.pending.length > 0 && (
+              {shown.pending.length > 0 && (
                 <>
-                  <div className="build-bug-divider">Чекають на наступний деплой · {build.pending.length}</div>
-                  {build.pending.map((bug) => (
+                  <div className="build-bug-divider">Чекають на наступний деплой · {shown.pending.length}</div>
+                  {shown.pending.map((bug) => (
                     <BuildBugRow
                       key={`pending-${bug.id}`}
                       bug={bug}
@@ -655,23 +763,27 @@ function TaskTable({
   updatingId,
   queueingId,
   scrollable = false,
+  sortKey,
   sortDirection,
   onOpenTask,
   onStatusChange,
-  onSortDirectionChange,
+  onSortChange,
   onOpenAttachment,
   onEnqueue,
+  onOpenBuild,
 }: {
   tasks: Task[]
   updatingId: string | null
   queueingId: string | null
   scrollable?: boolean
+  sortKey: TaskSortKey
   sortDirection: DateSortDirection
   onOpenTask: (task: Task) => void
   onStatusChange: (task: Task, status: TaskStatus) => void
-  onSortDirectionChange: (direction: DateSortDirection) => void
+  onSortChange: (key: TaskSortKey, direction: DateSortDirection) => void
   onOpenAttachment: (attachment: TaskAttachment) => void
   onEnqueue: (task: Task) => void
+  onOpenBuild: (number: string | null) => void
 }) {
   const headerRowRef = useRef<HTMLTableRowElement | null>(null)
   const [columnWidths, setColumnWidths] = useState<Record<string, number> | null>(() => {
@@ -731,15 +843,20 @@ function TaskTable({
             <tr ref={headerRowRef}>
               {tableColumns.map((column, index) => (
                 <th key={column.key} className={column.className}>
-                  {column.key === 'created' ? (
+                  {column.key === 'created' || column.key === 'build' ? (
                     <button
                       type="button"
-                      className="sort-heading"
-                      onClick={() => onSortDirectionChange(sortDirection === 'desc' ? 'asc' : 'desc')}
-                      aria-label={`Сортування за датою створення: ${sortDirection === 'desc' ? 'спочатку нові' : 'спочатку старі'}`}
+                      className={`sort-heading${sortKey === column.key ? ' is-active' : ''}`}
+                      onClick={() => onSortChange(
+                        column.key as TaskSortKey,
+                        sortKey === column.key && sortDirection === 'desc' ? 'asc' : 'desc',
+                      )}
+                      aria-label={column.key === 'created'
+                        ? `Сортування за датою створення: ${sortKey === 'created' && sortDirection === 'asc' ? 'спочатку старі' : 'спочатку нові'}`
+                        : `Сортування за білдом: ${sortKey === 'build' && sortDirection === 'asc' ? 'спочатку старші' : 'спочатку новіші'}`}
                     >
-                      Створено
-                      {sortDirection === 'desc' ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+                      {column.label}
+                      {sortKey !== column.key ? <ChevronsUpDown size={13} /> : sortDirection === 'desc' ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
                     </button>
                   ) : column.srOnly ? (
                     <span className="sr-only">{column.label}</span>
@@ -784,6 +901,9 @@ function TaskTable({
                       onChange={(status) => onStatusChange(task, status)}
                     />
                   </td>
+                  <td onClick={(event) => event.stopPropagation()}>
+                    <ReadyBuildChip task={task} onOpenBuild={onOpenBuild} />
+                  </td>
                   <td><span className="area-label">{task.area}</span></td>
                   <td><span className="notes-cell" title={task.notes}>{task.notes || '—'}</span></td>
                   <td><PriorityBadge priority={task.priority} /></td>
@@ -818,10 +938,11 @@ function TaskTable({
               <PriorityBadge priority={task.priority} />
             </div>
             <h3>{task.title}</h3>
-            {(task.agentRun || task.aiMode === 'off' || task.createdByName.trim()) && (
-              <div className="task-card-state-line">
+            {(task.agentRun || task.aiMode === 'off' || task.createdByName.trim() || task.readyBuild) && (
+              <div className="task-card-state-line" onClick={(event) => event.stopPropagation()}>
                 <AgentRunChip task={task} />
                 <TaskCreatorChip name={task.createdByName} />
+                {task.readyBuild && <ReadyBuildChip task={task} onOpenBuild={onOpenBuild} />}
               </div>
             )}
             <div className="task-card-meta">
@@ -2821,6 +2942,8 @@ function DeskApp({ user, onLogout }: { user: AuthUser; onLogout: () => void }) {
   const [statusFilter, setStatusFilter] = useState<TaskStatus | 'all'>('all')
   const [priorityFilter, setPriorityFilter] = useState<TaskPriority | 'all'>('all')
   const [sortDirection, setSortDirection] = useState<DateSortDirection>('desc')
+  const [sortKey, setSortKey] = useState<TaskSortKey>('created')
+  const [buildViewRequest, setBuildViewRequest] = useState<BuildViewRequest | null>(null)
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(pageSizeOptions[0])
   const [createOpen, setCreateOpen] = useState(false)
@@ -2970,10 +3093,18 @@ function DeskApp({ user, onLogout }: { user: AuthUser; onLogout: () => void }) {
     })
 
     return filtered.sort((firstTask, secondTask) => {
-      const difference = Date.parse(firstTask.createdAt) - Date.parse(secondTask.createdAt)
-      return sortDirection === 'asc' ? difference : -difference
+      const byCreated = Date.parse(firstTask.createdAt) - Date.parse(secondTask.createdAt)
+      if (sortKey === 'build') {
+        const firstReady = Boolean(firstTask.readyBuild)
+        const secondReady = Boolean(secondTask.readyBuild)
+        if (firstReady !== secondReady) return firstReady ? -1 : 1
+        const byBuild = compareReadyBuilds(firstTask, secondTask)
+        if (byBuild !== 0) return sortDirection === 'asc' ? byBuild : -byBuild
+        return -byCreated
+      }
+      return sortDirection === 'asc' ? byCreated : -byCreated
     })
-  }, [priorityFilter, query, sortDirection, statusFilter, tabTasks])
+  }, [priorityFilter, query, sortDirection, sortKey, statusFilter, tabTasks])
 
   const pageCount = Math.max(1, Math.ceil(filteredTasks.length / pageSize))
   const currentPage = Math.min(page, pageCount)
@@ -2984,7 +3115,7 @@ function DeskApp({ user, onLogout }: { user: AuthUser; onLogout: () => void }) {
 
   useEffect(() => {
     setPage(1)
-  }, [activeTab, pageSize, priorityFilter, query, sortDirection, statusFilter])
+  }, [activeTab, pageSize, priorityFilter, query, sortDirection, sortKey, statusFilter])
 
   useEffect(() => {
     if (page > pageCount) setPage(pageCount)
@@ -3104,6 +3235,7 @@ function DeskApp({ user, onLogout }: { user: AuthUser; onLogout: () => void }) {
           <span className="topbar-date"><CalendarDays size={15} /> {formatDate(new Date().toISOString())}</span>
           <BuildTicker
             refreshKey={tasks.map((task) => `${task.id}:${task.status}:${task.updatedAt}`).join('|')}
+            requested={buildViewRequest}
             onOpenTask={setSelectedId}
             onBuildChanged={(buildNumber) => {
               setToast(`Задеплоєно новий build ${buildNumber}`)
@@ -3201,9 +3333,19 @@ function DeskApp({ user, onLogout }: { user: AuthUser; onLogout: () => void }) {
               <ChevronDown size={14} />
             </div>
             <div className="filter-select">
-              <select value={sortDirection} onChange={(event) => setSortDirection(event.target.value as DateSortDirection)} aria-label="Сортування за датою створення">
-                <option value="desc">Нові спочатку</option>
-                <option value="asc">Старі спочатку</option>
+              <select
+                value={`${sortKey}:${sortDirection}`}
+                onChange={(event) => {
+                  const [key, direction] = event.target.value.split(':') as [TaskSortKey, DateSortDirection]
+                  setSortKey(key)
+                  setSortDirection(direction)
+                }}
+                aria-label="Сортування задач"
+              >
+                <option value="created:desc">Нові спочатку</option>
+                <option value="created:asc">Старі спочатку</option>
+                <option value="build:desc">Білди: новіші</option>
+                <option value="build:asc">Білди: старші</option>
               </select>
               <ChevronDown size={14} />
             </div>
@@ -3219,12 +3361,17 @@ function DeskApp({ user, onLogout }: { user: AuthUser; onLogout: () => void }) {
               updatingId={updatingId}
               queueingId={queueingId}
               scrollable={activeTab === 'auto'}
+              sortKey={sortKey}
               sortDirection={sortDirection}
               onOpenTask={(task) => setSelectedId(task.id)}
               onStatusChange={(task, status) => void changeStatus(task, status)}
-              onSortDirectionChange={setSortDirection}
+              onSortChange={(key, direction) => {
+                setSortKey(key)
+                setSortDirection(direction)
+              }}
               onOpenAttachment={setLightboxAttachment}
               onEnqueue={(task) => void enqueueTaskRun(task)}
+              onOpenBuild={(number) => setBuildViewRequest({ number, nonce: Date.now() })}
             />
           ) : <EmptyState onCreate={() => setCreateOpen(true)} />}
 

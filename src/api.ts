@@ -58,6 +58,10 @@ export function getCurrentBuild() {
   return request<BuildInfo>('/api/builds/current')
 }
 
+export function getBuild(number: string) {
+  return request<BuildInfo>(`/api/builds/${encodeURIComponent(number)}`)
+}
+
 export function getMetrics(days = 28) {
   return request<PipelineMetrics>(`/api/metrics?days=${days}`)
 }

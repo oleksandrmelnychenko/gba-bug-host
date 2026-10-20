@@ -217,8 +217,20 @@ function parseIntakeEvidence(value) {
   }
 }
 
-function taskFromRow(row, attachments = [], agentRun = null) {
+function readyBuildFromRow(row) {
+  if (!row) return null
+  const pending = row.build_number === PENDING_BUILD
   return {
+    number: pending ? null : row.build_number,
+    pending,
+    processedAt: row.processed_at,
+    source: row.source,
+  }
+}
+
+function taskFromRow(row, attachments = [], agentRun = null, readyBuild = null) {
+  return {
+    readyBuild,
     id: row.id,
     title: row.title,
     description: row.description,
@@ -755,11 +767,31 @@ export class TaskStore {
       }
     }
 
+    const readyBuildByTask = new Map()
+    for (const row of this.database.prepare(`
+      SELECT task_id, build_number, processed_at, source
+      FROM build_tasks
+      ORDER BY processed_at DESC, build_number = '${PENDING_BUILD}' DESC
+    `).all()) {
+      if (!readyBuildByTask.has(row.task_id)) readyBuildByTask.set(row.task_id, readyBuildFromRow(row))
+    }
+
     return taskRows.map((row) => taskFromRow(
       row,
       attachmentsByTask.get(row.id) ?? [],
       latestAgentRunByTask.get(row.id) ?? null,
+      readyBuildByTask.get(row.id) ?? null,
     ))
+  }
+
+  readyBuildForTask(taskId) {
+    return readyBuildFromRow(this.database.prepare(`
+      SELECT task_id, build_number, processed_at, source
+      FROM build_tasks
+      WHERE task_id = ?
+      ORDER BY processed_at DESC, build_number = '${PENDING_BUILD}' DESC
+      LIMIT 1
+    `).get(taskId))
   }
 
   find(id) {
@@ -772,7 +804,7 @@ export class TaskStore {
     const agentRun = agentRunFromRow(
       this.database.prepare('SELECT * FROM agent_runs WHERE task_id = ? ORDER BY created_at DESC LIMIT 1').get(id),
     )
-    return taskFromRow(row, attachments, agentRun)
+    return taskFromRow(row, attachments, agentRun, this.readyBuildForTask(id))
   }
 
   commentsForTask(taskId) {
@@ -1760,6 +1792,19 @@ export class TaskStore {
       createdAt: build.created_at,
       bugs: this.buildTaskRows(number).map(mapBuildTask),
       pending: number === PENDING_BUILD ? [] : this.buildTaskRows(PENDING_BUILD).map(mapBuildTask),
+    }
+  }
+
+  buildSnapshot(buildNumber) {
+    const number = String(buildNumber ?? '').trim()
+    if (!number || number === PENDING_BUILD) return null
+    const build = this.database.prepare('SELECT * FROM builds WHERE number = ?').get(number)
+    if (!build) return null
+    return {
+      number: build.number,
+      createdAt: build.created_at,
+      bugs: this.buildTaskRows(number).map(mapBuildTask),
+      pending: [],
     }
   }
 

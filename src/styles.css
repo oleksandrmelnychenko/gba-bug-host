@@ -966,6 +966,7 @@ main {
 .task-table .column-task { width: calc(100% - 855px); }
 .task-table .column-created { width: 118px; }
 .task-table .column-status { width: 175px; }
+.task-table .column-build { width: 172px; }
 .task-table .column-area { width: 120px; }
 .task-table .column-notes { width: 190px; }
 .task-table .column-priority { width: 112px; }
@@ -997,6 +998,10 @@ main {
 
 .sort-heading:hover {
   color: var(--brand-700);
+}
+
+.sort-heading.is-active {
+  color: var(--gray-900);
 }
 
 .task-table td {
@@ -4831,4 +4836,74 @@ main {
 .metrics-attempt {
   margin-left: 6px;
   color: var(--gray-500);
+}
+
+.ready-build-chip {
+  max-width: 100%;
+  min-height: 24px;
+  padding: 3px 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  color: #fff;
+  background: #181d27;
+  border: 1px solid #252b37;
+  border-radius: 6px;
+  box-shadow: 0 2px 5px rgba(10, 13, 18, 0.16);
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.ready-build-chip:hover {
+  background: #252b37;
+  border-color: #414651;
+}
+
+.ready-build-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  background: #17b26a;
+  border-radius: 50%;
+  box-shadow: 0 0 0 3px rgba(23, 178, 106, 0.16);
+}
+
+.ready-build-chip.is-pending {
+  color: var(--gray-600);
+  background: transparent;
+  border: 1px dashed var(--gray-400);
+  box-shadow: none;
+  font-weight: 500;
+}
+
+.ready-build-chip.is-pending:hover {
+  color: var(--gray-900);
+  background: var(--gray-50);
+  border-color: var(--gray-500);
+}
+
+.ready-build-empty {
+  color: var(--gray-400);
+}
+
+.build-popover-back {
+  padding: 3px 8px;
+  color: var(--gray-700);
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.build-popover-back:hover {
+  color: var(--gray-900);
+  border-color: var(--gray-300);
 }
