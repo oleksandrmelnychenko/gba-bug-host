@@ -3,7 +3,7 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { ReleaseWorker, branchName, classifyGitPushFailure, classifyPostDeployCheckFailure, defaultRepoPlan, hasWorkNewerThanGate, isMigrationFile, isReleased, isRetryableValidation, isSandboxLimitedReview, isSentinelTask, lastGateAt, parseComposePs, releaseStatusFor, selectReleasableTasks, selectRepositoryChecks, taskSlug, validateReleaseHandoff, validationGateFingerprint } from '../server/release-worker.js'
+import { ReleaseWorker, branchName, describeCheck, staticChecks, classifyGitPushFailure, classifyPostDeployCheckFailure, defaultRepoPlan, hasWorkNewerThanGate, isMigrationFile, isReleased, isRetryableValidation, isSandboxLimitedReview, isSentinelTask, lastGateAt, parseComposePs, releaseStatusFor, selectReleasableTasks, selectRepositoryChecks, taskSlug, validateReleaseHandoff, validationGateFingerprint } from '../server/release-worker.js'
 import { materializeInstalledDependencies } from '../server/worktree-dependencies.js'
 
 test('every release targets the canonical main branch', () => {
@@ -588,24 +588,61 @@ test('build-помилка не запускає повну команду вд�
   assert.equal(isRetryableValidation(['dotnet', 'test', 'suite.csproj'], { output: 'ConsumerTimeout_ReleasesLease failed' }), true)
 })
 
-test('server release запускає тільки тести відомого зміненого контуру, невідомий source fail-closed бере всі', () => {
-  const plan = defaultRepoPlan['gba-server']
-  const names = (files) => selectRepositoryChecks(plan, files).map((check) => check.join(' '))
-  const api = names(['src/Global.Business.Assistant.Api/Controllers/SalesController.cs'])
-  assert.equal(api.some((name) => name.includes('Api.Tests')), true)
-  assert.equal(api.some((name) => name.includes('Platform.Actors.Tests')), false)
-  assert.equal(api.some((name) => name.includes('Domain.Tests')), false)
+test('server-гейт бере лише відкриті з tests/ тестові проєкти, що залежать від змін, і підхоплює нові', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-dotnet-graph-'))
+  const project = async (relative, references = []) => {
+    await mkdir(path.join(root, path.dirname(relative)), { recursive: true })
+    await writeFile(path.join(root, relative), `<Project>${references.map((reference) => `<ItemGroup><ProjectReference Include="${reference}" /></ItemGroup>`).join('')}</Project>`, 'utf8')
+  }
+  try {
+    await project('src/App.Domain/App.Domain.csproj')
+    await project('src/App.Actors/App.Actors.csproj', ['../App.Domain/App.Domain.csproj'])
+    await project('src/App.Api/App.Api.csproj', ['../App.Actors/App.Actors.csproj'])
+    await project('tests/App.Domain.Tests/App.Domain.Tests.csproj', ['../../src/App.Domain/App.Domain.csproj'])
+    await project('tests/App.Api.Tests/App.Api.Tests.csproj', ['../../src/App.Api/App.Api.csproj'])
+    const worker = new ReleaseWorker({
+      repoPlan: { server: { branch: 'main', root, services: [], checks: [['dotnet', 'build', 'src/App.Api/App.Api.csproj'], { discover: 'dotnet-tests' }] } },
+    })
+    const gate = (files) => worker.resolveRepositoryGate('server', root, files)
 
-  const application = names(['src/Global.Business.Assistant.Application/Sales/SaleService.cs'])
-  assert.equal(application.some((name) => name.includes('Api.Tests')), true)
-  assert.equal(application.some((name) => name.includes('Platform.Actors.Tests')), false)
+    const api = await gate(['src/App.Api/Controllers/SalesController.cs'])
+    assert.deepEqual(api.full.map((check) => check.join(' ')), [
+      'dotnet build src/App.Api/App.Api.csproj',
+      'dotnet test tests/App.Api.Tests/App.Api.Tests.csproj -v q --nologo',
+    ])
+    assert.deepEqual(api.fast.map((check) => check.command.slice(-2)), [['--filter', 'FullyQualifiedName~SalesControllerTests']])
 
-  const actor = names(['src/Global.Business.Assistant.Supply.Actors/SupplyActor.cs'])
-  assert.equal(actor.some((name) => name.includes('Platform.Actors.Tests')), true)
-  assert.equal(actor.some((name) => name.includes('Domain.Tests')), false)
+    const domain = await gate(['src/App.Domain/Money.cs'])
+    assert.equal(domain.full.filter((check) => check[1] === 'test').length, 2)
 
-  const unknown = names(['src/Global.Business.Assistant.SharedKernel/Money.cs'])
-  assert.equal(unknown.filter((name) => name.includes(' test ')).length, 3)
+    await project('tests/App.Actors.Sales.Tests/App.Actors.Sales.Tests.csproj', ['../../src/App.Actors/App.Actors.csproj'])
+    const actors = await gate(['src/App.Actors/Sales/SaleActor.cs'])
+    assert.deepEqual(actors.full.filter((check) => check[1] === 'test').map((check) => check[2]), [
+      'tests/App.Actors.Sales.Tests/App.Actors.Sales.Tests.csproj',
+      'tests/App.Api.Tests/App.Api.Tests.csproj',
+    ])
+
+    const testOnly = await gate(['tests/App.Domain.Tests/MoneyTests.cs'])
+    assert.deepEqual(testOnly.fast.map((check) => check.command.at(-1)), ['FullyQualifiedName~MoneyTests'])
+
+    const unknown = await gate(['src/Orphan/Loose.cs'])
+    assert.equal(unknown.full.filter((check) => check[1] === 'test').length, 3)
+    const shared = await gate(['Directory.Build.props'])
+    assert.equal(shared.full.filter((check) => check[1] === 'test').length, 3)
+    const all = await gate(null)
+    assert.equal(all.full.length, 4)
+    assert.deepEqual(all.fast, [])
+    assert.deepEqual((await gate(['docs/notes.md'])).full.map((check) => check[1]), ['build'])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('план dotnet-репозиторіїв відкриває тестові проєкти динамічно, а промпт описує правило', () => {
+  assert.deepEqual(defaultRepoPlan['gba-server'].checks.at(-1), { discover: 'dotnet-tests' })
+  assert.deepEqual(defaultRepoPlan['gba-ecommerce-api'].checks.at(-1), { discover: 'dotnet-tests' })
+  assert.match(describeCheck({ discover: 'dotnet-tests' }), /tests\/\*\*\/\*Tests\.csproj/)
+  assert.equal(staticChecks(defaultRepoPlan['gba-server']).length, 1)
 })
 
 test('release handoff звіряє repo/services/migrations і дозволяє лише безпечний DEV GET', () => {

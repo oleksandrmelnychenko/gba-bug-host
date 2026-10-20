@@ -9,6 +9,7 @@ import {
   runVerificationSpec,
   validateVerificationSpec,
 } from './verification-spec.js'
+import { affectedDotnetTestProjects, dotnetFastFilter, dotnetTestCommand, readDotnetProjectGraph } from './dotnet-tests.js'
 import { materializeInstalledDependencies } from './worktree-dependencies.js'
 
 const RELEASE_MARKER = /\[released:([^\]]+)\]/g
@@ -76,33 +77,7 @@ export const defaultRepoPlan = {
     services: ['data-concord', 'data-analytics'],
     checks: [
       ['dotnet', 'build', 'src/Global.Business.Assistant.Api/Global.Business.Assistant.Api.csproj', '-v', 'q', '--nologo'],
-      {
-        command: ['dotnet', 'test', 'tests/Global.Business.Assistant.Api.Tests/Global.Business.Assistant.Api.Tests.csproj', '-v', 'q', '--nologo'],
-        paths: [
-          'src/Global.Business.Assistant.Api/',
-          'src/Global.Business.Assistant.WebApi/',
-          'src/Global.Business.Assistant.Application/',
-          'src/Global.Business.Assistant.Database/',
-          'tests/Global.Business.Assistant.Api.Tests/',
-        ],
-      },
-      {
-        command: ['dotnet', 'test', 'tests/Global.Business.Assistant.Platform.Actors.Tests/Global.Business.Assistant.Platform.Actors.Tests.csproj', '-v', 'q', '--nologo'],
-        paths: [
-          '.Actors/',
-          '.Persistence/',
-          'src/Global.Business.Assistant.Database/',
-          'src/Global.Business.Assistant.Domain/',
-          'tests/Global.Business.Assistant.Platform.Actors.Tests/',
-        ],
-      },
-      {
-        command: ['dotnet', 'test', 'tests/Global.Business.Assistant.Domain.Tests/Global.Business.Assistant.Domain.Tests.csproj', '-v', 'q', '--nologo'],
-        paths: [
-          'src/Global.Business.Assistant.Domain/',
-          'tests/Global.Business.Assistant.Domain.Tests/',
-        ],
-      },
+      { discover: 'dotnet-tests' },
     ],
     migration: {
       command: 'env',
@@ -133,7 +108,7 @@ export const defaultRepoPlan = {
     services: ['gba-ecommerce-api'],
     checks: [
       ['dotnet', 'build', 'src/GBA.Ecommerce/GBA.Ecommerce.csproj', '-v', 'q', '--nologo'],
-      ['dotnet', 'test', 'tests/GBA.Ecommerce.Api.Tests/GBA.Ecommerce.Api.Tests.csproj', '-v', 'q', '--nologo'],
+      { discover: 'dotnet-tests' },
     ],
   },
 }
@@ -285,7 +260,17 @@ export function isRetryableValidation(check, result) {
 }
 
 export function checkCommand(check) {
-  return Array.isArray(check) ? check : check.command
+  return Array.isArray(check) ? check : check?.command ?? null
+}
+
+export function staticChecks(plan) {
+  return (plan?.checks ?? []).map(checkCommand).filter(Boolean)
+}
+
+export function describeCheck(check) {
+  if (check?.discover === 'dotnet-tests') return 'dotnet test <кожен tests/**/*Tests.csproj, що транзитивно залежить від змінених проєктів> -v q --nologo'
+  const command = checkCommand(check)
+  return command ? command.join(' ') : ''
 }
 
 export function extractFailingTests(output, limit = 20) {
@@ -308,7 +293,7 @@ export function extractFailingTests(output, limit = 20) {
 }
 
 export function relatedTestCheck(plan, files = []) {
-  const vitest = plan.checks.map(checkCommand).find((command) => command.includes('vitest') && command.includes('run'))
+  const vitest = staticChecks(plan).find((command) => command.includes('vitest') && command.includes('run'))
   if (!vitest) return null
   const sources = [...new Set(files)]
     .filter((file) => /\.(?:[cm]?[jt]sx?)$/.test(file) && !file.includes('node_modules/'))
@@ -377,7 +362,9 @@ export function mainlineRecoveryCandidate(task, repoPlan) {
   if (evidence.failure?.mainlineGate?.status === 'green' || evidence.mainlineRecovery) return null
   const plan = repoPlan[match[1]]
   if (!plan) return null
-  const check = plan.checks.map(checkCommand).find((command) => command.join(' ') === match[2])
+  const known = staticChecks(plan).find((command) => command.join(' ') === match[2])
+  const discovered = !known && /^dotnet test tests\/[\w./-]+\.csproj(?: [\w=./-]+)*$/.test(match[2]) ? match[2].split(' ') : null
+  const check = known ?? discovered
   return check ? { repo: match[1], check } : null
 }
 
@@ -387,15 +374,15 @@ export function pipelineTaskStatusAfterBlock(task) {
 
 export function selectRepositoryChecks(plan, changedFiles = []) {
   const unconditional = plan.checks.filter(Array.isArray)
-  const conditional = plan.checks.filter((check) => !Array.isArray(check))
-  if (conditional.length === 0 || changedFiles.length === 0) return plan.checks.map(checkCommand)
+  const conditional = plan.checks.filter((check) => !Array.isArray(check) && Array.isArray(check?.paths))
+  if (conditional.length === 0 || changedFiles.length === 0) return staticChecks(plan)
 
   const matched = conditional.filter((check) => changedFiles.some((file) =>
     check.paths.some((pathPattern) => file.includes(pathPattern))))
   const sourceOrTestChanged = changedFiles.some((file) => /^(?:src|tests)\//.test(file))
   // Невідомий source-контур не можна тихо лишити без тестів: у такому разі
   // повертаємо повний набір. Вибірковість дозволена лише для відомої мапи.
-  if (sourceOrTestChanged && matched.length === 0) return plan.checks.map(checkCommand)
+  if (sourceOrTestChanged && matched.length === 0) return staticChecks(plan)
   return [...unconditional, ...matched].map(checkCommand)
 }
 
@@ -1670,7 +1657,8 @@ export class ReleaseWorker {
       }
 
       const previousValidation = evidence?.repositories?.[repo]
-      const selectedChecks = selectRepositoryChecks(plan, selection.files)
+      const gate = await this.resolveRepositoryGate(repo, validationDirectory, selection.files)
+      const selectedChecks = gate.full
       const gateFingerprint = validationGateFingerprint(repo, validatedCommit, selection.files, selectedChecks)
       const validationReusable = previousValidation?.validatedCommit === validatedCommit
         && previousValidation?.validation === 'passed'
@@ -1681,18 +1669,16 @@ export class ReleaseWorker {
           phase: 'validating',
           evidence,
         })
-        const related = needsPublish ? relatedTestCheck(plan, await this.existingFiles(validationDirectory, selection.files)) : null
-        if (related) {
-          const quick = await this.runReleaseCheck(repo, related, validationDirectory)
-          if (quick.code !== 0) {
-            const fullCheck = plan.checks.map(checkCommand).find((command) => command.includes('vitest'))
+        for (const quick of needsPublish ? gate.fast : []) {
+          const result = await this.runReleaseCheck(repo, quick.command, validationDirectory)
+          if (result.code !== 0) {
             return {
               ok: false,
               kind: 'validation',
               phase: 'validating',
-              reason: `${repo}: перевірка «${fullCheck.join(' ')}» впала на швидкому прогоні пов’язаних тестів (${extractFailingTests(quick.output, 5).join('; ') || 'деталі в логах'}); mainline не змінено`,
+              reason: `${repo}: перевірка «${quick.full.join(' ')}» впала на швидкому прогоні пов’язаних тестів (${extractFailingTests(result.output, 5).join('; ') || 'деталі в логах'}); mainline не змінено`,
               evidence,
-              failedGate: { repo, check: fullCheck, baselineCommit },
+              failedGate: { repo, check: quick.full, baselineCommit },
             }
           }
         }
@@ -1821,6 +1807,28 @@ export class ReleaseWorker {
       alreadyMerged: prepared.every((item) => item.selection.mode !== 'candidate'),
       repositoryEvidence: evidence.repositories,
     }
+  }
+
+  async resolveRepositoryGate(repo, directory, changedFiles = null) {
+    const plan = this.repoPlan[repo]
+    const full = changedFiles === null ? staticChecks(plan) : selectRepositoryChecks(plan, changedFiles)
+    const fast = []
+    if (changedFiles !== null) {
+      const related = relatedTestCheck(plan, await this.existingFiles(directory, changedFiles))
+      const vitest = staticChecks(plan).find((command) => command.includes('vitest'))
+      if (related && vitest) fast.push({ command: related, full: vitest })
+    }
+    if (plan.checks.some((check) => check?.discover === 'dotnet-tests')) {
+      const graph = await readDotnetProjectGraph(directory)
+      const affected = affectedDotnetTestProjects(graph, changedFiles)
+      for (const project of affected.projects) {
+        const command = dotnetTestCommand(project)
+        full.push(command)
+        const filter = changedFiles === null ? null : dotnetFastFilter(graph, project, changedFiles)
+        if (filter) fast.push({ command: [...command, '--filter', filter], full: command })
+      }
+    }
+    return { fast, full }
   }
 
   async existingFiles(directory, files = []) {
@@ -2236,7 +2244,12 @@ export class ReleaseWorker {
       if (state?.sha === sha) continue
       let red = null
       let incomplete = null
-      for (const check of plan.checks.map(checkCommand)) {
+      const prepared = await this.ensureDetachedWorktree(repo, path.join(this.probeWorktreesDirectory, repo), sha)
+      const checks = prepared.ok
+        ? (await this.resolveRepositoryGate(repo, path.join(this.probeWorktreesDirectory, repo), null)).full
+        : []
+      if (!prepared.ok) incomplete = { status: 'error', reason: prepared.reason }
+      for (const check of checks) {
         const probe = await this.probeMainlineGate(repo, sha, check, { preemptible: true })
         if (probe.status === 'red') {
           red = probe

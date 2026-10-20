@@ -14,7 +14,7 @@ import {
   isPipelineComment,
   selectReasoningEffort,
 } from './codex-context.js'
-import { checkCommand, defaultRepoPlan, isSandboxLimitedReview } from './release-worker.js'
+import { defaultRepoPlan, describeCheck, isSandboxLimitedReview } from './release-worker.js'
 import {
   DEFAULT_DEV_API_PROXY_URL,
   VERIFY_SPEC_DIRECTORY,
@@ -232,7 +232,7 @@ async function pathExists(filePath) {
 }
 
 function repositoryChecks(name) {
-  return (defaultRepoPlan[name]?.checks ?? []).map(checkCommand)
+  return (defaultRepoPlan[name]?.checks ?? []).map(describeCheck).filter(Boolean)
 }
 
 export function terminateProcessTree(child, signal = 'SIGTERM') {
@@ -664,7 +664,7 @@ export function buildPrompt(task, run, mediaPaths, worktrees, referenceRepositor
   const stack = worktrees
     .map((worktree) => {
       const checks = repositoryChecks(worktree.name)
-        .map((check) => `    ${check.join(' ')}`)
+        .map((check) => `    ${check}`)
         .join('\n')
       const services = defaultRepoPlan[worktree.name]?.services ?? []
       return `- ${worktree.name}: ./${worktree.name} (worktree репозиторію ${worktree.repositoryPath})\n  Authoritative baseline: ${worktree.baselineCommit} (${worktree.baselineState})${services.length ? `\n  DEV-сервіси: ${services.join(', ')}` : ''}${checks ? `\n  Перевірки:\n${checks}` : ''}`

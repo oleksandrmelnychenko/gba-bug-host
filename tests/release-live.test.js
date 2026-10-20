@@ -564,3 +564,19 @@ test('реліз спершу ганяє пов’язані vitest-тести �
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('відновлення розпізнає і динамічно відкритий dotnet-тестовий проєкт', () => {
+  const plan = { 'gba-server': { branch: 'main', root: '/x', services: [], checks: [['dotnet', 'build', 'src/A.csproj'], { discover: 'dotnet-tests' }] } }
+  const task = {
+    status: 'blocked',
+    agentRun: {
+      status: 'completed',
+      releaseStatus: 'blocked',
+      releaseError: 'gba-server: перевірка «dotnet test tests/App.Actors.Sales.Tests/App.Actors.Sales.Tests.csproj -v q --nologo» впала; mainline не змінено',
+      releaseEvidence: {},
+    },
+  }
+  assert.deepEqual(mainlineRecoveryCandidate(task, plan)?.check, ['dotnet', 'test', 'tests/App.Actors.Sales.Tests/App.Actors.Sales.Tests.csproj', '-v', 'q', '--nologo'])
+  const injected = { ...task, agentRun: { ...task.agentRun, releaseError: 'gba-server: перевірка «dotnet test tests/x.csproj; rm -rf /» впала' } }
+  assert.equal(mainlineRecoveryCandidate(injected, plan), null)
+})
