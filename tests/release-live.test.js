@@ -808,3 +808,52 @@ test('UI spec для екрана, закритого для QA Verifier, не �
     assert.equal(result.evidence.status, 'unverifiable')
   })
 })
+
+test('guardian на хвості BUG-1393 не відкриває MAIN RED, а підтвердження без назв тестів нічого не доводить', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const tail = await readFile(new URL('./fixtures/bug-1393-vitest-tail.txt', import.meta.url), 'utf8')
+  const originalFetch = global.fetch
+  const posts = []
+  global.fetch = async (url, init = {}) => {
+    if (init.method === 'POST' && String(url).endsWith('/api/tasks')) {
+      posts.push(Object.fromEntries(init.body.entries()))
+      return { ok: true, json: async () => ({ id: 'BUG-MR' }) }
+    }
+    return { ok: true, json: async () => [] }
+  }
+  let output = tail
+  try {
+    await withWorker(async ({ worker }) => {
+      worker.runProcess = async (command) => {
+        if (command === 'git') return { code: 0, output: shaA }
+        if (command !== 'verify') return { code: 0, output: '' }
+        return { code: 1, output }
+      }
+      const probe = await worker.probeMainlineGate('repo', shaA, gate)
+      assert.equal(probe.status, 'environment')
+      await worker.guardMainlines()
+      assert.equal(worker.guardianState.get('repo').status, 'environment')
+      assert.equal(posts.length, 0)
+
+      output = 'build failed without recognisable test names'
+      const confirmation = await worker.confirmMainRed('repo', shaA, { check: gate, failures: [] })
+      assert.equal(confirmation.decided, true)
+      assert.equal(confirmation.confirmed, false)
+    }, { guardianEnabled: true })
+  } finally {
+    global.fetch = originalFetch
+  }
+})
+
+test('підсумок vitest зі stdout не губиться за потоком помилок у stderr', async () => {
+  await withWorker(async ({ worker }) => {
+    worker.runProcess = async () => ({
+      code: 1,
+      output: 'x'.repeat(100) + '\nError: Hook timed out in 30000ms.\n⎯⎯[1/600]⎯',
+      stdoutTail: ' Test Files  300 failed | 785 passed (1085)\n      Tests  600 failed | 5622 passed (6222)\n',
+    })
+    const result = await worker.runReleaseCheck('repo', ['npx', 'vitest', 'run'], '/tmp')
+    assert.equal(result.environment, true)
+    assert.match(result.output, /Test Files {2}300 failed/)
+  })
+})

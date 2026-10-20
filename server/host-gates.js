@@ -6,6 +6,20 @@ export const DEFAULT_GATE_LOCK_DIRECTORY = '/run/lock/gba-gates'
 const TIMEOUT_PATTERN = /(?:Hook|Test) timed out in \d+\s*ms|timed out after \d+\s*ms|\bTimeoutError\b|Timed out waiting/gi
 const CRASH_PATTERN = /Worker exited unexpectedly|Tinypool|ERR_IPC_CHANNEL_CLOSED|Test host process crashed|The active test run was aborted|Reason: Test host process|JavaScript heap out of memory|\bENOMEM\b|Cannot allocate memory|Killed\s*$/im
 
+const ANSI_PATTERN = /\u001b\[[0-9;?]*[ -/]*[@-~]/g
+
+export function stripAnsi(value) {
+  return String(value ?? '').replace(ANSI_PATTERN, '')
+}
+
+export function gateSummaryLines(output) {
+  return stripAnsi(output)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => /^(?:Test Files|Tests|Errors?|Duration)\s/.test(line) || /^(?:Failed|Passed)!\s*-/.test(line))
+    .slice(-6)
+}
+
 export function gateKind(command = []) {
   const joined = command.join(' ')
   if (command[0] === 'dotnet' && command[1] === 'test') return 'dotnet-test'
@@ -16,25 +30,27 @@ export function gateKind(command = []) {
   return 'other'
 }
 
-export function classifyGateOutput(output, { failureRatio = 0.05 } = {}) {
-  const text = String(output ?? '')
+export function classifyGateOutput(output, { failureRatio = 0.05, massFailures = 100 } = {}) {
+  const text = stripAnsi(output)
   const files = /Test Files\s+(\d+)\s+failed(?:\s*\|\s*(\d+)\s+passed)?[^(\n]*\((\d+)\)/.exec(text)
   const tests = /\bTests\s+(\d+)\s+failed/.exec(text)
   const dotnet = /Failed!\s*-\s*Failed:\s*(\d+),\s*Passed:\s*(\d+)/.exec(text)
+  const counters = [...text.matchAll(/\[(\d+)\/(\d+)\]/g)].map((match) => Number(match[2]))
+  const reportedFailures = counters.length > 0 ? Math.max(...counters) : 0
   const failedFiles = files ? Number(files[1]) : 0
   const totalFiles = files ? Number(files[3]) : 0
-  const failedTests = tests ? Number(tests[1]) : dotnet ? Number(dotnet[1]) : 0
+  const failedTests = tests ? Number(tests[1]) : dotnet ? Number(dotnet[1]) : reportedFailures
   const totalTests = dotnet ? Number(dotnet[1]) + Number(dotnet[2]) : 0
   const timeouts = (text.match(TIMEOUT_PATTERN) ?? []).length
   const failureLines = (text.match(/^\s*(?:FAIL|×|✗)\s+\S/gm) ?? []).length + (text.match(/^\s*Failed\s+\S/gm) ?? []).length
   const crashed = CRASH_PATTERN.test(text)
   const massFiles = totalFiles > 0 && failedFiles / totalFiles > failureRatio
-  const massTests = totalTests > 0 && failedTests / totalTests > failureRatio
+  const massTests = (totalTests > 0 && failedTests / totalTests > failureRatio) || failedTests >= massFailures
   const timeoutDominated = timeouts > 0 && timeouts >= Math.max(1, failureLines) * 0.5
   const environment = crashed || (timeouts > 0 && (massFiles || massTests)) || (timeoutDominated && (failedFiles >= 3 || failedTests >= 5 || failureLines >= 5))
   const reasons = []
   if (crashed) reasons.push('падіння воркерів/testhost або нестача пам’яті')
-  if (timeouts > 0 && (massFiles || massTests)) reasons.push(`масові таймаути: ${failedFiles || failedTests} з ${totalFiles || totalTests}`)
+  if (timeouts > 0 && (massFiles || massTests)) reasons.push(`масові таймаути: ${failedFiles || failedTests} з ${totalFiles || totalTests || '?'}`)
   else if (timeoutDominated) reasons.push(`більшість падінь — таймаути (${timeouts})`)
   return { environment, reasons, failedFiles, totalFiles, failedTests, timeouts, crashed }
 }

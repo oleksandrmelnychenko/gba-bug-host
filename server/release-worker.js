@@ -11,7 +11,7 @@ import {
   validateVerificationSpec,
 } from './verification-spec.js'
 import { affectedDotnetTestProjects, dotnetFastFilter, dotnetTestCommand, readDotnetProjectGraph } from './dotnet-tests.js'
-import { HostGateLimiter, classifyGateOutput, gateKind, reducedWorkersCommand } from './host-gates.js'
+import { HostGateLimiter, classifyGateOutput, gateKind, gateSummaryLines, reducedWorkersCommand, stripAnsi } from './host-gates.js'
 import { materializeInstalledDependencies } from './worktree-dependencies.js'
 
 const RELEASE_MARKER = /\[released:([^\]]+)\]/g
@@ -277,7 +277,7 @@ export function describeCheck(check) {
 
 export function extractFailingTests(output, limit = 20) {
   const found = []
-  for (const line of String(output ?? '').split('\n')) {
+  for (const line of stripAnsi(output).split('\n')) {
     const trimmed = line.trim()
     let value = ''
     const vitest = /^(?:FAIL|×|✗)\s+(.+)$/.exec(trimmed)
@@ -562,8 +562,12 @@ function runProcess(command, args, { cwd, timeoutMs = DEFAULT_PROCESS_TIMEOUT_MS
     })
     onChild?.(child)
     let output = ''
+    let stdoutTail = ''
     let timedOut = false
-    child.stdout.on('data', (chunk) => { output = (output + chunk.toString()).slice(-20000) })
+    child.stdout.on('data', (chunk) => {
+      output = (output + chunk.toString()).slice(-20000)
+      stdoutTail = (stdoutTail + chunk.toString()).slice(-8000)
+    })
     child.stderr.on('data', (chunk) => { output = (output + chunk.toString()).slice(-20000) })
     child.on('error', (error) => resolve({ code: 1, output: String(error) }))
     const timeout = setTimeout(() => {
@@ -574,7 +578,7 @@ function runProcess(command, args, { cwd, timeoutMs = DEFAULT_PROCESS_TIMEOUT_MS
     timeout.unref?.()
     child.on('close', (code) => {
       clearTimeout(timeout)
-      resolve({ code: code ?? 1, output, timedOut })
+      resolve({ code: code ?? 1, output, stdoutTail, timedOut })
     })
   })
 }
@@ -2166,8 +2170,16 @@ export class ReleaseWorker {
     }
   }
 
-  async runReleaseCheck(repo, check, cwd, { onChild, background = false } = {}) {
-    const run = (command) => this.runProcess(command[0], command.slice(1), { cwd, onChild })
+  async runReleaseCheck(repo, check, cwd, { onChild, background = false, onStart } = {}) {
+    const run = (command) => {
+      onStart?.(command)
+      return this.runProcess(command[0], command.slice(1), { cwd, onChild }).then((result) => ({
+        ...result,
+        output: result.stdoutTail && !String(result.output ?? '').includes(result.stdoutTail.slice(-200))
+          ? `${result.output}\n${gateSummaryLines(result.stdoutTail).join('\n')}`
+          : result.output,
+      }))
+    }
     const first = await this.withGateSlot(check, { background }, (slot) => run(slot && !slot.release ? reducedWorkersCommand(check) : check))
     if (first.deferred || first.code === 0) return first
     const classification = classifyGateOutput(first.output)
@@ -2539,7 +2551,6 @@ export class ReleaseWorker {
     } catch (error) {
       return { status: 'error', reason: `${repo}: ${error.message}`, at: new Date().toISOString() }
     }
-    console.log(`[release] ${repo}: перевіряю «${check.join(' ')}» на чистому mainline ${sha.slice(0, 12)}`)
     let child = null
     let preempted = false
     const watcher = preemptible
@@ -2554,7 +2565,11 @@ export class ReleaseWorker {
       : null
     let result
     try {
-      result = await this.runReleaseCheck(repo, check, root, { onChild: (spawned) => { child = spawned }, background: preemptible })
+      result = await this.runReleaseCheck(repo, check, root, {
+        onChild: (spawned) => { child = spawned },
+        background: preemptible,
+        onStart: (command) => console.log(`[release] ${repo}: перевіряю «${command.join(' ')}» на чистому mainline ${sha.slice(0, 12)}`),
+      })
     } finally {
       if (watcher) clearInterval(watcher)
     }
@@ -2577,7 +2592,8 @@ export class ReleaseWorker {
       check: check.join(' '),
       retried: Boolean(result.retried),
       failures: result.code === 0 ? [] : extractFailingTests(result.output),
-      output: String(result.output ?? '').slice(-1500),
+      summary: gateSummaryLines(result.output),
+      output: stripAnsi(result.output).slice(-1500),
     }
     await this.mainlineGateCache.set(key, entry)
     return { ...entry, check }
@@ -2702,9 +2718,10 @@ export class ReleaseWorker {
     const before = new Set(red.failures ?? [])
     const after = again.failures ?? []
     const overlap = after.filter((failure) => before.has(failure)).length
-    const confirmed = before.size === 0 && after.length === 0
-      ? true
-      : overlap > 0 && overlap >= Math.min(before.size, after.length) * 0.5
+    const confirmed = before.size > 0 && after.length > 0 && overlap >= Math.min(before.size, after.length) * 0.5
+    if (!confirmed && before.size === 0 && after.length === 0) {
+      console.error(`[release] guardian ${repo}@${sha.slice(0, 12)}: назви тестів, що падають, не вдалося виділити — MAIN RED без доказу не відкриваю`)
+    }
     return { decided: true, confirmed, probe: again }
   }
 

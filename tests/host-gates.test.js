@@ -123,3 +123,24 @@ test('lock-файл мертвого процесу підхоплюється, 
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('точний хвіст BUG-1393 (ANSI-кольори, лічильник [36/2518], без підсумку) — це середовище', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const { extractFailingTests } = await import('../server/release-worker.js')
+  const { gateSummaryLines, stripAnsi } = await import('../server/host-gates.js')
+  const tail = await readFile(new URL('./fixtures/bug-1393-vitest-tail.txt', import.meta.url), 'utf8')
+  assert.match(tail, /\u001b\[41m\u001b\[1m FAIL/)
+  const result = classifyGateOutput(tail)
+  assert.equal(result.environment, true)
+  assert.equal(result.failedTests, 2518)
+  assert.match(result.reasons.join(' '), /масові таймаути: 2518/)
+  assert.deepEqual(extractFailingTests(tail), [
+    'src/features/reports/pages/SupplierDebtReportPanel.test.tsx > aborts deferred old caller output without clearing a newer loading state or leaking old links',
+  ])
+  assert.doesNotMatch(stripAnsi(tail), /\u001b/)
+  const colouredSummary = '\u001b[2m Test Files \u001b[22m \u001b[1m\u001b[31m412 failed\u001b[39m\u001b[22m\u001b[2m | \u001b[22m\u001b[1m\u001b[32m673 passed\u001b[39m\u001b[22m\u001b[90m (1085)\u001b[39m\nError: Hook timed out in 30000ms.'
+  assert.equal(classifyGateOutput(colouredSummary).environment, true)
+  assert.deepEqual(gateSummaryLines(colouredSummary), ['Test Files  412 failed | 673 passed (1085)'])
+  const realRegression = '\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m src/a.test.ts > breaks\nAssertionError: expected 1 to be 2\n\u001b[31m⎯⎯⎯[1/1]⎯\u001b[39m'
+  assert.equal(classifyGateOutput(realRegression).environment, false)
+})
