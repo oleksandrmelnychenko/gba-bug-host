@@ -44,6 +44,9 @@ test('proxy policy пропускає read-маршрути й відсікає 
     '/api/v1/uk/products/search/advanced?value=filter&limit=20',
     '/api/v1/uk/products/write-off/registry',
     '/api/v1/uk/accounting/pay/get',
+    '/api/v1/uk/clients/sales-ukraine/create/search?value=KD02801&limit=20&offset=0',
+    '/api/v1/uk/clients/sales-ukraine/edit/search?value=KD02801',
+    '/api/v1/uk/sales/returns/sales-returns/create/filtered?value=1',
   ]) {
     assert.equal(evaluateDevApiPath(route).ok, true, route)
   }
@@ -61,6 +64,9 @@ test('proxy policy пропускає read-маршрути й відсікає 
     '/api/v1/uk/preorders/new',
     '/api/v1/uk/xml/documents/online-shop-seo/new',
     '/api/v1/uk/protocol/set/edit/act/for/editing',
+    '/api/v1/uk/sales/shipments/update/filtered/auto',
+    '/api/v1/uk/clients/remove/search',
+    '/api/v1/uk/data/sync/search',
     '/api/v1/uk/data/sync/start/session',
     '/api/v1/uk/usermanagement/token',
     '/api/v1/uk/a/../b',

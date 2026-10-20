@@ -22,6 +22,8 @@ export const DENIED_ROUTE_WORDS = new Set([
 ])
 
 const ALLOWED_COMPOUND_SEGMENTS = new Set(['write-off', 'write-offs'])
+const PICKER_SEARCH_TERMINALS = new Set(['search', 'filtered'])
+const PICKER_CONTEXT_VERBS = new Set(['create', 'edit', 'new', 'add', 'update'])
 
 const DENIED_QUERY_KEYS = new Set(['_method', 'x-http-method-override', 'x-method-override', 'method'])
 const ALLOWED_TIME_ZONE = /^[A-Za-z_]+(?:\/[A-Za-z_+-]+){0,2}$/
@@ -65,6 +67,13 @@ export function evaluateDevApiPath(rawTarget) {
   }
 
   const segments = upstreamPath.split('/').filter(Boolean)
+  let lastSegment = ''
+  try {
+    lastSegment = decodeURIComponent(segments.at(-1) ?? '').toLowerCase()
+  } catch {
+    lastSegment = ''
+  }
+  const pickerSearch = PICKER_SEARCH_TERMINALS.has(lastSegment)
   for (const rawSegment of segments) {
     let segment
     try {
@@ -73,7 +82,7 @@ export function evaluateDevApiPath(rawTarget) {
       return { ok: false, reason: `некоректне кодування сегмента «${rawSegment}»` }
     }
     if (segment === '.' || segment === '..') return { ok: false, reason: 'відносні сегменти заборонені' }
-    const denied = routeWords(segment).find((word) => DENIED_ROUTE_WORDS.has(word))
+    const denied = routeWords(segment).find((word) => DENIED_ROUTE_WORDS.has(word) && !(pickerSearch && PICKER_CONTEXT_VERBS.has(word)))
     if (denied) {
       return {
         ok: false,
