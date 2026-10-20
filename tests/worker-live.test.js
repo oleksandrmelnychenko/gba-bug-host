@@ -583,3 +583,42 @@ test('у схемі live-check поле contains стоїть перед expecte
   assert.ok(section.indexOf('contains: {') < section.indexOf('expectedStatus: {'))
   assert.match(section, /required: \['label', 'url', 'contains', 'expectedStatus'\]/)
 })
+
+test('worker готує first-run стан dotnet/NuGet поза sandbox і повідомляє, якщо його немає', async () => {
+  const { prewarmDotnetFirstRun } = await import('../server/codex-worker.js')
+  const { mkdir: makeDirectory, writeFile: write } = await import('node:fs/promises')
+  const home = await mkdtemp(path.join(tmpdir(), 'gba-dotnet-home-'))
+  try {
+    const calls = []
+    const run = async (command, args, options) => {
+      calls.push({ command, args, cwd: options.cwd })
+      await makeDirectory(path.join(home, '.dotnet'), { recursive: true })
+      await write(path.join(home, '.dotnet', '10.0.402.dotnetFirstUseSentinel'), '', 'utf8')
+      await makeDirectory(path.join(home, '.local', 'share', 'NuGet', 'Migrations'), { recursive: true })
+      await write(path.join(home, '.local', 'share', 'NuGet', 'Migrations', '1'), '', 'utf8')
+      return { code: 0, stdout: 'global-packages: /root/.nuget/packages', stderr: '' }
+    }
+    assert.deepEqual(await prewarmDotnetFirstRun({ run, home }), { ok: true, reason: '' })
+    assert.deepEqual(calls[0].args, ['nuget', 'locals', 'global-packages', '--list'])
+
+    const empty = await mkdtemp(path.join(tmpdir(), 'gba-dotnet-empty-'))
+    const failed = await prewarmDotnetFirstRun({ run: async () => ({ code: 1, stdout: '', stderr: 'Read-only file system' }), home: empty })
+    assert.equal(failed.ok, false)
+    assert.match(failed.reason, /Read-only file system/)
+    const missing = await prewarmDotnetFirstRun({ run: async () => { throw new Error('spawn dotnet ENOENT') }, home: empty })
+    assert.match(missing.reason, /dotnet недоступний/)
+    await rm(empty, { recursive: true, force: true })
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('worker image запікає first-run стан dotnet для root і node, а промпт забороняє перенаправляти домівки', async () => {
+  const dockerfile = await readFile(new URL('../Dockerfile', import.meta.url), 'utf8')
+  assert.match(dockerfile, /HOME=\/root dotnet nuget locals global-packages --list/)
+  assert.match(dockerfile, /test -f \/root\/\.local\/share\/NuGet\/Migrations\/1/)
+  assert.match(dockerfile, /HOME=\/home\/node dotnet nuget locals/)
+  const prompt = buildPrompt({ id: 'BUG-1', title: 't', area: 'a', priority: 'medium', status: 'new' }, { attempt: 1, trigger: 'manual' }, [], [], [], '', { networkAccess: true })
+  assert.match(prompt, /Не перенаправляй DOTNET_CLI_HOME, XDG_DATA_HOME чи TMPDIR/)
+  assert.match(prompt, /NuGet-Migrations/)
+})

@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import {
   CODEX_SESSION_MAX_AGE_MS,
@@ -36,6 +36,27 @@ const MAXIMUM_WORKER_CONCURRENCY = 3
 
 export function isUsageLimitFailure(message) {
   return /usage limit|rate limit|too many requests|\b429\b|quota|limit reached|try again (?:at|in)/i.test(String(message ?? ''))
+}
+
+export async function prewarmDotnetFirstRun({
+  run = runProcess,
+  home = process.env.DOTNET_CLI_HOME || process.env.HOME || '',
+} = {}) {
+  let result
+  try {
+    result = await run('dotnet', ['nuget', 'locals', 'global-packages', '--list'], { cwd: home || undefined, timeoutMs: 120_000 })
+  } catch (error) {
+    return { ok: false, reason: `dotnet недоступний: ${error?.message ?? error}` }
+  }
+  const sentinels = home
+    ? (await readdir(path.join(home, '.dotnet')).catch(() => [])).filter((name) => name.endsWith('.dotnetFirstUseSentinel'))
+    : []
+  const migrations = home ? await pathExists(path.join(home, '.local', 'share', 'NuGet', 'Migrations', '1')) : false
+  const ok = result.code === 0 && sentinels.length > 0 && migrations
+  return {
+    ok,
+    reason: ok ? '' : `first-run стан dotnet не підготовлено (exit ${result.code}, sentinel ${sentinels.length > 0}, NuGet migrations ${migrations}): ${tail(`${result.stderr ?? ''}${result.stdout ?? ''}`, 400)}`,
+  }
 }
 
 export function isIncompleteOutputFailure(message) {
@@ -701,7 +722,8 @@ export function buildPrompt(task, run, mediaPaths, worktrees, referenceRepositor
     : 'Середовище перевірок (мережі немає — нічого не встановлюй і не оновлюй):'
   const environmentNet = networkAccess
     ? [
-        '- .NET SDK 10 стоїть у /usr/share/dotnet і доступний як dotnet; кеш NuGet прогрітий, а restore за потреби працює через мережу — не обходь помилки restore через --no-restore, якщо obj/project.assets.json відсутній.',
+        '- .NET SDK 10 стоїть у /usr/share/dotnet і доступний як dotnet; first-run стан dotnet і NuGet (~/.dotnet, ~/.local/share/NuGet/Migrations) підготовлений worker-ом до запуску, а кеш NuGet прогрітий і доступний лише на читання. Не перенаправляй DOTNET_CLI_HOME, XDG_DATA_HOME чи TMPDIR — це ламає first-run (Read-only file system або NuGet-Migrations mutex). Якщо obj/project.assets.json уже є, додавай --no-restore.',
+        '- Якщо dotnet усе ж падає ДО компіляції з «Read-only file system: /root/.dotnet» або «NuGet-Migrations», це дефект середовища worker-а: зафіксуй дослівну помилку як конкретний blocker, а не як провал тестів.',
         '- dotnet test, VSTest/testhost, vitest і next build у цьому sandbox працюють повноцінно: запускай точні тести зачеплених репозиторіїв і став PASS/FAIL за їхнім фактичним результатом. Помилка socket/port тепер є реальним сигналом, а не обмеженням середовища.',
         '- Публічні DEV vhost-и (*-dev.85.17.167.167.nip.io) — лише read-only GET; авторизовані виклики DEV API — тільки через read-only проксі із секції «Live-перевірка на DEV». Ніяких mutation-запитів, логінів, токенів чи змін даних.',
       ].join('\n')

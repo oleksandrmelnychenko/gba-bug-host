@@ -38,6 +38,9 @@ RUN apt-get update \
     && ln -sf "${DOTNET_ROOT}/dotnet" /usr/local/bin/dotnet \
     && rm /tmp/dotnet-install.sh \
     && npm install --global "@openai/codex@${CODEX_VERSION}"
+RUN HOME=/root dotnet nuget locals global-packages --list \
+    && test -f /root/.local/share/NuGet/Migrations/1 \
+    && su node -s /bin/sh -c 'HOME=/home/node dotnet nuget locals global-packages --list'
 USER node
 CMD ["npm", "run", "worker"]
 

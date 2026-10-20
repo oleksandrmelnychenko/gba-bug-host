@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { CodexWorker } from './codex-worker.js'
+import { CodexWorker, prewarmDotnetFirstRun } from './codex-worker.js'
 import { TaskStore } from './store.js'
 
 const rootDirectory = process.cwd()
@@ -8,6 +8,11 @@ const uploadsDirectory = process.env.UPLOAD_DIR ?? path.join(rootDirectory, 'pub
 const store = new TaskStore(dataDirectory)
 
 await store.ensureReady()
+
+if (process.env.CODEX_DOTNET_PREWARM !== 'false') {
+  const prewarm = await prewarmDotnetFirstRun()
+  console.log(prewarm.ok ? 'Codex worker: first-run стан dotnet/NuGet підготовлено.' : `Codex worker: ${prewarm.reason}`)
+}
 
 const worker = new CodexWorker({ store, rootDirectory, dataDirectory, uploadsDirectory })
 worker.start()
