@@ -288,6 +288,36 @@ export function checkCommand(check) {
   return Array.isArray(check) ? check : check.command
 }
 
+export function extractFailingTests(output, limit = 20) {
+  const found = []
+  for (const line of String(output ?? '').split('\n')) {
+    const trimmed = line.trim()
+    let value = ''
+    const vitest = /^(?:FAIL|×|✗)\s+(.+)$/.exec(trimmed)
+    const dotnet = /^Failed\s+(.+?)(?:\s+\[[^\]]*\])?$/.exec(trimmed)
+    const compiler = /^(.*?)\(\d+,\d+\):\s*error\s+((?:TS|CS)\d+):\s*(.+?)(?:\s+\[[^\]]+\])?$/.exec(trimmed)
+    if (compiler) value = `${compiler[1].split('/').slice(-2).join('/')}: ${compiler[2]} ${compiler[3]}`
+    else if (vitest) value = vitest[1]
+    else if (dotnet) value = dotnet[1]
+    if (!value) continue
+    value = value.slice(0, 240)
+    if (!found.includes(value)) found.push(value)
+    if (found.length >= limit) break
+  }
+  return found
+}
+
+export function relatedTestCheck(plan, files = []) {
+  const vitest = plan.checks.map(checkCommand).find((command) => command.includes('vitest') && command.includes('run'))
+  if (!vitest) return null
+  const sources = [...new Set(files)]
+    .filter((file) => /\.(?:[cm]?[jt]sx?)$/.test(file) && !file.includes('node_modules/'))
+    .slice(0, 200)
+  if (sources.length === 0) return null
+  const workers = vitest.find((argument) => argument.startsWith('--maxWorkers='))
+  return ['npx', 'vitest', 'related', '--run', '--silent', ...(workers ? [workers] : []), ...sources]
+}
+
 export function mainlineGateKey(repo, sha, check) {
   return `${repo}@${sha}#${(Array.isArray(check) ? check : [check]).join(' ')}`
 }
@@ -596,6 +626,9 @@ export class ReleaseWorker {
     verificationRunner = runVerificationSpec,
     verificationAttempts = Number.parseInt(process.env.RELEASE_VERIFICATION_ATTEMPTS ?? '3', 10),
     verificationRetryDelayMs = Number.parseInt(process.env.RELEASE_VERIFICATION_RETRY_DELAY_MS ?? '20000', 10),
+    guardianEnabled = false,
+    guardianAiMode = process.env.RELEASE_GUARDIAN_AI_MODE === 'auto' ? 'auto' : 'off',
+    guardianPreemptPollMs = Number.parseInt(process.env.RELEASE_GUARDIAN_PREEMPT_POLL_MS ?? '20000', 10),
   } = {}) {
     this.deskBaseUrl = deskBaseUrl.replace(/\/$/, '')
     this.worktreesDirectory = worktreesDirectory
@@ -621,6 +654,10 @@ export class ReleaseWorker {
     this.verificationRunner = verificationRunner
     this.verificationAttempts = Number.isInteger(verificationAttempts) && verificationAttempts > 0 ? verificationAttempts : 3
     this.verificationRetryDelayMs = Number.isInteger(verificationRetryDelayMs) && verificationRetryDelayMs >= 0 ? verificationRetryDelayMs : 20_000
+    this.guardianEnabled = guardianEnabled
+    this.guardianAiMode = guardianAiMode
+    this.guardianPreemptPollMs = Number.isInteger(guardianPreemptPollMs) && guardianPreemptPollMs > 0 ? guardianPreemptPollMs : 20_000
+    this.guardianState = new Map()
     this.lastOriginFetchAt = 0
     this.busy = false
     this.leaseStarted = false
@@ -850,6 +887,7 @@ export class ReleaseWorker {
         }
       }
       await this.recoverMainlineBlockedTasks(tasks)
+      await this.guardMainlines()
     } catch (error) {
       console.error(`[release] tick: ${error.message}`)
     } finally {
@@ -1643,6 +1681,21 @@ export class ReleaseWorker {
           phase: 'validating',
           evidence,
         })
+        const related = needsPublish ? relatedTestCheck(plan, await this.existingFiles(validationDirectory, selection.files)) : null
+        if (related) {
+          const quick = await this.runReleaseCheck(repo, related, validationDirectory)
+          if (quick.code !== 0) {
+            const fullCheck = plan.checks.map(checkCommand).find((command) => command.includes('vitest'))
+            return {
+              ok: false,
+              kind: 'validation',
+              phase: 'validating',
+              reason: `${repo}: перевірка «${fullCheck.join(' ')}» впала на швидкому прогоні пов’язаних тестів (${extractFailingTests(quick.output, 5).join('; ') || 'деталі в логах'}); mainline не змінено`,
+              evidence,
+              failedGate: { repo, check: fullCheck, baselineCommit },
+            }
+          }
+        }
         for (const check of selectedChecks) {
           const result = await this.runReleaseCheck(repo, check, validationDirectory)
           if (result.code !== 0) {
@@ -1770,8 +1823,16 @@ export class ReleaseWorker {
     }
   }
 
-  async runReleaseCheck(repo, check, cwd) {
-    const run = () => this.runProcess(check[0], check.slice(1), { cwd })
+  async existingFiles(directory, files = []) {
+    const present = []
+    for (const file of files) {
+      if (await pathExists(path.join(directory, file))) present.push(file)
+    }
+    return present
+  }
+
+  async runReleaseCheck(repo, check, cwd, { onChild } = {}) {
+    const run = () => this.runProcess(check[0], check.slice(1), { cwd, onChild })
     const first = await run()
     if (first.code === 0) return first
     if (!isRetryableValidation(check, first)) return first
@@ -1997,7 +2058,15 @@ export class ReleaseWorker {
     }
   }
 
-  async probeMainlineGate(repo, sha, check) {
+  async releaseWorkPending() {
+    const response = await fetch(`${this.deskBaseUrl}/api/tasks`, { headers: this.requestHeaders() }).catch(() => null)
+    if (!response?.ok) return false
+    const tasks = await response.json().catch(() => [])
+    return selectReleasableTasks(Array.isArray(tasks) ? tasks : [])
+      .some((task) => task.agentRun?.releaseStatus !== 'waiting_mainline')
+  }
+
+  async probeMainlineGate(repo, sha, check, { preemptible = false } = {}) {
     const plan = this.repoPlan[repo]
     if (!plan || !sha || !Array.isArray(check)) return { status: 'error', reason: 'невідомий repo/SHA/гейт для перевірки mainline' }
     const key = mainlineGateKey(repo, sha, check)
@@ -2014,7 +2083,25 @@ export class ReleaseWorker {
       return { status: 'error', reason: `${repo}: ${error.message}`, at: new Date().toISOString() }
     }
     console.log(`[release] ${repo}: перевіряю «${check.join(' ')}» на чистому mainline ${sha.slice(0, 12)}`)
-    const result = await this.runReleaseCheck(repo, check, root)
+    let child = null
+    let preempted = false
+    const watcher = preemptible
+      ? setInterval(async () => {
+        if (preempted || !child) return
+        if (await this.releaseWorkPending()) {
+          preempted = true
+          terminateProcessTree(child, 'SIGTERM')
+          setTimeout(() => terminateProcessTree(child, 'SIGKILL'), 5_000).unref?.()
+        }
+      }, this.guardianPreemptPollMs)
+      : null
+    let result
+    try {
+      result = await this.runReleaseCheck(repo, check, root, { onChild: (spawned) => { child = spawned } })
+    } finally {
+      if (watcher) clearInterval(watcher)
+    }
+    if (preempted) return { status: 'aborted', reason: 'поступив реліз — фонову перевірку mainline відкладено', at: new Date().toISOString(), check }
     const entry = {
       status: result.code === 0 ? 'green' : 'red',
       at: new Date().toISOString(),
@@ -2022,6 +2109,7 @@ export class ReleaseWorker {
       sha,
       check: check.join(' '),
       retried: Boolean(result.retried),
+      failures: result.code === 0 ? [] : extractFailingTests(result.output),
       output: String(result.output ?? '').slice(-1500),
     }
     await this.mainlineGateCache.set(key, entry)
@@ -2139,6 +2227,102 @@ export class ReleaseWorker {
     }
   }
 
+  async guardMainlines() {
+    if (!this.guardianEnabled) return
+    for (const [repo, plan] of Object.entries(this.repoPlan)) {
+      const sha = await this.resolveMainlineCommit(plan)
+      if (!sha) continue
+      const state = this.guardianState.get(repo)
+      if (state?.sha === sha) continue
+      let red = null
+      let incomplete = null
+      for (const check of plan.checks.map(checkCommand)) {
+        const probe = await this.probeMainlineGate(repo, sha, check, { preemptible: true })
+        if (probe.status === 'red') {
+          red = probe
+          break
+        }
+        if (probe.status !== 'green') {
+          incomplete = probe
+          break
+        }
+      }
+      if (incomplete?.status === 'aborted') return
+      this.guardianState.set(repo, { sha, status: red ? 'red' : incomplete ? 'error' : 'green', at: new Date().toISOString() })
+      if (incomplete) {
+        console.error(`[release] guardian ${repo}@${sha.slice(0, 12)}: ${incomplete.reason ?? 'перевірка не відбулася'}`)
+        return
+      }
+      if (red) await this.reportMainRed(repo, plan, sha, red)
+      else await this.reportMainGreen(repo, plan, sha)
+      return
+    }
+  }
+
+  async findMainRedTask(repo) {
+    const response = await fetch(`${this.deskBaseUrl}/api/tasks`, { headers: this.requestHeaders() }).catch(() => null)
+    if (!response?.ok) return { ok: false, task: null }
+    const tasks = await response.json().catch(() => [])
+    const marker = `[main-red:${repo}]`
+    return {
+      ok: true,
+      task: (Array.isArray(tasks) ? tasks : []).find((task) => task.status !== 'done' && (task.notes ?? '').includes(marker)) ?? null,
+    }
+  }
+
+  async reportMainRed(repo, plan, sha, probe) {
+    const found = await this.findMainRedTask(repo)
+    if (!found.ok) return
+    const shortSha = sha.slice(0, 12)
+    const failures = probe.failures?.length ? probe.failures : extractFailingTests(probe.output)
+    const description = [
+      `Гейт «${probe.check?.join?.(' ') ?? probe.check}» червоний на чистому origin/${plan.branch}@${shortSha} (${repo}).`,
+      'Поки mainline червоний, релізи задач на цьому гейті чекають у статусі waiting_mainline і стартують автоматично, щойно main позеленіє.',
+      failures.length ? `Тести/помилки, що падають:\n${failures.map((item) => `- ${item}`).join('\n')}` : `Хвіст виводу:\n${String(probe.output ?? '').slice(-1200)}`,
+    ].join('\n\n')
+    const title = `MAIN RED ${repo}@${shortSha}`
+    if (found.task) {
+      if ((found.task.notes ?? '').includes(`[main-red-sha:${sha}]`)) return
+      await fetch(`${this.deskBaseUrl}/api/tasks/${encodeURIComponent(found.task.id)}`, {
+        method: 'PATCH',
+        headers: this.requestHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({
+          title,
+          description: description.slice(0, 9_000),
+          notes: `${found.task.notes ?? ''}\n[main-red-sha:${sha}] ${new Date().toISOString()}`.slice(-9_900),
+        }),
+      }).catch(() => undefined)
+      await this.comment(found.task, `[конвеєр:main-red] Mainline ${repo} досі червоний на новому origin/${plan.branch}@${shortSha}.\n${failures.slice(0, 10).map((item) => `- ${item}`).join('\n')}`)
+      return
+    }
+    const body = new FormData()
+    body.set('title', title)
+    body.set('description', description.slice(0, 9_000))
+    body.set('project', ['gba_ecommerce', 'gba-ecommerce-api'].includes(repo) ? 'ecommerce' : 'console')
+    body.set('priority', 'high')
+    body.set('area', 'Mainline')
+    body.set('aiMode', this.guardianAiMode)
+    body.set('notes', `[main-red:${repo}] [main-red-sha:${sha}] ${new Date().toISOString()}`)
+    const response = await fetch(`${this.deskBaseUrl}/api/tasks`, { method: 'POST', headers: this.requestHeaders(), body }).catch(() => null)
+    if (!response?.ok) {
+      console.error(`[release] guardian: не вдалося створити задачу ${title} (${response?.status ?? 'network'})`)
+      return
+    }
+    console.error(`[release] guardian: ${title}`)
+  }
+
+  async reportMainGreen(repo, plan, sha) {
+    const found = await this.findMainRedTask(repo)
+    if (!found.ok || !found.task) return
+    await this.comment(found.task, `[конвеєр:main-green] Mainline ${repo} знову зелений на origin/${plan.branch}@${sha.slice(0, 12)} — усі гейти пройшли. Релізи, що чекали, стартують автоматично.`)
+    await fetch(`${this.deskBaseUrl}/api/tasks/${encodeURIComponent(found.task.id)}`, {
+      method: 'PATCH',
+      headers: this.requestHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ status: 'done' }),
+    }).catch(() => undefined)
+    console.log(`[release] guardian: ${repo}@${sha.slice(0, 12)} зелений, ${found.task.id} закрито`)
+  }
+
   async readConsoleBuild() {
     const probe = this.probes['gba-console']
     if (probe) {
@@ -2198,7 +2382,7 @@ export class ReleaseWorker {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const worker = new ReleaseWorker()
+  const worker = new ReleaseWorker({ guardianEnabled: process.env.RELEASE_GUARDIAN !== 'off' })
   worker.start()
   const shutdown = async () => {
     await worker.stop()

@@ -7,8 +7,10 @@ import {
   MAX_VERIFICATION_ATTEMPTS,
   MainlineGateCache,
   ReleaseWorker,
+  extractFailingTests,
   mainlineGateKey,
   mainlineRecoveryCandidate,
+  relatedTestCheck,
   selectReleasableTasks,
 } from '../server/release-worker.js'
 
@@ -400,4 +402,165 @@ test('втрачений повторний запуск після live-пер�
     ])
     assert.deepEqual(record.followUps.map((item) => [item.taskId, item.comment]), [['A', 'FAIL: 0/1']])
   })
+})
+
+test('з виводу гейтів дістаються саме тести й помилки компіляції, що падають', () => {
+  const output = [
+    ' FAIL  src/sales/Wizard.test.tsx > Wizard > keeps storage hidden on step 3',
+    ' ✓ src/ok.test.ts (3 tests)',
+    '  Failed Global.Business.Assistant.Tests.SalesTests.Recalculate [12 ms]',
+    'src/x/File.cs(10,5): error CS1002: ; expected [/src/x/X.csproj]',
+    "src/app.ts(3,1): error TS2322: Type 'string' is not assignable",
+    ' FAIL  src/sales/Wizard.test.tsx > Wizard > keeps storage hidden on step 3',
+  ].join('\n')
+  assert.deepEqual(extractFailingTests(output), [
+    'src/sales/Wizard.test.tsx > Wizard > keeps storage hidden on step 3',
+    'Global.Business.Assistant.Tests.SalesTests.Recalculate',
+    'x/File.cs: CS1002 ; expected',
+    "src/app.ts: TS2322 Type 'string' is not assignable",
+  ])
+})
+
+test('швидкий прогін пов’язаних тестів будується лише для змінених JS/TS файлів', () => {
+  const plan = { checks: [['npx', 'vitest', 'run', '--silent', '--maxWorkers=8'], ['npm', 'run', 'build']] }
+  assert.deepEqual(
+    relatedTestCheck(plan, ['src/a.tsx', 'README.md', 'src/b.test.ts', 'src/a.tsx']),
+    ['npx', 'vitest', 'related', '--run', '--silent', '--maxWorkers=8', 'src/a.tsx', 'src/b.test.ts'],
+  )
+  assert.equal(relatedTestCheck(plan, ['README.md']), null)
+  assert.equal(relatedTestCheck({ checks: [['dotnet', 'test']] }, ['src/a.ts']), null)
+})
+
+test('guardian на червоному main відкриває одну задачу MAIN RED і оновлює її на новому SHA', async () => {
+  const originalFetch = global.fetch
+  const deskTasks = []
+  const posts = []
+  const patches = []
+  let current = shaA
+  global.fetch = async (url, init = {}) => {
+    if (init.method === 'POST' && String(url).endsWith('/api/tasks')) {
+      const task = { id: `BUG-MR-${deskTasks.length + 1}`, status: 'new', notes: init.body.get('notes'), title: init.body.get('title') }
+      posts.push(Object.fromEntries(init.body.entries()))
+      deskTasks.push(task)
+      return { ok: true, json: async () => task }
+    }
+    if (init.method === 'PATCH') {
+      const payload = JSON.parse(init.body)
+      patches.push(payload)
+      Object.assign(deskTasks[0], payload)
+      return { ok: true, json: async () => deskTasks[0] }
+    }
+    return { ok: true, json: async () => deskTasks }
+  }
+  try {
+    await withWorker(async ({ worker, record }) => {
+      await worker.guardMainlines()
+      assert.equal(posts.length, 1)
+      assert.equal(posts[0].title, `MAIN RED repo@${shaA.slice(0, 12)}`)
+      assert.equal(posts[0].priority, 'high')
+      assert.equal(posts[0].aiMode, 'off')
+      assert.match(posts[0].notes, /\[main-red:repo\]/)
+      assert.match(posts[0].description, /src\/flaky\.test\.ts/)
+
+      await worker.guardMainlines()
+      assert.equal(posts.length, 1, 'той самий SHA не створює дубль')
+
+      current = shaB
+      await worker.guardMainlines()
+      assert.equal(posts.length, 1)
+      assert.equal(patches[0].title, `MAIN RED repo@${shaB.slice(0, 12)}`)
+      assert.match(record.comments.at(-1), /^\[конвеєр:main-red\]/)
+    }, { guardianEnabled: true, mainline: () => current })
+  } finally {
+    global.fetch = originalFetch
+  }
+})
+
+test('guardian закриває MAIN RED, коли всі гейти на новому SHA зелені', async () => {
+  const originalFetch = global.fetch
+  const open = { id: 'BUG-MR-1', status: 'new', notes: '[main-red:repo] [main-red-sha:' + shaA + ']', title: 'MAIN RED repo@aaaa' }
+  const patches = []
+  global.fetch = async (_url, init = {}) => {
+    if (init.method === 'PATCH') {
+      patches.push(JSON.parse(init.body))
+      return { ok: true, json: async () => open }
+    }
+    return { ok: true, json: async () => [open] }
+  }
+  try {
+    await withWorker(async ({ worker, record, calls }) => {
+      await worker.guardMainlines()
+      assert.deepEqual(patches, [{ status: 'done' }])
+      assert.match(record.comments[0], /^\[конвеєр:main-green\]/)
+      assert.deepEqual(calls.filter((call) => call.command === 'verify' || call.command === 'build').map((call) => call.command), ['verify', 'build'])
+    }, { guardianEnabled: true, verifyCode: () => 0, mainline: () => shaB })
+  } finally {
+    global.fetch = originalFetch
+  }
+})
+
+test('фонова перевірка guardian поступається релізу, що з’явився, і не кешує результат', async () => {
+  const originalFetch = global.fetch
+  global.fetch = async () => ({ ok: true, json: async () => [{ id: 'R', status: 'in_progress', notes: '', agentRun: { status: 'completed', releaseStatus: 'pending' } }] })
+  try {
+    await withWorker(async ({ worker }) => {
+      worker.runProcess = async (command, _args, options = {}) => {
+        if (command !== 'verify') return { code: 0, output: shaA }
+        return new Promise((resolve) => {
+          const fakeChild = { pid: 0, kill: () => resolve({ code: 1, output: 'killed' }) }
+          options.onChild?.(fakeChild)
+          setTimeout(() => resolve({ code: 1, output: 'late' }), 200)
+        })
+      }
+      const probe = await worker.probeMainlineGate('repo', shaA, gate, { preemptible: true })
+      assert.equal(probe.status, 'aborted')
+      assert.equal(await worker.mainlineGateCache.get(mainlineGateKey('repo', shaA, gate)), null)
+    }, { guardianPreemptPollMs: 10 })
+  } finally {
+    global.fetch = originalFetch
+  }
+})
+
+test('реліз спершу ганяє пов’язані vitest-тести і при падінні не запускає повну батарею', async () => {
+  const { mkdir: makeDirectory, writeFile: write } = await import('node:fs/promises')
+  const root = await mkdtemp(path.join(tmpdir(), 'gba-release-related-'))
+  const worktree = path.join(root, 'worktrees', 'bug-5001', 'web')
+  await makeDirectory(path.join(worktree, 'src'), { recursive: true })
+  await write(path.join(worktree, '.git'), 'gitdir fixture', 'utf8')
+  await write(path.join(worktree, 'src', 'Wizard.tsx'), 'export {}\n', 'utf8')
+  const commands = []
+  const fullVitest = ['npx', 'vitest', 'run', '--silent', '--maxWorkers=8']
+  const worker = new ReleaseWorker({
+    worktreesDirectory: path.join(root, 'worktrees'),
+    deskBaseUrl: 'http://127.0.0.1:9',
+    repoPlan: { web: { branch: 'main', root: path.join(root, 'main'), services: [], checks: [fullVitest, ['npm', 'run', 'build']] } },
+    processRunner: async (command, args) => {
+      commands.push([command, ...args].join(' '))
+      if (command === 'npx' && args[1] === 'related') return { code: 1, output: ' FAIL  src/Wizard.test.tsx > hides storage' }
+      if (args.includes('symbolic-ref')) return { code: 0, output: 'main' }
+      if (args.includes('log')) return { code: 0, output: 'c'.repeat(40) }
+      if (args.includes('rev-parse')) return { code: 0, output: shaA }
+      if (args.includes('merge-base') && args.includes('--is-ancestor')) return { code: 1, output: '' }
+      if (args.includes('merge-base')) return { code: 0, output: shaB }
+      if (args.includes('diff') && args.includes('--name-only')) return { code: 0, output: 'src/Wizard.tsx\nsrc/removed.ts\n' }
+      return { code: 0, output: '' }
+    },
+  })
+  worker.updateRelease = async () => {}
+  try {
+    const outcome = await worker.releaseTask({
+      id: 'BUG-5001',
+      title: 'Related gate',
+      agentRun: { id: 'RUN-5001', releaseRepositories: [], details: JSON.stringify({ releasePlan: { repositories: ['web'], services: [], migrationFiles: [], postDeployChecks: [{ label: 'x', url: 'http://127.0.0.1/health', expectedStatus: 200, contains: '' }] } }) },
+    })
+    assert.equal(outcome.ok, false)
+    assert.equal(outcome.kind, 'validation')
+    assert.deepEqual(outcome.failedGate.check, fullVitest)
+    assert.match(outcome.reason, /^web: перевірка «npx vitest run --silent --maxWorkers=8» впала на швидкому прогоні/)
+    assert.match(outcome.reason, /hides storage/)
+    assert.equal(commands.some((command) => command === 'npx vitest related --run --silent --maxWorkers=8 src/Wizard.tsx'), true)
+    assert.equal(commands.some((command) => command === fullVitest.join(' ')), false)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
