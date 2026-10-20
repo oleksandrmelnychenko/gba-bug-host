@@ -2274,8 +2274,8 @@ export class ReleaseWorker {
     if (!live.ok) return { ok: false, kind: live.kind, reason: live.reason, evidence, report: live.report }
     const ui = await this.runUiVerification(task)
     if (ui) evidence.uiVerification = ui.evidence
+    if (ui && !ui.ok) return { ok: false, kind: ui.kind, reason: ui.reason, evidence, report: [ui.report, live.report].filter(Boolean).join('\n') }
     const report = [live.report, ui?.report].filter(Boolean).join('\n')
-    if (ui && !ui.ok) return { ok: false, kind: ui.kind, reason: ui.reason, evidence, report }
     return { ok: true, evidence, report }
   }
 
@@ -2300,6 +2300,10 @@ export class ReleaseWorker {
     if (!uiSpec) return null
     const at = new Date().toISOString()
     const validation = validateUiSpec(uiSpec, { taskId: task.id })
+    if (!validation.ok && validation.unverifiable) {
+      const report = `UI-перевірку не зараховано: ${validation.errors[0]}`
+      return { ok: true, report, evidence: { status: 'unverifiable', at, errors: validation.errors } }
+    }
     if (!validation.ok) {
       const reason = `UI spec невалідний: ${validation.errors.slice(0, 5).join('; ')}`
       return { ok: false, kind: 'scenario', reason, report: reason, evidence: { status: 'invalid', at, errors: validation.errors } }

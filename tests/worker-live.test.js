@@ -197,7 +197,7 @@ test('fixed без live spec не паркує задачу: одне авто-�
     const second = fixture.store.findAgentRun(followUp.id)
     assert.equal(second.status, 'needs_review')
     assert.equal(second.sessionMode, 'fresh')
-    assert.equal(second.sessionReason, 'trigger:manual')
+    assert.equal(second.sessionReason, 'trigger:auto_continue')
     assert.equal(fixture.store.find('BUG-1051').status, 'blocked')
     assert.equal(fixture.store.find('BUG-1051').agentRun.id, second.id)
     assert.match(fixture.store.commentsForTask('BUG-1051').at(-1).body, /^\[конвеєр:needs_review\]/)

@@ -490,8 +490,38 @@ export function uiVerificationSpecPath(directory, taskId) {
   return path.join(directory, VERIFY_SPEC_DIRECTORY, `${taskId}.ui.json`)
 }
 
+export const UI_VERIFIER_GATED_FLOWS = [
+  { pattern: /нов(?:ий|ого)\s+продаж/i, reason: 'QA Verifier не має права відкрити майстер «Новий продаж» (sales.ukraine.sale.create): кнопка для нього вимкнена' },
+]
+
+function locatorIsValid(locator) {
+  if (typeof locator === 'string') return locator.trim().length > 0
+  if (!isPlainObject(locator)) return false
+  return ['role', 'text', 'label', 'placeholder', 'testId', 'css'].some((key) => typeof locator[key] === 'string' && locator[key].trim())
+}
+
+function stepShapeError(kind, value) {
+  if (['click', 'hover'].includes(kind)) return locatorIsValid(value) ? '' : `${kind} потребує локатор ({"role","name"} | {"text"} | {"label"} | {"placeholder"} | {"testId"} | {"css"})`
+  if (kind === 'waitFor') return locatorIsValid(value) || (isPlainObject(value) && locatorIsValid(value.locator)) ? '' : 'waitFor потребує локатор або {"locator": …}'
+  if (kind === 'fill' || kind === 'select') return isPlainObject(value) && locatorIsValid(value.locator) && typeof value.value === 'string' ? '' : `${kind} має формат {"locator": {…}, "value": "…"}`
+  if (kind === 'press') return isPlainObject(value) && locatorIsValid(value.locator) && typeof value.key === 'string' ? '' : 'press має формат {"locator": {…}, "key": "Enter"}'
+  if (kind === 'waitForResponse') return isPlainObject(value) && typeof value.urlIncludes === 'string' && value.urlIncludes ? '' : 'waitForResponse має формат {"urlIncludes": "…", "status": 200}'
+  if (kind === 'wait') return Number.isInteger(value) && value >= 0 && value <= 30_000 ? '' : 'wait — мілісекунди до 30000'
+  if (kind === 'screenshot') return typeof value === 'string' && /^[A-Za-z0-9._-]{1,60}$/.test(value) ? '' : 'screenshot — коротка назва файлу'
+  return ''
+}
+
 export function validateUiSpec(spec, { taskId = '' } = {}) {
   const errors = []
+  const serializedSpec = JSON.stringify(spec ?? null)
+  const gated = UI_VERIFIER_GATED_FLOWS.find((flow) => flow.pattern.test(serializedSpec))
+  if (gated) {
+    return {
+      ok: false,
+      unverifiable: true,
+      errors: [`${gated.reason}; цей сценарій доводь API spec-ом і компонентними тестами, без .ui.json`],
+    }
+  }
   if (!isPlainObject(spec)) return { ok: false, errors: ['UI spec має бути JSON-об’єктом'] }
   if (typeof spec.name !== 'string' || !/^[A-Za-z0-9._-]{1,80}$/.test(spec.name)) errors.push('UI spec: name має відповідати [A-Za-z0-9._-]{1,80}')
   if (typeof spec.url !== 'string' || !spec.url.startsWith('/') || spec.url.startsWith('//') || spec.url.length > 1000) errors.push('UI spec: url має бути шляхом консолі, що починається з /')
@@ -508,6 +538,8 @@ export function validateUiSpec(spec, { taskId = '' } = {}) {
     if (kinds[0] === 'goto' && (typeof step.goto !== 'string' || !step.goto.startsWith('/') || step.goto.startsWith('//'))) {
       errors.push(`UI spec: крок #${index + 1} goto дозволений лише на шлях консолі`)
     }
+    const shape = stepShapeError(kinds[0], step[kinds[0]])
+    if (shape) errors.push(`UI spec: крок #${index + 1} ${shape}`)
   }
   for (const [index, check] of (Array.isArray(spec.checks) ? spec.checks : []).entries()) {
     if (!isPlainObject(check) || !UI_SPEC_CHECK_KINDS.has(check.type)) errors.push(`UI spec: перевірка #${index + 1} має невідомий type`)

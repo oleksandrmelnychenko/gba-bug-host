@@ -789,3 +789,22 @@ test('закешований «червоний» результат голод�
     assert.equal(calls.filter((call) => call.command === 'verify').length, 1)
   }, { verifyCode: () => 0 })
 })
+
+test('UI spec для екрана, закритого для QA Verifier, не валить реліз, а позначається як неперевірний', async () => {
+  const { validateUiSpec } = await import('../server/verification-spec.js')
+  const wizard = { name: 'bug-1391-ui', url: '/sales/ukraine/all', steps: [{ click: { role: 'button', name: 'Новий продаж' } }], checks: [{ type: 'text', text: 'KD02801' }] }
+  const gated = validateUiSpec(wizard)
+  assert.equal(gated.ok, false)
+  assert.equal(gated.unverifiable, true)
+  assert.match(gated.errors[0], /Новий продаж/)
+  const badShape = validateUiSpec({ name: 'x', url: '/clients', steps: [{ fill: { placeholder: 'Пошук', value: 'KD02801' } }], checks: [{ type: 'text', text: 'KD02801' }] })
+  assert.match(badShape.errors.join(' '), /fill має формат \{"locator"/)
+  assert.equal(validateUiSpec({ name: 'x', url: '/clients', steps: [{ fill: { locator: { placeholder: 'Пошук' }, value: 'KD02801' } }, { press: { locator: { placeholder: 'Пошук' }, key: 'Enter' } }, { wait: 500 }], checks: [{ type: 'text', text: 'KD02801' }] }).ok, true)
+
+  await withWorker(async ({ worker }) => {
+    worker.runProcess = async () => assert.fail('runner не запускається для закритого екрана')
+    const result = await worker.runUiVerification({ id: 'BUG-1391', agentRun: { details: JSON.stringify({ verification: { uiSpec: wizard } }) } })
+    assert.equal(result.ok, true)
+    assert.equal(result.evidence.status, 'unverifiable')
+  })
+})

@@ -144,7 +144,7 @@ export function decideCodexSession({
       : fresh('interrupted-run-without-session')
   }
   if (!previousRun) return fresh('first-run')
-  if (run?.trigger !== 'review_again') return fresh(`trigger:${run?.trigger || 'unknown'}`)
+  if (run?.trigger !== 'review_again') return fresh(`trigger:${run?.triggerReason || run?.trigger || 'unknown'}`)
   if (previousRun.status !== 'completed') return fresh(`previous-verdict:${previousRun.status || 'unknown'}`)
   if (previousRun.releaseStatus === 'blocked' || previousRun.releasePhase === 'failed') return fresh('previous-release-failed')
   if (!previousRun.sessionMode) return fresh('previous-run-legacy')
