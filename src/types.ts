@@ -219,6 +219,98 @@ export const nodeStatusMeta: Record<NodeStatus, { label: string }> = {
   unknown: { label: 'Немає даних' },
 }
 
+export interface MetricsDistribution {
+  count: number
+  p50: number | null
+  p90: number | null
+}
+
+export interface MetricsWeek {
+  weekStart: string
+  finishedRuns: number
+  releasedRuns: number
+  releaseRate: number | null
+  timeToDeployP50: number | null
+  timeToDeployP90: number | null
+}
+
+export interface MetricsFailureReason {
+  reason: string
+  count: number
+  taskIds: string[]
+}
+
+export interface MetricsAlert {
+  kind: 'main_red' | 'long_run' | 'usage_limit' | 'stale_task'
+  taskId?: string
+  taskIds?: string[]
+  title?: string
+  source?: string
+  repo?: string
+  sha?: string
+  check?: string
+  since?: string | null
+  minutes?: number
+  count?: number
+  lastAt?: string | null
+  runStatus?: string
+  releaseStatus?: string
+}
+
+export interface MetricsEvent {
+  kind: string
+  at: string | null
+  detail: string
+}
+
+export interface MetricsTimelineStages {
+  queuedAt: string | null
+  startedAt: string | null
+  finishedAt: string | null
+  gatesAt: string | null
+  publishedAt: string | null
+  deployedAt: string | null
+  verifiedAt: string | null
+  releasedAt: string | null
+  waitingMainlineSince: string | null
+}
+
+export interface MetricsTimelineEntry {
+  taskId: string
+  title: string
+  project: string
+  taskStatus: string
+  runId: string
+  attempt: number
+  trigger: string
+  runStatus: string
+  releaseStatus: string
+  releasePhase: string
+  outcome: string
+  runsInWindow: number
+  stages: MetricsTimelineStages
+  durations: { queueWaitMs: number | null; codexMs: number | null; deployMs: number | null }
+  events: MetricsEvent[]
+}
+
+export interface PipelineMetrics {
+  generatedAt: string
+  days: number
+  since: string
+  totals: {
+    finishedRuns: number
+    releasedRuns: number
+    releaseRate: number | null
+    timeToDeploy: MetricsDistribution
+    codexDuration: MetricsDistribution
+    queueWait: MetricsDistribution
+  }
+  weekly: MetricsWeek[]
+  failureReasons: MetricsFailureReason[]
+  alerts: MetricsAlert[]
+  timeline: MetricsTimelineEntry[]
+}
+
 export const projectMeta: Record<TaskProject, { label: string }> = {
   console: { label: 'GBA Console' },
   ecommerce: { label: 'Ecommerce' },

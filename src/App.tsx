@@ -91,6 +91,7 @@ import {
   type UnreadTaskComment,
 } from './types'
 import { ArchitectureView } from './ArchitectureView'
+import { MetricsView } from './MetricsView'
 import gbaLogo from './assets/brand/gba-logo.svg'
 
 const emptyDraft: TaskDraft = {
@@ -167,13 +168,14 @@ function formatRecordingTime(seconds: number) {
 
 type DateSortDirection = 'desc' | 'asc'
 
-type WorkspaceTab = TaskProject | 'auto' | 'pipeline' | 'architecture'
+type WorkspaceTab = TaskProject | 'auto' | 'pipeline' | 'metrics' | 'architecture'
 
 const workspaceTabs: Array<{ key: WorkspaceTab; label: string }> = [
   { key: 'console', label: projectMeta.console.label },
   { key: 'ecommerce', label: projectMeta.ecommerce.label },
   { key: 'auto', label: 'Логи (авто)' },
   { key: 'pipeline', label: 'Конвеєр' },
+  { key: 'metrics', label: 'Метрики' },
   { key: 'architecture', label: 'Архітектура' },
 ]
 
@@ -3019,7 +3021,7 @@ function DeskApp({ user, onLogout }: { user: AuthUser; onLogout: () => void }) {
         <section className="workspace">
           <nav className="project-tabs" aria-label="Проєкти">
             {workspaceTabs.map((tab) => {
-              if (tab.key === 'architecture') {
+              if (tab.key === 'architecture' || tab.key === 'metrics') {
                 return (
                   <button
                     key={tab.key}
@@ -3053,6 +3055,8 @@ function DeskApp({ user, onLogout }: { user: AuthUser; onLogout: () => void }) {
           </nav>
           {activeTab === 'architecture' ? (
             <ArchitectureView />
+          ) : activeTab === 'metrics' ? (
+            <MetricsView onOpenTask={setSelectedId} />
           ) : activeTab === 'pipeline' ? (
             loading ? (
               <div className="loading-state"><LoaderCircle className="spin" /><span>Завантажую конвеєр…</span></div>

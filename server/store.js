@@ -1608,6 +1608,28 @@ export class TaskStore {
     })
   }
 
+  metricsRows(sinceIso) {
+    const tasks = this.database
+      .prepare('SELECT id, title, status, notes, project, ai_mode, created_at, updated_at FROM tasks')
+      .all()
+    const runs = this.database.prepare(`
+      SELECT id, task_id, trigger, trigger_reason, status, attempt, error, details,
+             release_status, release_phase, release_error, release_evidence, released_at,
+             created_at, started_at, finished_at, heartbeat_at, updated_at
+      FROM agent_runs
+      WHERE created_at >= ?
+         OR status IN ('queued', 'running')
+         OR release_status IN ('pending', 'processing', 'retrying', 'waiting_mainline')
+    `).all(sinceIso)
+    const lastComments = this.database
+      .prepare('SELECT task_id, MAX(created_at) AS last_comment_at FROM task_comments GROUP BY task_id')
+      .all()
+    const pipelineComments = this.database
+      .prepare("SELECT task_id, body, created_at FROM task_comments WHERE created_at >= ? AND body LIKE '[конвеєр:%' ORDER BY created_at")
+      .all(sinceIso)
+    return { tasks, runs, lastComments, pipelineComments }
+  }
+
   saveSystemState(key, payload) {
     const updatedAt = new Date().toISOString()
     this.database

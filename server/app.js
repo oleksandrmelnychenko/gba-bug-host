@@ -17,6 +17,7 @@ import {
 import { BuildNumberSource } from './build-source.js'
 import { TaskStore, isTestingTaskTitle } from './store.js'
 import { TopologyService } from './topology.js'
+import { computeMetrics } from './metrics.js'
 import { TranscriptionError, transcribeAudioWithShell } from './transcription.js'
 
 const allowedStatuses = new Set(['new', 'in_progress', 'ready_for_retest', 'review_again', 'done', 'blocked'])
@@ -430,6 +431,18 @@ export async function createApp(options = {}) {
   app.get('/api/tasks', async (_request, response, next) => {
     try {
       response.json(await store.all())
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  app.get('/api/metrics', (request, response, next) => {
+    try {
+      const requested = Number.parseInt(String(request.query.days ?? '28'), 10)
+      const days = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 180) : 28
+      const now = Date.now()
+      const rows = store.metricsRows(new Date(now - days * 24 * 60 * 60 * 1000).toISOString())
+      response.json(computeMetrics({ ...rows, now, days }))
     } catch (error) {
       next(error)
     }

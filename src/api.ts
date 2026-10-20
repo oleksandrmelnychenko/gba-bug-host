@@ -1,4 +1,4 @@
-import type { AgentRun, AuthUser, BuildInfo, Task, TaskComment, TaskDraft, Topology, UnreadComments } from './types'
+import type { AgentRun, AuthUser, BuildInfo, PipelineMetrics, Task, TaskComment, TaskDraft, Topology, UnreadComments } from './types'
 
 class ApiError extends Error {
   status: number
@@ -56,6 +56,10 @@ export function logout() {
 
 export function getCurrentBuild() {
   return request<BuildInfo>('/api/builds/current')
+}
+
+export function getMetrics(days = 28) {
+  return request<PipelineMetrics>(`/api/metrics?days=${days}`)
 }
 
 export function getTopology() {
