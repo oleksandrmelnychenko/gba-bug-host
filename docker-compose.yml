@@ -100,6 +100,7 @@ services:
       DEV_API_JWT_KEY_FILE: /run/dev-api/jwt-key
       DEV_API_JWT_PRIVATE_KEY_FILE: /run/dev-api/jwt-private-key
       DEV_API_OPERATOR_NET_ID: "${DEV_API_OPERATOR_NET_ID:?Set DEV_API_OPERATOR_NET_ID}"
+      DEV_API_LOGIN_FILE: "${DEV_API_LOGIN_HOST_FILE:+/run/dev-api/login.json}"
     ports:
       - "127.0.0.1:${DEV_API_PROXY_PORT:-4010}:8790"
     networks:
@@ -107,6 +108,7 @@ services:
       - devstack
     volumes:
       - "${DEV_API_OPERATOR_TOKEN_FILE:?Set DEV_API_OPERATOR_TOKEN_FILE}:/run/dev-api/operator-token.json:ro"
+      - "${DEV_API_LOGIN_HOST_FILE:-/dev/null}:/run/dev-api/login.json:ro"
       - "${DEV_API_JWT_KEY_FILE:?Set DEV_API_JWT_KEY_FILE}:/run/dev-api/jwt-key:ro"
       - "${DEV_API_JWT_PRIVATE_KEY_FILE:?Set DEV_API_JWT_PRIVATE_KEY_FILE}:/run/dev-api/jwt-private-key:ro"
 

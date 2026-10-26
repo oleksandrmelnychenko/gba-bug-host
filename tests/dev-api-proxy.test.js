@@ -9,6 +9,7 @@ import {
   PROXY_ERROR_HEADER,
   PROXY_UPSTREAM_AUTH_HEADER,
   createDevApiProxy,
+  createLoginTokenProvider,
   createOperatorTokenProvider,
   evaluateDevApiPath,
   mintOperatorToken,
@@ -238,6 +239,96 @@ test('повільний DEV endpoint дає 504 з маркером timeout, а
     const response = await fetch(`${base}/api/v1/uk/clients/get/top`)
     assert.equal(response.status, 504)
     assert.equal(response.headers.get(PROXY_ERROR_HEADER), 'upstream-timeout')
+  } finally {
+    server.close()
+  }
+})
+
+function jsonResponse(status, payload) {
+  return new Response(JSON.stringify(payload), { status, headers: { 'content-type': 'application/json' } })
+}
+
+function sessionToken(label) {
+  return `h.${Buffer.from(label).toString('base64url')}.s`
+}
+
+test('login provider входить службовим акаунтом, кешує сесійний токен і оновлює його refresh-токеном', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'dev-api-login-'))
+  const credentialsFile = path.join(dir, 'login.json')
+  await writeFile(credentialsFile, JSON.stringify({ Username: 'qa-verifier', Password: 'secret-pass' }))
+  const calls = []
+  let clock = 1_000_000
+  const fetchImpl = async (url, init) => {
+    const body = JSON.parse(init.body)
+    calls.push({ url, body })
+    if (url.endsWith('/usermanagement/token')) return jsonResponse(200, { Body: { AccessToken: sessionToken('login'), RefreshToken: 'r1', AccessTokenExpiresIn: 900 } })
+    if (url.endsWith('/usermanagement/token/refresh')) return jsonResponse(200, { Body: { AccessToken: sessionToken('refresh'), RefreshToken: 'r2', AccessTokenExpiresIn: 900 } })
+    return jsonResponse(404, {})
+  }
+  try {
+    const provider = createLoginTokenProvider({ credentialsFile, baseUrl: 'http://concord:35981/', fetchImpl, now: () => clock })
+    assert.equal(await provider(), sessionToken('login'))
+    assert.equal(await provider(), sessionToken('login'))
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].url, 'http://concord:35981/api/v1/uk/usermanagement/token')
+    assert.deepEqual(calls[0].body, { Username: 'qa-verifier', Password: 'secret-pass' })
+    clock += 800_000
+    assert.equal(await provider(), sessionToken('refresh'))
+    assert.deepEqual(calls[1].body, { Token: 'r1' })
+    assert.equal(calls.length, 2)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('login provider входить заново, коли refresh відхилено, і не розкриває пароль у помилці', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'dev-api-login-'))
+  const credentialsFile = path.join(dir, 'login.json')
+  await writeFile(credentialsFile, JSON.stringify({ username: 'qa-verifier', password: 'secret-pass' }))
+  let logins = 0
+  let rejectLogin = false
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/token/refresh')) return jsonResponse(401, {})
+    if (rejectLogin) return jsonResponse(400, { Message: 'bad' })
+    logins += 1
+    return jsonResponse(200, { Body: { AccessToken: sessionToken(`login-${logins}`), RefreshToken: `r${logins}`, AccessTokenExpiresIn: 900 } })
+  }
+  try {
+    const provider = createLoginTokenProvider({ credentialsFile, baseUrl: 'http://concord:35981', fetchImpl })
+    assert.equal(await provider(), sessionToken('login-1'))
+    provider.invalidate(sessionToken('login-1'))
+    assert.equal(await provider(), sessionToken('login-2'))
+    provider.invalidate(sessionToken('login-2'))
+    rejectLogin = true
+    await assert.rejects(provider(), (error) => {
+      assert.match(error.message, /HTTP 400/)
+      assert.doesNotMatch(error.message, /secret-pass/)
+      return true
+    })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('proxy після upstream 401 один раз оновлює сесію і повторює GET з новим токеном', async () => {
+  const seen = []
+  let current = sessionToken('stale')
+  const tokenProvider = async () => current
+  tokenProvider.invalidate = (token) => {
+    if (token === current) current = sessionToken('fresh')
+  }
+  const fetchImpl = async (url, init) => {
+    seen.push(init.headers.authorization)
+    if (init.headers.authorization === `Bearer ${sessionToken('stale')}`) return new Response('', { status: 401 })
+    return jsonResponse(200, { Body: [1] })
+  }
+  const server = createDevApiProxy({ upstreams: { concord: 'http://concord' }, tokenProvider, fetchImpl, log: () => {} })
+  const base = await listen(server)
+  try {
+    const response = await fetch(`${base}/api/v1/uk/products/assortment/search?value=x`)
+    assert.equal(response.status, 200)
+    assert.equal(response.headers.get(PROXY_UPSTREAM_AUTH_HEADER), null)
+    assert.deepEqual(seen, [`Bearer ${sessionToken('stale')}`, `Bearer ${sessionToken('fresh')}`])
   } finally {
     server.close()
   }

@@ -210,6 +210,96 @@ export function createOperatorTokenProvider({
   }
 }
 
+function readCredential(stored) {
+  const username = stored?.Username ?? stored?.username ?? stored?.UserName ?? stored?.login ?? stored?.Login
+  const password = stored?.Password ?? stored?.password
+  if (typeof username !== 'string' || !username.trim() || typeof password !== 'string' || !password) {
+    throw new Error('файл службового входу DEV має містити Username і Password')
+  }
+  return { username: username.trim(), password }
+}
+
+function tokenExpiry(body, nowMs) {
+  const seconds = Number(body?.AccessTokenExpiresIn ?? body?.accessTokenExpiresIn)
+  if (Number.isFinite(seconds) && seconds > 0) return nowMs + seconds * 1000
+  const raw = body?.AccessTokenExpiresAt ?? body?.accessTokenExpiresAt
+  if (typeof raw === 'string' && raw) {
+    const parsed = Date.parse(/[zZ]|[+-]\d\d:?\d\d$/.test(raw) ? raw : `${raw}Z`)
+    if (Number.isFinite(parsed) && parsed > nowMs) return parsed
+  }
+  return nowMs + 300_000
+}
+
+export function createLoginTokenProvider({
+  credentialsFile,
+  baseUrl,
+  language = 'uk',
+  fetchImpl = fetch,
+  refreshMarginMs = 120_000,
+  timeoutMs = 30_000,
+  now = () => Date.now(),
+}) {
+  const root = `${String(baseUrl).replace(/\/$/, '')}/api/v1/${language}/usermanagement`
+  let cached = null
+  let pending = null
+
+  const requestToken = async (route, payload) => {
+    const response = await fetchImpl(`${root}/${route}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify(payload),
+      redirect: 'manual',
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    if (!response.ok) throw new Error(`службовий вхід DEV відхилено (${route}: HTTP ${response.status})`)
+    const parsed = await response.json().catch(() => null)
+    const body = parsed?.Body ?? parsed?.body ?? parsed
+    const token = body?.AccessToken ?? body?.accessToken
+    if (typeof token !== 'string' || token.split('.').length !== 3) {
+      throw new Error(`службовий вхід DEV повернув відповідь без токена (${route})`)
+    }
+    return {
+      token,
+      refreshToken: body?.RefreshToken ?? body?.refreshToken ?? null,
+      expiresAt: tokenExpiry(body, now()),
+    }
+  }
+
+  const login = async () => {
+    const credential = readCredential(JSON.parse(await readFile(credentialsFile, 'utf8')))
+    return requestToken('token', { Username: credential.username, Password: credential.password })
+  }
+
+  const renew = async () => {
+    if (cached?.refreshToken) {
+      try {
+        return await requestToken('token/refresh', { Token: cached.refreshToken })
+      } catch {
+      }
+    }
+    return login()
+  }
+
+  const provider = async () => {
+    if (cached && cached.expiresAt - refreshMarginMs > now()) return cached.token
+    if (!pending) {
+      pending = renew()
+        .then((next) => {
+          cached = next
+          return next
+        })
+        .finally(() => {
+          pending = null
+        })
+    }
+    return (await pending).token
+  }
+  provider.invalidate = (token) => {
+    if (!token || cached?.token === token) cached = cached ? { ...cached, expiresAt: 0 } : null
+  }
+  return provider
+}
+
 function sendJson(response, status, payload, errorKind = '') {
   const body = JSON.stringify(payload)
   response.writeHead(status, {
@@ -314,14 +404,32 @@ export function createDevApiProxy({
       const timeZone = request.headers['x-time-zone']
       if (typeof timeZone === 'string' && ALLOWED_TIME_ZONE.test(timeZone)) headers['x-time-zone'] = timeZone
 
+      const callUpstream = () => fetchImpl(`${upstreamBase.replace(/\/$/, '')}${policy.path}`, {
+        method,
+        headers,
+        redirect: 'manual',
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+
       let upstreamResponse
       try {
-        upstreamResponse = await fetchImpl(`${upstreamBase.replace(/\/$/, '')}${policy.path}`, {
-          method,
-          headers,
-          redirect: 'manual',
-          signal: AbortSignal.timeout(timeoutMs),
-        })
+        upstreamResponse = await callUpstream()
+        if (upstreamResponse.status === 401 && typeof tokenProvider.invalidate === 'function') {
+          tokenProvider.invalidate(token)
+          let renewed = null
+          try {
+            renewed = await tokenProvider()
+          } catch {
+          }
+          if (renewed && renewed !== token) {
+            try {
+              await upstreamResponse.body?.cancel()
+            } catch {
+            }
+            headers.authorization = `Bearer ${renewed}`
+            upstreamResponse = await callUpstream()
+          }
+        }
       } catch (error) {
         const timedOut = error?.name === 'TimeoutError' || /timeout/i.test(String(error?.message ?? ''))
         sendJson(response, timedOut ? 504 : 502, {
@@ -373,19 +481,24 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     if (!value) throw new Error(`${name} не задано`)
     return value
   }
-  const tokenProvider = createOperatorTokenProvider({
-    operatorTokenFile: required('DEV_API_OPERATOR_TOKEN_FILE'),
-    symmetricKeyFile: required('DEV_API_JWT_KEY_FILE'),
-    privateKeyFile: process.env.DEV_API_JWT_PRIVATE_KEY_FILE ?? '',
-    expectedNetId: required('DEV_API_OPERATOR_NET_ID'),
-    issuer: process.env.DEV_API_JWT_ISSUER ?? 'ConcordCRM',
-    audience: process.env.DEV_API_JWT_AUDIENCE ?? 'gba-api-dev',
-    algorithm: process.env.DEV_API_JWT_ALG ?? '',
-  })
   const upstreams = {
     concord: process.env.DEV_API_CONCORD_UPSTREAM ?? 'http://gba-dev-data-concord-1:35981',
     analytics: process.env.DEV_API_ANALYTICS_UPSTREAM ?? 'http://gba-dev-data-analytics-1:35982',
   }
+  const tokenProvider = process.env.DEV_API_LOGIN_FILE
+    ? createLoginTokenProvider({
+      credentialsFile: process.env.DEV_API_LOGIN_FILE,
+      baseUrl: upstreams.concord,
+    })
+    : createOperatorTokenProvider({
+      operatorTokenFile: required('DEV_API_OPERATOR_TOKEN_FILE'),
+      symmetricKeyFile: required('DEV_API_JWT_KEY_FILE'),
+      privateKeyFile: process.env.DEV_API_JWT_PRIVATE_KEY_FILE ?? '',
+      expectedNetId: required('DEV_API_OPERATOR_NET_ID'),
+      issuer: process.env.DEV_API_JWT_ISSUER ?? 'ConcordCRM',
+      audience: process.env.DEV_API_JWT_AUDIENCE ?? 'gba-api-dev',
+      algorithm: process.env.DEV_API_JWT_ALG ?? '',
+    })
   for (const [name, value] of Object.entries(upstreams)) {
     if (/prod/i.test(value)) throw new Error(`upstream ${name} вказує на prod: ${value}`)
   }
