@@ -111,6 +111,30 @@ export function evaluateDevApiPath(rawTarget) {
   }
 }
 
+export const READ_ONLY_POST_ROUTES = [
+  /^\/api\/v1\/[a-z]{2}\/report\/stocks\/preview$/,
+  /^\/api\/v1\/[a-z]{2}\/report\/constructors\/warehouse-stock-movement\/preview$/,
+]
+
+export const MAX_POST_BODY_BYTES = 256 * 1024
+
+export function isReadOnlyPostRoute(policy) {
+  if (!policy?.ok || policy.upstream !== 'analytics') return false
+  const pathOnly = String(policy.path).split('?')[0]
+  return READ_ONLY_POST_ROUTES.some((route) => route.test(pathOnly))
+}
+
+async function readRequestBody(request, limit) {
+  const chunks = []
+  let size = 0
+  for await (const chunk of request) {
+    size += chunk.length
+    if (size > limit) return { tooLarge: true }
+    chunks.push(chunk)
+  }
+  return { tooLarge: false, buffer: Buffer.concat(chunks) }
+}
+
 function base64Url(value) {
   return Buffer.from(value).toString('base64url')
 }
@@ -358,17 +382,35 @@ export function createDevApiProxy({
       return
     }
 
-    if (method !== 'GET' && method !== 'HEAD') {
-      sendJson(response, 405, { error: `DEV API proxy пропускає лише GET/HEAD; ${method} відхилено` }, 'method')
+    const policy = evaluateDevApiPath(target)
+    const readOnlyPost = method === 'POST' && isReadOnlyPostRoute(policy)
+    if (method !== 'GET' && method !== 'HEAD' && !readOnlyPost) {
+      sendJson(response, 405, { error: `DEV API proxy пропускає лише GET/HEAD і POST попереднього перегляду звітів; ${method} відхилено` }, 'method')
       finish(405, { refused: 'method' })
       return
     }
 
-    const policy = evaluateDevApiPath(target)
     if (!policy.ok) {
       sendJson(response, 403, { error: `DEV API proxy відхилив маршрут: ${policy.reason}` }, 'policy')
       finish(403, { refused: 'policy', reason: policy.reason })
       return
+    }
+
+    let requestBody = null
+    if (readOnlyPost) {
+      const contentType = String(request.headers['content-type'] ?? '').toLowerCase()
+      if (!contentType.startsWith('application/json')) {
+        sendJson(response, 415, { error: 'POST попереднього перегляду приймає лише application/json' }, 'policy')
+        finish(415, { refused: 'content-type' })
+        return
+      }
+      const body = await readRequestBody(request, MAX_POST_BODY_BYTES)
+      if (body.tooLarge) {
+        sendJson(response, 413, { error: `тіло запиту більше за ${MAX_POST_BODY_BYTES} байт` }, 'policy')
+        finish(413, { refused: 'body-size' })
+        return
+      }
+      requestBody = body.buffer
     }
 
     const upstreamBase = upstreams[policy.upstream]
@@ -404,9 +446,11 @@ export function createDevApiProxy({
       const timeZone = request.headers['x-time-zone']
       if (typeof timeZone === 'string' && ALLOWED_TIME_ZONE.test(timeZone)) headers['x-time-zone'] = timeZone
 
+      if (requestBody) headers['content-type'] = 'application/json'
       const callUpstream = () => fetchImpl(`${upstreamBase.replace(/\/$/, '')}${policy.path}`, {
         method,
         headers,
+        ...(requestBody ? { body: requestBody } : {}),
         redirect: 'manual',
         signal: AbortSignal.timeout(timeoutMs),
       })

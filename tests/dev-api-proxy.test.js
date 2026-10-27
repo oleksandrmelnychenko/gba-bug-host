@@ -12,6 +12,7 @@ import {
   createLoginTokenProvider,
   createOperatorTokenProvider,
   evaluateDevApiPath,
+  isReadOnlyPostRoute,
   mintOperatorToken,
   rsaKeyId,
 } from '../server/dev-api-proxy.js'
@@ -332,4 +333,40 @@ test('proxy після upstream 401 один раз оновлює сесію і
   } finally {
     server.close()
   }
+})
+
+test('proxy пропускає POST лише для попереднього перегляду звітів і передає JSON-тіло з серверним credential', async () => {
+  const seen = []
+  const fetchImpl = async (url, init) => {
+    seen.push({ url, method: init.method, body: init.body ? Buffer.from(init.body).toString('utf8') : null, contentType: init.headers['content-type'], authorization: init.headers.authorization })
+    return jsonResponse(200, { Body: { ok: true } })
+  }
+  const tokenProvider = async () => sessionToken('reports')
+  const server = createDevApiProxy({ upstreams: { concord: 'http://concord', analytics: 'http://analytics' }, tokenProvider, fetchImpl, log: () => {} })
+  const base = await listen(server)
+  try {
+    const ok = await fetch(`${base}/analytics/api/v1/uk/report/stocks/preview`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ dataSource: 35 }) })
+    assert.equal(ok.status, 200)
+    assert.deepEqual(seen[0], { url: 'http://analytics/api/v1/uk/report/stocks/preview', method: 'POST', body: '{"dataSource":35}', contentType: 'application/json', authorization: `Bearer ${sessionToken('reports')}` })
+    const movement = await fetch(`${base}/analytics/api/v1/uk/report/constructors/warehouse-stock-movement/preview`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    assert.equal(movement.status, 200)
+    for (const path of ['/analytics/api/v1/uk/report/stocks/export', '/api/v1/uk/report/stocks/preview', '/analytics/api/v1/uk/report/stocks/preview/extra']) {
+      const refused = await fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+      assert.equal(refused.status, 405, path)
+    }
+    const wrongType = await fetch(`${base}/analytics/api/v1/uk/report/stocks/preview`, { method: 'POST', headers: { 'content-type': 'text/plain' }, body: 'x' })
+    assert.equal(wrongType.status, 415)
+    const tooLarge = await fetch(`${base}/analytics/api/v1/uk/report/stocks/preview`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ blob: 'x'.repeat(300 * 1024) }) })
+    assert.equal(tooLarge.status, 413)
+    assert.equal(seen.length, 2)
+  } finally {
+    server.close()
+  }
+})
+
+test('read-only POST allowlist визнає лише точні маршрути analytics', () => {
+  assert.equal(isReadOnlyPostRoute(evaluateDevApiPath('/analytics/api/v1/uk/report/stocks/preview')), true)
+  assert.equal(isReadOnlyPostRoute(evaluateDevApiPath('/analytics/api/v1/uk/report/stocks/preview?x=1')), true)
+  assert.equal(isReadOnlyPostRoute(evaluateDevApiPath('/api/v1/uk/report/stocks/preview')), false)
+  assert.equal(isReadOnlyPostRoute(evaluateDevApiPath('/analytics/api/v1/uk/sales/update/file')), false)
 })
