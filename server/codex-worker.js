@@ -722,13 +722,13 @@ export function buildPrompt(task, run, mediaPaths, worktrees, referenceRepositor
     : 'Середовище перевірок (мережі немає — нічого не встановлюй і не оновлюй):'
   const environmentNet = networkAccess
     ? [
-        '- .NET SDK 10 стоїть у /usr/share/dotnet і доступний як dotnet; first-run стан dotnet і NuGet (~/.dotnet, ~/.local/share/NuGet/Migrations) підготовлений worker-ом до запуску, а кеш NuGet прогрітий і доступний лише на читання. Не перенаправляй DOTNET_CLI_HOME, XDG_DATA_HOME чи TMPDIR — це ламає first-run (Read-only file system або NuGet-Migrations mutex). Якщо obj/project.assets.json уже є, додавай --no-restore.',
+        '- .NET SDK 10 і 11 стоять у /usr/share/dotnet і доступний як dotnet; first-run стан dotnet і NuGet (~/.dotnet, ~/.local/share/NuGet/Migrations) підготовлений worker-ом до запуску, а кеш NuGet прогрітий і доступний лише на читання. Не перенаправляй DOTNET_CLI_HOME, XDG_DATA_HOME чи TMPDIR — це ламає first-run (Read-only file system або NuGet-Migrations mutex). Якщо obj/project.assets.json уже є, додавай --no-restore.',
         '- Якщо dotnet усе ж падає ДО компіляції з «Read-only file system: /root/.dotnet» або «NuGet-Migrations», це дефект середовища worker-а: зафіксуй дослівну помилку як конкретний blocker, а не як провал тестів.',
         '- dotnet test, VSTest/testhost, vitest і next build у цьому sandbox працюють повноцінно: запускай точні тести зачеплених репозиторіїв і став PASS/FAIL за їхнім фактичним результатом. Помилка socket/port тепер є реальним сигналом, а не обмеженням середовища.',
         '- Публічні DEV vhost-и (*-dev.85.17.167.167.nip.io) — лише read-only GET; авторизовані виклики DEV API — тільки через read-only проксі із секції «Live-перевірка на DEV». Ніяких mutation-запитів, логінів, токенів чи змін даних.',
       ].join('\n')
     : [
-        '- .NET SDK 10 стоїть у /usr/share/dotnet і доступний як dotnet; кеш NuGet прогрітий, тож dotnet build працює офлайн (якщо restore лізе в мережу, додай --no-restore).',
+        '- .NET SDK 10 і 11 стоять у /usr/share/dotnet і доступний як dotnet; кеш NuGet прогрітий, тож dotnet build працює офлайн (якщо restore лізе в мережу, додай --no-restore).',
         '- Спочатку пробуй точні dotnet test: у поточному sandbox VSTest/testhost зазвичай працює. Якщо саме sandbox заборонить socket/process, зафіксуй дослівну інфраструктурну помилку, але не видавай її за regression.',
       ].join('\n')
 

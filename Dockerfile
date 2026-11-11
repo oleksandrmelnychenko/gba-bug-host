@@ -21,7 +21,7 @@ FROM app-runtime AS worker
 # sessions survive worker recreates. Keep the CLI schema compatible with the
 # host cache and configured model. Update this pin alongside the host CLI.
 ARG CODEX_VERSION=0.167.0
-ARG DOTNET_CHANNEL=10.0
+ARG DOTNET_CHANNELS="10.0 11.0"
 ENV DOTNET_ROOT=/usr/share/dotnet
 ENV PATH=$PATH:/usr/share/dotnet
 ENV DOTNET_CLI_TELEMETRY_OPTOUT=1 \
@@ -34,7 +34,7 @@ RUN apt-get update \
         python3 python3-openpyxl python3-xlrd \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
-    && bash /tmp/dotnet-install.sh --channel "${DOTNET_CHANNEL}" --install-dir "${DOTNET_ROOT}" \
+    && for channel in ${DOTNET_CHANNELS}; do bash /tmp/dotnet-install.sh --channel "${channel}" --install-dir "${DOTNET_ROOT}"; done \
     && ln -sf "${DOTNET_ROOT}/dotnet" /usr/local/bin/dotnet \
     && rm /tmp/dotnet-install.sh \
     && npm install --global "@openai/codex@${CODEX_VERSION}"
