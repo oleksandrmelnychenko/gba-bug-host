@@ -18,6 +18,7 @@ const RELEASE_MARKER = /\[released:([^\]]+)\]/g
 const BLOCKED_MARKER = /\[release-blocked:([^\]]+)\]/g
 const SENTINEL_MARKER = /\[sentinel:[0-9a-f]{12}\]/
 const MAX_RELEASE_ATTEMPTS = 3
+const DEV_MSSQL_CONTAINER = process.env.GBA_DEV_MSSQL_CONTAINER ?? 'gba-dev-gba-mssql-1'
 export const MAX_VERIFICATION_ATTEMPTS = 3
 const PIPELINE_OWNED_TASK_STATUSES = new Set(['new', 'in_progress', 'blocked'])
 const GATE_FAILURE_PATTERN = /^([A-Za-z0-9._-]+): перевірка «(.+)» впала/
@@ -788,6 +789,21 @@ export class ReleaseWorker {
     }
   }
 
+  async devDataSyncRunning() {
+    const query = "SET NOCOUNT ON; SELECT CASE WHEN EXISTS (SELECT 1 FROM dbo.DataSyncPipelineRun WHERE Status = N'Running' "
+      + "AND StartedAtUtc > DATEADD(hour, -12, SYSUTCDATETIME())) AND EXISTS (SELECT 1 FROM sys.dm_exec_sessions "
+      + "WHERE program_name LIKE N'GBA DataSync Worker%') THEN 'SYNC_RUNNING' ELSE 'SYNC_IDLE' END"
+    try {
+      const probe = await this.runProcess('docker', [
+        'exec', '-e', `GBA_SYNC_PROBE=${query}`, DEV_MSSQL_CONTAINER, 'bash', '-lc',
+        '/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -d ConcordDb_V5 -h -1 -W -l 5 -t 20 -Q "$GBA_SYNC_PROBE"',
+      ], { timeoutMs: 60 * 1000 })
+      return probe?.code === 0 && /\bSYNC_RUNNING\b/.test(String(probe.output ?? ''))
+    } catch {
+      return false
+    }
+  }
+
   async runMutation(command, args, options = {}) {
     await this.assertLease()
     let child = null
@@ -1017,6 +1033,14 @@ export class ReleaseWorker {
     if (!verification.ok) {
       for (const entry of entries) {
         await this.updateRelease(entry.task, { status: 'processing', phase: 'deploying', evidence: entry.evidence })
+      }
+      if (services.includes('data-concord') && await this.devDataSyncRunning()) {
+        await failAll({
+          kind: 'transient',
+          phase: 'deploying',
+          reason: 'Триває синхронізація з 1С на DEV — перезапуск сервера відкладено до її завершення.',
+        })
+        return
       }
       await this.assertLease()
       const deploymentEnvironment = this.deploymentEnvironment(repositoryEvidence)
