@@ -254,3 +254,13 @@ test('перший невдалий опит — попередження, др�
   assert.equal(statusFromProbe(timeout, { consecutiveFailures: 1 }).status, 'warn')
   assert.equal(statusFromProbe(timeout, { consecutiveFailures: 2 }).status, 'down')
 })
+
+test('регламентні запуски є в інвентарі, а зняті з хоста планувальники — ні', () => {
+  const units = inventoryUnits()
+  for (const unit of ['gba-sync-nightly.timer', 'gba-ai-fleet-refresh.timer', 'gba-e2e-nightly.timer', 'gba-procure-scheduler.service']) {
+    assert.ok(units.includes(unit), `${unit} має опитуватись`)
+  }
+  assert.equal(units.includes('gba-reco-scheduler.service'), false)
+  assert.equal(units.includes('gba-nba-scheduler.service'), false)
+  assert.deepEqual(TOPOLOGY_NODES.find((node) => node.id === 'sync-nightly').units, ['gba-sync-nightly.timer'])
+})

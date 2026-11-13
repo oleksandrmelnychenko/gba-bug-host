@@ -169,8 +169,8 @@ export const TOPOLOGY_NODES = [
   { id: 'ai-forecast', label: 'forecast', group: 'ai', kind: 'ai', subtitle: ':8006 · прогноз продажів', probe: ai(8006), unit: 'gba-forecast.service' },
   {
     id: 'ai-schedulers', label: 'Планувальники', group: 'ai', kind: 'scheduler',
-    subtitle: 'reco · procure · nba', units: ['gba-reco-scheduler.service', 'gba-procure-scheduler.service', 'gba-nba-scheduler.service'],
-    note: 'прогрів кешів за розкладом',
+    subtitle: 'procure · щоденний цикл флоту 05:00', units: ['gba-procure-scheduler.service', 'gba-ai-fleet-refresh.timer'],
+    note: 'планувальник procure та щоденне оновлення всіх семи сервісів; результат циклу — /var/lib/gba-ai-fleet/latest.json',
   },
   {
     id: 'ai-retrain', label: 'Перетренування', group: 'ai', kind: 'timer',
@@ -179,6 +179,16 @@ export const TOPOLOGY_NODES = [
   },
 
   {
+    id: 'sync-nightly', label: 'Нічна синхронізація 1С', group: 'backend', kind: 'timer',
+    subtitle: '02:00 Київ · gba-sync@light', units: ['gba-sync-nightly.timer'],
+    note: 'сесії синхронізації Fenix та AMG сервісним акаунтом; результат запуску — /var/lib/gba-sync/latest.json',
+  },
+  {
+    id: 'e2e-nightly', label: 'Нічні E2E', group: 'qa', kind: 'timer',
+    subtitle: 'Playwright-стенд (timer)', units: ['gba-e2e-nightly.timer'],
+    note: 'нічний прогін E2E на ізольованому стенді',
+  },
+  {
     id: 'desk-worker', label: 'Codex-воркер', group: 'qa', kind: 'worker',
     subtitle: 'worktree + Codex-фікс', container: 'gba-bug-host-worker-1',
     note: 'на кожну задачу створює git worktree у репозиторіях проєкту й жене Codex',
@@ -186,7 +196,7 @@ export const TOPOLOGY_NODES = [
   {
     id: 'desk-sentinel', label: 'Вартовий логів', group: 'qa', kind: 'worker',
     subtitle: 'docker logs → задачі', container: 'gba-bug-host-sentinel-1',
-    note: 'стежить за ERROR у 4 dev-контейнерах і заводить [AUTO]-задачі',
+    note: 'стежить за ERROR у 4 dev-контейнерах і за результатом нічної синхронізації та циклу AI-флоту; заводить [AUTO]-задачі',
   },
   {
     id: 'desk-release', label: 'Реліз-воркер', group: 'qa', kind: 'unit',
@@ -235,6 +245,13 @@ export const TOPOLOGY_EDGES = [
   { from: 'ai-schedulers', to: 'ai-reco', label: 'прогрів' },
   { from: 'ai-schedulers', to: 'ai-procure' },
   { from: 'ai-schedulers', to: 'ai-nba' },
+  { from: 'ai-schedulers', to: 'ai-solvency' },
+  { from: 'ai-schedulers', to: 'ai-pricing' },
+  { from: 'ai-schedulers', to: 'ai-products' },
+  { from: 'ai-schedulers', to: 'ai-forecast' },
+  { from: 'sync-nightly', to: 'concord', label: 'запускає сесії' },
+  { from: 'desk-sentinel', to: 'sync-nightly', label: 'читає результат' },
+  { from: 'desk-sentinel', to: 'ai-schedulers', label: 'читає результат' },
   { from: 'ai-retrain', to: 'ai-nba', label: 'моделі' },
   { from: 'ai-retrain', to: 'ai-solvency' },
   { from: 'desk-sentinel', to: 'concord', label: 'читає логи' },

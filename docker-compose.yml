@@ -132,10 +132,13 @@ services:
       SENTINEL_MAINTENANCE_FENCES: "${SENTINEL_MAINTENANCE_FENCES:-}"
       SENTINEL_MAINTENANCE_DEPENDENCIES: "${SENTINEL_MAINTENANCE_DEPENDENCIES:-}"
       SENTINEL_MAINTENANCE_GRACE_MS: "${SENTINEL_MAINTENANCE_GRACE_MS:-120000}"
+      SENTINEL_RUN_POLL_MS: "${SENTINEL_RUN_POLL_MS:-60000}"
       QA_DESK_INTERNAL_API_TOKEN: "${QA_DESK_INTERNAL_API_TOKEN:?Set QA_DESK_INTERNAL_API_TOKEN in the server environment}"
     volumes:
       - qa-data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
+      - "${GBA_SYNC_STATE_HOST_DIR:-/var/lib/gba-sync}:/host-state/gba-sync:ro"
+      - "${GBA_AI_FLEET_STATE_HOST_DIR:-/var/lib/gba-ai-fleet}:/host-state/gba-ai-fleet:ro"
 
 volumes:
   qa-data:
