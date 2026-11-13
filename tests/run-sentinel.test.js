@@ -255,3 +255,18 @@ test('наскрізно через справжній desk-API: створен�
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('перше опитування чекає готовності desk-API, а не падає з fetch failed на старті', async (context) => {
+  let calls = 0
+  context.mock.method(globalThis, 'fetch', async (url) => {
+    assert.equal(String(url), 'http://desk.test/api/health')
+    calls += 1
+    if (calls < 3) throw new TypeError('fetch failed')
+    return new Response('{}', { status: 200 })
+  })
+  const watcher = new RunStateSentinel({ deskBaseUrl: 'http://desk.test', sources: [] })
+  assert.equal(await watcher.waitForDesk(5, 1), true)
+  assert.equal(calls, 3)
+  calls = -100
+  assert.equal(await watcher.waitForDesk(2, 1), false)
+})

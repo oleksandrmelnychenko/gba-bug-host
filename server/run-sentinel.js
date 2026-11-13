@@ -144,8 +144,18 @@ export class RunStateSentinel {
     }
     for (const source of this.sources) console.log(`[sentinel] стежу за результатом запусків: ${source.label} (${source.file})`)
     const poll = () => void this.pollOnce().catch((error) => console.error(`[sentinel] запуски: ${error.message}`))
+    await this.waitForDesk()
     poll()
     setInterval(poll, this.pollMs).unref?.()
+  }
+
+  async waitForDesk(attempts = 15, pauseMs = 2000) {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const response = await fetch(`${this.deskBaseUrl}/api/health`).catch(() => null)
+      if (response?.ok) return true
+      await new Promise((resolve) => setTimeout(resolve, pauseMs))
+    }
+    return false
   }
 
   async pollOnce() {
